@@ -6,6 +6,8 @@ import { CodeMode, Tool } from "../src/index.js"
 const run = (
   text: string,
   code = "const r = await tools.get({}); return { type: typeof r, value: r, raw: String(r) }",
+  output?: Schema.Decoder<unknown>,
+  project = true,
 ) =>
   Effect.runPromise(
     CodeMode.execute({
@@ -13,7 +15,9 @@ const run = (
         get: Tool.make({
           description: "JSON text",
           input: Schema.Struct({}),
-          run: () => Effect.succeed(CodeMode.fromJsonText(text)),
+          output,
+          // project只切换宿主是否显式投影，原文和输出decoder保持相同，便于隔离隐式JSON解析的回归。
+          run: () => Effect.succeed(project ? CodeMode.fromJsonText(text) : text),
         }),
       },
       code,
@@ -26,6 +30,7 @@ test("opted-in object and array support structured operations and exact source c
     ok: true,
     value: { type: "object", value: { items: [1] }, raw: ' {"items":[1]} ' },
   })
+  // 数组的默认String是1,2，保留方括号和空格才能证明读取了源文本，而不是普通数组强制转换。
   expect(await run(" [1,2] ")).toMatchObject({ ok: true, value: { type: "object", value: [1, 2], raw: " [1,2] " } })
 })
 
@@ -48,6 +53,7 @@ for (const [label, text] of Object.entries({
   boolean: "false",
   string: '"abc"',
   null: "null",
+  // 畸形JSON与空字符串也保持成功文本；投影失败不等于工具业务失败。
   malformed: "{ nope",
   empty: "",
 }))
@@ -62,19 +68,8 @@ test("ordinary and declared strings are never implicitly projected", async () =>
   for (const output of [undefined, Schema.String]) {
     const raw = ' {"items":[1]} '
     // 两种输出声明都返回同一份原文，排除按内容自动推断格式的实现。
-    const result = await Effect.runPromise(
-      CodeMode.execute({
-        tools: {
-          get: Tool.make({
-            description: "ordinary text",
-            input: Schema.Struct({}),
-            output,
-            run: () => Effect.succeed(raw),
-          }),
-        },
-        code: "const r = await tools.get({}); return { type: typeof r, value: r }",
-      }),
-    )
+    const result = await run(raw, "const r = await tools.get({}); return { type: typeof r, value: r }", output, false)
+    // 同一段可解析JSON在project=false时仍是string，声明Schema.String也不能偷偷启用投影。
     expect(result).toMatchObject({ ok: true, value: { type: "string", value: raw } })
   }
 })
@@ -83,6 +78,7 @@ test("native operations and internal container copies preserve source", async ()
   // Map/Set 与数组方法会经过内部数据复制；这些副本仍需支持原始文本访问。
   const raw = ' {"items":[1,2]} '
   expect(
+    // sum证明结构化读取可用，template、alias和容器回读同时要求来源元数据随内部值保留。
     await run(
       raw,
       `const r = await tools.get({});
@@ -123,6 +119,7 @@ test("Notebook reuse keeps readonly source snapshot after business mutation", as
     ok: true,
     value: "Attempted to assign to readonly property.",
   })
+  // 先尝试覆写只读text后再修改items，分别约束元数据不可改与业务数组仍可变。
   expect(
     await Effect.runPromise(
       // 变更后的 JSON 与原始 String 同时断言，区分业务快照和来源快照。
@@ -136,6 +133,7 @@ test("business text collisions retain their original type and writable field", a
   for (const text of ["business", 0, false, null]) {
     const raw = JSON.stringify({ text })
     expect(
+      // original保留碰撞字段的原类型，text与json显示业务写入生效，raw则仍是修改前来源。
       await run(
         raw,
         'const r=await tools.get({});const original=r.text;r.text="edited";return {original,text:r.text,raw:String(r),json:JSON.stringify(r)}',
@@ -173,6 +171,7 @@ test("host arguments and final results carry only business data", async () => {
   // 宿主既要得到可用业务结构，也不能取得沙箱便利属性。
   expect(seen).toEqual([{ items: [1] }])
   expect(Object.getOwnPropertyNames(seen[0])).toEqual(["items"])
+  // echo返回未投影的普通对象，String(echoed)回到默认形式；不能凭同一业务形状继承先前的来源。
   expect(result).toMatchObject({
     ok: true,
     value: { r: { items: [1] }, echoed: { items: [1] }, echoedRaw: "[object Object]" },
@@ -192,19 +191,12 @@ test("output schemas see original fields without a fabricated optional text", as
     items: Schema.Array(Schema.Number),
     text: Schema.optionalKey(Schema.String),
   })
-  const result = await Effect.runPromise(
-    CodeMode.execute({
-      tools: {
-        get: Tool.make({
-          description: "optional output",
-          input: Schema.Struct({}),
-          output,
-          run: () => Effect.succeed(CodeMode.fromJsonText(raw)),
-        }),
-      },
-      code: "const r=await tools.get({});return {keys:Object.keys(r),json:JSON.stringify(r),raw:String(r),text:r.text}",
-    }),
+  const result = await run(
+    raw,
+    "const r=await tools.get({});return {keys:Object.keys(r),json:JSON.stringify(r),raw:String(r),text:r.text}",
+    output,
   )
+  // keys与json要求text不成为业务字段，raw与text同时要求便利读取仍可用，不能简单删掉别名通过测试。
   expect(result).toMatchObject({ ok: true, value: { keys: ["items"], json: raw, raw, text: raw } })
 })
 
@@ -216,19 +208,7 @@ test("required text and declared string still reject projected business objects"
     Schema.Struct({ items: Schema.Array(Schema.Number), text: Schema.String }),
   ]
   for (const output of outputs) {
-    const result = await Effect.runPromise(
-      CodeMode.execute({
-        tools: {
-          get: Tool.make({
-            description: "invalid output",
-            input: Schema.Struct({}),
-            output,
-            run: () => Effect.succeed(CodeMode.fromJsonText('{"items":[1]}')),
-          }),
-        },
-        code: "try {await tools.get({})} catch(e) {return e.message}",
-      }),
-    )
+    const result = await run('{"items":[1]}', "try {await tools.get({})} catch(e) {return e.message}", output)
     // 错误必须来自原有输出验证，而不是改成成功原文或重新调用工具。
     expect(result).toMatchObject({ ok: true, value: "Invalid output from tool 'get'." })
   }
@@ -253,19 +233,12 @@ test("object output decoding runs once and source follows the transformed root",
       encode: SchemaGetter.passthrough({ strict: false }),
     }),
   )
-  const result = await Effect.runPromise(
-    CodeMode.execute({
-      tools: {
-        get: Tool.make({
-          description: "transformed output",
-          input: Schema.Struct({}),
-          output,
-          run: () => Effect.succeed(CodeMode.fromJsonText(raw)),
-        }),
-      },
-      code: "const r=await tools.get({});return {count:r.count,keys:Object.keys(r),json:JSON.stringify(r),raw:String(r),text:r.text}",
-    }),
+  const result = await run(
+    raw,
+    "const r=await tools.get({});return {count:r.count,keys:Object.keys(r),json:JSON.stringify(r),raw:String(r),text:r.text}",
+    output,
   )
+  // 新根上的业务值证明转换已生效，原文仍保留则证明来源没有错误绑定在旧对象上。
   expect(result).toMatchObject({ ok: true, value: { count: 1, keys: ["count"], json: '{"count":1}', raw, text: raw } })
   // 计数只辅助验证有副作用的解码器；业务输出也已独立断言。
   expect(calls).toBe(1)
@@ -284,19 +257,12 @@ test("primitive output transformation remains primitive and runs once", async ()
     }),
   )
   // String(r) 应使用转换后的标量内容，不能错误恢复转换前 JSON。
-  const result = await Effect.runPromise(
-    CodeMode.execute({
-      tools: {
-        get: Tool.make({
-          description: "primitive output",
-          input: Schema.Struct({}),
-          output,
-          run: () => Effect.succeed(CodeMode.fromJsonText('{"items":[1]}')),
-        }),
-      },
-      code: "const r=await tools.get({});return {type:typeof r,value:r,raw:String(r)}",
-    }),
+  const result = await run(
+    '{"items":[1]}',
+    "const r=await tools.get({});return {type:typeof r,value:r,raw:String(r)}",
+    output,
   )
+  // 转换产物是标量，typeof和值都应保持string；若沿用对象来源，raw会错误回到原JSON。
   expect(result).toMatchObject({ ok: true, value: { type: "string", value: "count:1", raw: "count:1" } })
   // 计数只辅助验证有副作用的解码器；业务输出也已独立断言。
   expect(calls).toBe(1)

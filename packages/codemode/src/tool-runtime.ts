@@ -28,14 +28,12 @@ import {
 
 const estimateTokens = (input: string) => Math.max(0, Math.round(input.length / 4))
 
-// 分段是文件结构；仅 description 与选中的 intro 进入模型，独立维护注释段不输出。
+// Section markers are file structure, not model instructions; retain the upstream text verbatim.
 const prompt = Object.fromEntries(
-  DESCRIPTION.trimEnd()
-    .split(/\r?\n(?=@@ )/)
-    .map((block) => {
-      const lines = block.split(/\r?\n/)
-      return [lines[0].slice(3), lines.slice(1).join("\n")] as const
-    }),
+  DESCRIPTION.trimEnd().split(/\r?\n(?=@@ )/).map((block) => {
+    const lines = block.split(/\r?\n/)
+    return [lines[0].slice(3), lines.slice(1).join("\n")] as const
+  }),
 )
 
 export const description = prompt.description
@@ -118,6 +116,10 @@ const SearchItem = Schema.Struct({
   path: Schema.String,
   description: Schema.String,
   signature: Schema.String,
+  // 详情保留 schema 元数据；不可表示的侧用标记说明，不能拖垮整页发现。
+  inputSchema: Schema.Unknown,
+  outputSchema: Schema.optionalKey(Schema.Unknown),
+  schemaUnavailable: Schema.optionalKey(Schema.Array(Schema.Literals(["input", "output"]))),
 })
 const SearchOutput = Schema.Struct({
   items: Schema.Array(SearchItem),
@@ -367,6 +369,9 @@ export type DiscoveryPlan = {
 
 export type SearchEntry = {
   readonly description: ToolDescription
+  // 索引只保存原合同引用，命中时才生成详情，完整目录不预先承受序列化成本。
+  readonly inputContract: Definition["inputContract"]
+  readonly outputContract: Definition["output"]
   readonly pathWords: ReadonlyArray<string>
   /** Lowercased path + description + input property names/descriptions, for substring matching. */
   readonly searchText: string
@@ -399,8 +404,7 @@ const termForms = (term: string): Array<string> => {
   return forms
 }
 
-// 相同分数必须有规范路径的固定次序，不能受注册顺序影响。
-const compareText = (left: string, right: string) => (left < right ? -1 : left > right ? 1 : 0)
+const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0
 
 // 搜索与拼写恢复共用官方排序；完整路径词优先于偶然的子串命中。
 const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchEntry> => {
@@ -423,7 +427,6 @@ const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchE
 const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => ({
   _tag: "CodeModeTool",
   description: "Search available tools",
-  // 内置搜索也保留同一个真实输入合同，不以描述器另造 schema。
   inputContract: SearchInput,
   input: SearchInput,
   output: SearchOutput,
@@ -434,18 +437,13 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
       const query = request.query ?? ""
       const offset = request.offset ?? 0
       // tools前缀属于模型看到的调用表达式；仅在目录自身未占用该名字时剥离。
-      const namespace =
-        request.namespace !== undefined && !searchIndex.some((entry) => entry.description.path.startsWith("tools."))
-          ? request.namespace === "tools"
-            ? undefined
-            : request.namespace.replace(/^tools\./, "")
-          : request.namespace
+      const namespace = request.namespace !== undefined && !searchIndex.some((entry) => entry.description.path.startsWith("tools."))
+        ? request.namespace === "tools" ? undefined : request.namespace.replace(/^tools\./, "")
+        : request.namespace
       const scoped =
         namespace === undefined
           ? searchIndex
-          : searchIndex.filter(
-              (entry) => entry.description.path === namespace || entry.description.path.startsWith(`${namespace}.`),
-            )
+          : searchIndex.filter((entry) => entry.description.path === namespace || entry.description.path.startsWith(`${namespace}.`))
       // A query that names one tool path exactly (canonical path or rendered JavaScript
       // expression) is a lookup, not a search: return that tool alone.
       const trimmed = query.trim()
@@ -457,16 +455,49 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
               (entry) => entry.description.path === pathQuery || toolExpression(entry.description.path) === trimmed,
             )
       const ranked = exact !== undefined ? [exact] : rank(scoped, query)
-      const items = ranked.slice(offset, offset + (request.limit ?? defaultSearchLimit)).map(({ description }) => ({
-        ...description,
-        path: toolExpression(description.path),
-      }))
-      const remaining = Math.max(0, ranked.length - offset - items.length)
-      return {
-        items,
-        remaining,
-        next: remaining > 0 ? { offset: offset + items.length } : null,
+      const items: Array<typeof SearchItem.Type> = []
+      // 每加入完整工具后重新计算续页位置，页大小由字符预算或条数上限先达到者决定。
+      const response = () => {
+        const remaining = Math.max(0, ranked.length - offset - items.length)
+        return { items, remaining, next: remaining > 0 ? { offset: offset + items.length } : null }
       }
+      for (const { description, inputContract, outputContract } of ranked.slice(
+        offset,
+        offset + (request.limit ?? defaultSearchLimit),
+      )) {
+        // 诊断按条目局部保存，前一个工具不可描述不会污染后一个工具的状态。
+        const schemaUnavailable: Array<"input" | "output"> = []
+        // 合法 Effect 合同不一定能发射 JSON Schema；只标记失败侧，不丢同页工具。
+        const describeSchema = (schema: Definition["inputContract"], side: "input" | "output") => {
+          try {
+            // 现成 JSON Schema 已是调用合同，不再重新发射或删改其字段元数据。
+            if (!Schema.isSchema(schema)) return schema
+            // 输入展示调用者提交的 encoded 域；输出展示 decoder 交给脚本的 decoded 域。
+            const document = Schema.toJsonSchemaDocument(side === "output" ? Schema.toType(schema) : schema)
+            return {
+              ...document.schema,
+              // 发射器把定义分开放置；接回 $defs 后，字段里的本地引用才可独立解析。
+              ...(Object.keys(document.definitions).length > 0 ? { $defs: document.definitions } : {}),
+            }
+          } catch {
+            // null 明确表示本侧无法描述，空对象会被误读成一个无约束合同。
+            schemaUnavailable.push(side)
+            return null
+          }
+        }
+        items.push({
+          ...description,
+          path: toolExpression(description.path),
+          inputSchema: describeSchema(inputContract, "input"),
+          // 未声明输出时省略字段；声明存在但发射失败时才返回 null，两种状态不能合并。
+          ...(outputContract === undefined ? {} : { outputSchema: describeSchema(outputContract, "output") }),
+          ...(schemaUnavailable.length === 0 ? {} : { schemaUnavailable }),
+        })
+        // 完整条目跨过16K后结束本页，单项超长仍可读，下一页从后项继续。
+        // remaining/next 也算入整页长度；这里使用 JS 字符单位，与日志的 UTF-8 预算不同。
+        if (JSON.stringify(response()).length >= 16 * 1024) break
+      }
+      return response()
     }),
 })
 
@@ -474,7 +505,7 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
 const searchSignature = `search(input: ${inputTypeScript(makeSearchTool([]))}): ${outputTypeScript(makeSearchTool([]))}`
 
 const catalogLine = (tool: ToolDescription) => {
-  // 行预算包含简短用途；search 返回相同签名和完整工具用途，不再承诺字段 JSDoc。
+  // 目录按用途与签名计费；search 保留完整用途、同源签名及可发射的输入/输出 Schema。
   const line = tool.description.split("\n", 1)[0]!.trim()
   const description = line.length > 120 ? line.slice(0, 117) + "..." : line
   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}`
@@ -482,6 +513,9 @@ const catalogLine = (tool: ToolDescription) => {
 
 const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({
   description,
+  // 搜索直接保留真实合同，不从紧凑签名反推默认值和字段限制。
+  inputContract: definition.inputContract,
+  outputContract: definition.output,
   pathWords: tokenize(path),
   searchText: [
     path,
@@ -530,6 +564,7 @@ export const prepare = <R>(
 
   // 核心路径先选，其余按签名长度与路径稳定排序；过长条目跳过而不阻塞后续工具。
   const preferred = new Set(priority)
+  // 此排序只选内联项；search 仍按自身相关性排序，分页顺序不随目录预算改变。
   const queue = [...described].sort(
     (left, right) =>
       Number(preferred.has(right.path)) - Number(preferred.has(left.path)) ||
@@ -538,31 +573,26 @@ export const prepare = <R>(
   )
   const picked = new Set<ToolDescription>()
   // 固定标题费用沿用原预算；再高的优先级也不能保证超预算签名必定出现。
-  let used = ordered.reduce(
-    (total, [namespace, group]) =>
-      total + estimateTokens(`- ${namespace} (${group.length} tool${group.length === 1 ? "" : "s"}, none shown)`),
-    0,
-  )
+  let used = ordered.reduce((total, [namespace, group]) => total +
+    estimateTokens(`- ${namespace} (${group.length} tool${group.length === 1 ? "" : "s"}, none shown)`), 0)
   for (const tool of queue) {
     const cost = estimateTokens(catalogLine(tool))
     if (used + cost > catalogBudget) continue
     picked.add(tool)
     used += cost
   }
+  // 选择集合只控制提示展示；完整 catalog 与搜索索引不随预算删除工具。
   const totalShown = picked.size
   const complete = totalShown === described.length
 
   const empty = described.length === 0
 
-  // 固定执行说明与当前目录分开；完整、部分和空目录只声明本次可发现的工具。
   const intro = prompt[empty ? "intro.empty" : complete ? "intro.complete" : "intro.partial"]
-    .replace("{{searchSignature}}", searchSignature)
-    .split("\n")
+    .replace("{{searchSignature}}", searchSignature).split("\n")
 
   const toolSection: Array<string> = empty ? [] : [""]
   if (!empty) {
     for (const [namespace, group] of ordered) {
-      // 选择成员只由全局 picked 持有；分组仅派生展示计数，不复制第二套集合。
       const selected = group.filter((tool) => picked.has(tool))
       const count = `${group.length} tool${group.length === 1 ? "" : "s"}`
       // Annotate only when a namespace is not fully shown, so a comprehensive
@@ -613,12 +643,7 @@ const namespaceKeys = <R>(tools: HostTools<R>, path: ReadonlyArray<string>): Rea
   return Object.keys(value)
 }
 
-// 恢复建议取同一当前索引；解析 namespace 不得自动选择或执行其中成员。
-const resolve = <R>(
-  tools: HostTools<R>,
-  path: ReadonlyArray<string>,
-  index: ReadonlyArray<SearchEntry>,
-): HostTool<R> | Definition<R> => {
+const resolve = <R>(tools: HostTools<R>, path: ReadonlyArray<string>, index: ReadonlyArray<SearchEntry>): HostTool<R> | Definition<R> => {
   let value: HostTool<R> | Definition<R> | HostTools<R> = tools
 
   for (const segment of path) {
@@ -631,17 +656,11 @@ const resolve = <R>(
       const name = path.join(".")
       const namespace = path.length > 1 && Object.hasOwn(tools, path[0]!) ? path[0] : undefined
       // 仅推荐同一当前目录中的路径，不猜造别名，也不自动执行推荐项。
-      const closest = rank(
-        namespace ? index.filter((entry) => entry.description.path.startsWith(`${namespace}.`)) : index,
-        namespace ? path.slice(1).join(" ") : name,
-      )[0]
-      throw new ToolRuntimeError(
-        "UnknownTool",
-        closest
-          ? `Unknown tool '${name}'. Did you mean ${toolExpression(closest.description.path)}?`
-          : `Unknown tool '${name}'.`,
-        ["Use search to find available tools."],
-      )
+      const closest = rank(namespace ? index.filter((entry) => entry.description.path.startsWith(`${namespace}.`)) : index,
+        namespace ? path.slice(1).join(" ") : name)[0]
+      throw new ToolRuntimeError("UnknownTool", closest
+        ? `Unknown tool '${name}'. Did you mean ${toolExpression(closest.description.path)}?`
+        : `Unknown tool '${name}'.`, ["Use search to find available tools."])
     }
     value = value[segment] as HostTool<R> | Definition<R> | HostTools<R>
   }
@@ -685,7 +704,7 @@ export const make = <R>(
   hooks?: ToolCallHooks<R>,
   fetch?: HostTool<R>,
 ): ToolRuntime<R> => {
-  // 排队不触发校验、计数或 running 通知；叶子超时只在拿到槽位后启动。
+  // 一个执行中的所有工具与 fetch 共用这组许可，函数帧和组合器不各建队列。
   const permits = Semaphore.makeUnsafe(TOOL_CALL_CONCURRENCY)
   const calls: Array<ToolCall> = []
   const callableTools = {
@@ -710,15 +729,9 @@ export const make = <R>(
           message,
         })
       }),
-      // 排队尚未建立观察记录；只有已开始的调用才在中断时闭合失败回执。
-      Effect.onInterrupt(() =>
-        onEnd({
-          ...call,
-          durationMs: Date.now() - startedAt,
-          outcome: "failure",
-          message: "Tool execution interrupted",
-        }),
-      ),
+      Effect.onInterrupt(() => onEnd({
+        ...call, durationMs: Date.now() - startedAt, outcome: "failure", message: "Tool execution interrupted",
+      })),
     )
   }
 
@@ -795,7 +808,8 @@ export const make = <R>(
           currentCall,
         )
       }).pipe(
-        // 只有内存目录 search 是同步入口；fetch 和所有宿主调用共用八个槽位。
+        // 准入后才计数和发布 running；排队取消不启动宿主调用，叶子超时也从实际调用开始。
+        // 只有同步内存 search 不占槽位；fetch 和宿主工具共用八槽，排队仍消耗整段预算。
         path.length === 2 && path[0] === reservedNamespace && path[1] === "search"
           ? (effect) => effect
           : permits.withPermits(1),

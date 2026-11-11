@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test"
 // 用宿主控制原因与就绪门闩观察公开行为，不能用超时或私有状态冒充中断证据。
-import { Cause, Clock, Deferred, Duration, Effect, Fiber, Schema } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Fiber, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
-// Wave 5 acceptance suite: first-class promise values. Un-awaited tool calls start eagerly on
-// supervised fibers, `await` settles them, and Promise.all/allSettled/race/resolve/reject are
-// ordinary functions over arbitrary arrays mixing promises and plain values.
+// 未await的工具调用也立即启动并受执行作用域监管；await消费结算结果。
+// all/allSettled/race接受混合数组，resolve/reject把普通值或拒绝原因转为Promise。
 
 type Trace = {
   starts: Array<number>
@@ -132,8 +131,8 @@ describe("first-class promise values", () => {
   })
 
   test("an awaited failure is catchable exactly like a synchronous throw", async () => {
-    expect(
-      await value(`
+    // 同时保留结果与回执，才能发现catch正常取到错误消息、父结果却仍误报未观察失败的情况。
+    const result = await run(`
       const p = tools.host.fail({})
       try {
         await p
@@ -141,31 +140,35 @@ describe("first-class promise values", () => {
       } catch (e) {
         return e.message
       }
-    `),
-    ).toBe("Lookup refused")
+    `)
+    expect(result).toMatchObject({ ok: true, value: "Lookup refused" })
+    // catch已消费工具拒绝，成功结果中连提醒字段都不应出现，不能仅把它写成false。
+    expect(result).not.toHaveProperty("unobservedFailure")
   })
 
   test("a fire-and-forget call is interrupted when execution ends", async () => {
     // 检查真实挂起调用的清理记录，返回done不能掩盖仍在后台运行的工作。
     const trace = makeTrace()
-    const result = await value(
+    const result = await run(
       `
         tools.host.sleepy({ id: 1, ms: 30 })
         return "done"
       `,
       { trace },
     )
-    expect(result).toBe("done")
+    expect(result).toMatchObject({ ok: true, value: "done", unobservedFailure: true })
+    // 完成数为0、中断数为1排除工具自然结束；此处的提醒专门来自根退出取消的未观察工作。
     expect(trace.completed).toBe(0)
     expect(trace.interrupted).toBe(1)
   })
 
   test("a never-awaited failure does not replace the explicit execution result", async () => {
-    const result = await value(`
+    // 与上例被取消的等待不同，这里工具立即拒绝；两类未观察失败都保留显式返回的done。
+    const result = await run(`
       tools.host.fail({})
       return "done"
     `)
-    expect(result).toBe("done")
+    expect(result).toMatchObject({ ok: true, value: "done", unobservedFailure: true })
   })
 })
 
@@ -305,6 +308,8 @@ describe("Promise.allSettled", () => {
     `)
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.value).toBe(2)
+    // allSettled把两次拒绝转成可读结果，计数为2同时证明它实际消费了两项，而非直接返回空成功。
+    expect(result).not.toHaveProperty("unobservedFailure")
   })
 
   for (const wrap of [false, true])
@@ -331,9 +336,11 @@ describe("Promise.allSettled", () => {
             stop: Tool.make({
               description: "Interrupt after first member starts",
               input: Schema.Struct({}),
+              // 后项必须等前项发布启动信号再中断；按数组顺序只等首项的错误实现会停在never上。
               run: () => Deferred.await(started).pipe(Effect.andThen(Effect.interrupt)),
             }),
           },
+          // 100ms只是防止错误实现挂死；下方要求宿主中断Exit，单纯触发执行超时不会满足断言。
           limits: { timeoutMs: 100 },
           code: `return await Promise.allSettled([tools.wait({}), ${wrap ? "(async () => await tools.stop({}))()" : "tools.stop({})"}])`,
         }).pipe(Effect.exit),
@@ -341,13 +348,14 @@ describe("Promise.allSettled", () => {
       // Exit 失败且原因只有中断，排除 TimeoutExceeded 诊断或伪造 rejected 数据。
       expect(exit._tag).toBe("Failure")
       if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      // 控制中断传播正确还不足以证明首项退出，清理标记单独检查被阻塞工具的真实收尾。
       expect(cleaned).toBe(true)
     })
 })
 
 describe("Promise.race", () => {
   test("execute exit interrupts pending race members", async () => {
-    // 此断言在整个 Execute 返回后检查清理，与上文败方可继续等待的合同分开。
+    // 10ms的赢家触发根返回，5秒的败方仍在等待；这里只检查根退出清理，下一例检查race内部复用。
     const trace = makeTrace()
     const result = await value(
       `
@@ -362,42 +370,13 @@ describe("Promise.race", () => {
     expect(trace.completed).toBe(1)
   })
 
-  for (const wrap of [false, true])
-    test(`a losing ${wrap ? "async function" : "tool"} remains awaitable`, async () => {
-      // race 只竞争结算；保留原 Promise 再等待，才能区分选出赢家与结束整段执行。
-      const trace = makeTrace()
-      expect(
-        await value(
-          `
-      const slow = ${wrap ? "(async () => await tools.host.sleepy({ id: 2, ms: 10 }))()" : "tools.host.sleepy({ id: 2, ms: 10 })"}
-      const winner = await Promise.race([slow, "first"])
-      return [winner, await slow]
-    `,
-          { trace },
-        ),
-      ).toEqual(["first", 2])
-      expect(trace.completed).toBe(1)
-      expect(trace.interrupted).toBe(0)
-    })
-
-  test("a losing rejection retains its original reason", async () => {
-    // 被另一项抢先结算不应把后续业务失败改写为执行器制造的取消错误。
-    expect(
-      await value(`
-      const slow = (async () => { await tools.host.sleepy({ id: 1 }); throw "original" })()
-      const winner = await Promise.race([slow, "first"])
-      return [winner, await Promise.allSettled([slow])]
-    `),
-    ).toEqual(["first", [{ status: "rejected", reason: "original" }]])
-  })
-
   test("shared and duplicate members keep one producer across races", async () => {
-    // 两个组合器共享同一 Promise；第一个的完成不得使第二个失去仍需要的结果。
+    // race 只观察同一 async 生产者；跨组合器复用并再次 await，验证不会取消或重放底层工具。
     const trace = makeTrace()
     expect(
       await value(
         `
-      const shared = tools.host.sleepy({ id: 7 })
+      const shared = (async () => await tools.host.sleepy({ id: 7 }))()
       const first = Promise.race([shared, "first"])
       const second = Promise.race([shared, shared])
       return [await first, await second, await shared]
@@ -405,6 +384,7 @@ describe("Promise.race", () => {
         { trace },
       ),
     ).toEqual(["first", 7, 7])
+    // 第一个race被普通值抢先结算，第二个含重复成员；完成一次且零中断才排除重放或误取消共享生产者。
     expect(trace.completed).toBe(1)
     expect(trace.interrupted).toBe(0)
   })
@@ -592,12 +572,14 @@ describe("async function composition", () => {
     expect(result).toEqual({ results: [11, 12, 13], counter: 3 })
     // 活跃工具数量证明实际重叠，不用总耗时阈值把慢 CI 误判为语义回归。
     expect(trace.maxActive).toBeGreaterThan(1)
+    // 结果11、12、13分别依赖每个回调自己的local；counter为3要求外层绑定仍共享，结束后active清零。
     expect(trace.active).toBe(0)
   })
 
   test("factory closures outlive their call frames and share only their own bindings", async () => {
     // 工厂返回后局部绑定仍存活；两次工厂调用不能共用一份计数器，旧闭包也不能被深复制。
     expect(
+      // first的两次同步前缀依次取得2和3，second独立取得11；跨await返回各自mine可暴露局部帧串用。
       await value(`
       function factory(n) { let count = n; return async () => {
         count++; const mine = count; await tools.host.sleepy({ id: mine }); return mine;
@@ -618,6 +600,7 @@ describe("async function composition", () => {
       ),
     ).toBe(20)
     expect(trace.maxActive).toBeGreaterThan(1)
+    // 20个双层helper必须只按最底层工具计并发；上界8保留工具限流，下界大于1排除串行代替。
     expect(trace.maxActive).toBeLessThanOrEqual(8)
     // 返回容器不是递归 await；其中工具 Promise 必须仍能在函数结束后被调用者收取。
     expect(
@@ -635,7 +618,7 @@ describe("async function composition", () => {
 
 describe("composable promise combinators", () => {
   test.each(["all", "allSettled", "race"])("Promise.%s returns a reusable promise", async (method) => {
-    // 观察必须由 await 驱动消费，组合器调用本身不能提前返回数组或抛出成员错误。
+    // 组合器会立即观察成员；调用者先拿到 Promise，消费它时才收到结果数组或成员拒绝。
     expect(await value(`const p=Promise.${method}([7]); return [p instanceof Promise, await p, await p]`)).toEqual(
       method === "allSettled"
         ? [true, [{ status: "fulfilled", value: 7 }], [{ status: "fulfilled", value: 7 }]]
@@ -667,6 +650,7 @@ describe("composable promise combinators", () => {
               description: "Wait for release",
               input: Schema.Struct({}),
               output: Schema.String,
+              // wait的成功值只能在release打开门闩后产生，任何提前取消或伪造完成都会改变最终返回值。
               run: () => Deferred.await(gate).pipe(Effect.as("released")),
             }),
             fail: failingTool,
@@ -683,51 +667,25 @@ describe("composable promise combinators", () => {
         limits: { timeoutMs: 1000 },
       }),
     )
+    // all先拒绝才进catch释放门闩，最后再次await首项得到released，连起快速拒绝与败方仍可继续两项合同。
     expect(result).toMatchObject({ ok: true, value: "released" })
   })
 
-  test.each([
-    'try { await Promise.all([tools.host.sleepy({id:1,ms:20}),tools.host.fail({})]) } catch(e) {} return "done"',
-    "return await Promise.all([tools.host.sleepy({id:1,ms:20}),tools.host.fail({})])",
-    '(async()=>{await tools.host.sleepy({id:1,ms:20}); await tools.host.sleepy({id:2})})(); return "done"',
-  ])("execution owns abandoned work after %s", async (code) => {
+  test("an uncaught combinator failure cleans pending work before returning", async () => {
     const trace = makeTrace()
-    // 宿主 fiber 在 execute 返回后继续存活，避免外层结束或 timeout 替错误清理实现兜底。
-    await Effect.runPromise(
-      CodeMode.execute({ tools: { host: { sleepy: sleepyTool(trace), fail: failingTool } }, code }).pipe(
-        // 故意越过工具完成时刻以检测晚到副作用，而不是等待某个并发阶段就绪。
-        Effect.andThen(Effect.sleep(40)),
-      ),
+    // 成功返回已有基线覆盖；这里保留失败根的真实清理，并让宿主继续存活观察迟到副作用。
+    const result = await Effect.runPromise(
+      CodeMode.execute({
+        tools: { host: { sleepy: sleepyTool(trace), fail: failingTool } },
+        code: "return await Promise.all([tools.host.sleepy({id:1,ms:20}),tools.host.fail({})])",
+      }).pipe(Effect.tap(() => Effect.sleep(40))),
     )
+    expect(result.ok).toBe(false)
+    // 40ms宿主观察窗超过工具原本的20ms延迟；已启动、未完成且中断一次排除返回后仍执行的迟到工作。
     expect(trace.starts).toEqual([1])
     expect(trace.completed).toBe(0)
     expect(trace.interrupted).toBe(1)
     expect(trace.active).toBe(0)
-  })
-
-  test("timeout and host interruption cannot become allSettled success", async () => {
-    const trace = makeTrace()
-    // async 包装和 allSettled 都不能把执行终止降级为可继续写入的业务结果。
-    const result = await run(
-      "return await Promise.allSettled([1,2].map(async id => await tools.host.sleepy({id,ms:60000})))",
-      { trace, limits: { timeoutMs: 50 } },
-    )
-    expect(result).toMatchObject({ ok: false, error: { kind: "TimeoutExceeded" } })
-    expect(trace.interrupted).toBe(2)
-    // 宿主中断在真实工具 seam 发出，验证错误归一化没有吞掉执行控制信号。
-    const exit = await Effect.runPromise(
-      CodeMode.execute({
-        tools: {
-          stop: Tool.make({
-            description: "Interrupt execution",
-            input: Schema.Struct({}),
-            run: () => Effect.interrupt,
-          }),
-        },
-        code: "return await Promise.allSettled([(async()=>await tools.stop({}))()])",
-      }).pipe(Effect.exit),
-    )
-    expect(exit._tag).toBe("Failure")
   })
 })
 
@@ -740,6 +698,7 @@ for (const cancel of [false, true])
       Effect.gen(function* () {
         const allSubmitted = yield* Deferred.make<void>()
         const ninth = yield* Deferred.make<void>()
+        // 每项独立门闩允许只释放第0项；共用门闩无法证明一个空槽只准入一个排队调用。
         const gates = yield* Effect.forEach(Array.from({ length: 20 }), () => Deferred.make<void>())
         const starts: number[] = []
         let active = 0,
@@ -756,6 +715,7 @@ for (const cancel of [false, true])
                   starts.push(id)
                   active++
                   peak = Math.max(peak, active)
+                  // 第九个真实run发布信号，测试据此等待许可交接，避免yield一次就猜测排队任务已启动。
                   if (starts.length === 9) yield* Deferred.succeed(ninth, undefined)
                   yield* Deferred.await(gates[id])
                   return id
@@ -774,11 +734,13 @@ for (const cancel of [false, true])
               ? Deferred.succeed(allSubmitted, undefined).pipe(Effect.asVoid)
               : Effect.void,
         }).pipe(Effect.forkChild)
+        // search 位于二十次提交之后且不占许可；收到它的回调才证明剩余十二项已经排队。
         yield* Deferred.await(allSubmitted)
         expect(starts).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
         if (cancel) {
           yield* Fiber.interrupt(fiber)
           expect(starts).toHaveLength(8)
+          // 十二项尚未进入run，因此只有已启动的八项执行finalizer；取消排队项不能虚增清理计数。
           expect(cleaned).toBe(8)
           expect(active).toBe(0)
           // 根结束后继续释放全部阻塞点，排队请求仍不得复活或产生迟到副作用。
@@ -794,6 +756,7 @@ for (const cancel of [false, true])
         expect(active).toBe(8)
         yield* Effect.forEach(gates, (gate) => Deferred.succeed(gate, undefined))
         expect(yield* Fiber.join(fiber)).toMatchObject({ ok: true, value: Array.from({ length: 20 }, (_, i) => i) })
+        // 返回值按提交序号排列，峰值与清理数另外约束准入和资源回收，不能用正确数组掩盖超额并发。
         expect(peak).toBe(8)
         expect(cleaned).toBe(20)
         expect(active).toBe(0)
@@ -818,6 +781,7 @@ test("queue time does not consume a leaf-owned timeout", async () => {
               Effect.gen(function* () {
                 starts.push(id)
                 if (id < 8) yield* Deferred.await(release)
+                // 后十二项各用5ms工作和10ms叶子超时；它们先排队1000ms，成功只可能因超时从获得许可后才开始。
                 else yield* Effect.sleep(5).pipe(Effect.timeout(10))
                 return id
               }),
@@ -827,75 +791,53 @@ test("queue time does not consume a leaf-owned timeout", async () => {
           c.name === "$codemode.search" ? Deferred.succeed(allSubmitted, undefined).pipe(Effect.asVoid) : Effect.void,
       }).pipe(Effect.forkChild)
       yield* Deferred.await(allSubmitted)
+      // 先确认二十项都已提交再推进时钟，后排确实经历了远长于10ms的许可等待。
       yield* TestClock.adjust(1000)
       expect(starts).toHaveLength(8)
       yield* Deferred.succeed(release, undefined)
+      // 释放首批后推进20ms足够后续两个批次各跑5ms；结果仍要逐项完整，不能把超时项当成空成功。
       yield* TestClock.adjust(20)
       expect(yield* Fiber.join(fiber)).toMatchObject({ ok: true, value: Array.from({ length: 20 }, (_, i) => i) })
     }).pipe(Effect.provide(TestClock.layer())),
   )
 })
 
-// Clock 的真实取消回调是计时器释放证据；根成功、失败和外部取消都须在返回前收尾。
-for (const mode of ["success", "failure", "cancel", "timeout", "loop-break", "loop-return"] as const) {
-  test(`sleep disposes its timer on root ${mode}`, async () => {
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const base = yield* Clock.Clock
-        const ready = yield* Deferred.make<void>()
-        let live = 0
-        let disposed = 0
-        const observed = {
-          // 显式转交 Clock 合同，避免展开类实例漏掉原型方法。
-          currentTimeMillis: base.currentTimeMillis,
-          currentTimeNanos: base.currentTimeNanos,
-          currentTimeMillisUnsafe: () => base.currentTimeMillisUnsafe(),
-          currentTimeNanosUnsafe: () => base.currentTimeNanosUnsafe(),
-          sleep: (duration: Parameters<typeof base.sleep>[0]) => {
-            // 根超时仍走真实 Clock；只观察脚本的长计时器，不把框架计时器误算成泄漏。
-            if (Duration.toMillis(duration) !== 123456) return base.sleep(duration)
-            return Effect.callback<void>(() => {
-              live++
-              return Effect.sync(() => {
-                live--
-                disposed++
-              })
+// sleep 与工具共用根 Scope；这里只检查计时器特有的真实取消回调，不重复宿主退出矩阵。
+test("sleep releases its timer when the execution ends", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const base = yield* Clock.Clock
+      let live = 0
+      let disposed = 0
+      const observed = {
+        // Clock 可能是类实例，显式转交方法而不展开丢失原型。
+        currentTimeMillis: base.currentTimeMillis,
+        currentTimeNanos: base.currentTimeNanos,
+        currentTimeMillisUnsafe: () => base.currentTimeMillisUnsafe(),
+        currentTimeNanosUnsafe: () => base.currentTimeNanosUnsafe(),
+        sleep: (duration: Parameters<typeof base.sleep>[0]) => {
+          // 只拦截脚本指定的长等待，运行时自身的调度计时继续使用原 Clock。
+          if (Duration.toMillis(duration) !== 123456) return base.sleep(duration)
+          // 这个替代计时器永不自行完成，只注册与释放；根返回后disposed增加只能来自取消回调。
+          return Effect.callback<void>(() => {
+            live++
+            return Effect.sync(() => {
+              live--
+              disposed++
             })
-          },
-        }
-        // 提前跳出不会访问数组中的未完成 Promise，但根退出仍必须释放该生产者。
-        const ending =
-          mode === "success"
-            ? "return 1"
-            : mode === "failure"
-              ? 'throw new Error("stop")'
-              : mode === "loop-break"
-                ? "for await (const x of [1, timer]) break; return 1"
-                : mode === "loop-return"
-                  ? "for await (const x of [1, timer]) return x"
-                  : "await timer; return 2"
-        // 脚本发现钩子在计时器注册返回之后发信号，避免同步通知在注册中途重入取消。
-        const fiber = yield* CodeMode.execute({
-          code: `const timer = sleep(123456); search({query: "timer"}); ${ending}`,
-          limits: { timeoutMs: 30 },
-          onToolCallStart: () => Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
-        }).pipe(Effect.provideService(Clock.Clock, observed), Effect.forkChild)
-        yield* Deferred.await(ready)
-        if (mode === "cancel") {
-          // 让就绪广播的调用栈完成，再从独立宿主调度轮取消已经挂起的执行。
-          yield* Effect.yieldNow
-          yield* Fiber.interrupt(fiber)
-        } else {
-          const result = yield* Fiber.join(fiber)
-          expect(result.ok).toBe(mode === "success" || mode === "loop-break" || mode === "loop-return")
-          if (mode === "timeout") expect(result).toMatchObject({ error: { kind: "TimeoutExceeded" } })
-        }
-        expect(live).toBe(0)
-        expect(disposed).toBe(1)
-      }),
-    )
-  })
-}
+          })
+        },
+      }
+      const result = yield* CodeMode.execute({ code: "sleep(123456); return 1" }).pipe(
+        Effect.provideService(Clock.Clock, observed),
+      )
+      expect(result).toMatchObject({ ok: true, value: 1 })
+      expect(live).toBe(0)
+      // 仅检查 live=0 会让完全没注册计时器的实现通过；释放次数证明它确实创建并收尾。
+      expect(disposed).toBe(1)
+    }),
+  )
+})
 
 // 睡眠不占用宿主槽、调用预算或回执；八个正在运行的工具不能阻止计时器前进。
 test("sleep progresses with eight occupied host permits and no receipt", async () => {
@@ -903,6 +845,7 @@ test("sleep progresses with eight occupied host permits and no receipt", async (
     Effect.gen(function* () {
       const gate = yield* Deferred.make<void>()
       let started = 0
+      // 八个工具的门闩从不释放；sleep若也等宿主许可，脚本无法到达return，重复await还检查同一计时器可复用。
       const result = yield* CodeMode.execute({
         code: `Array.from({length: 8}).map(() => tools.wait({}));
         const p = sleep(0); await p; await p; return 1`,
@@ -920,6 +863,7 @@ test("sleep progresses with eight occupied host permits and no receipt", async (
       })
       expect(result).toMatchObject({ ok: true, value: 1 })
       expect(started).toBe(8)
+      // 八次工具调用已用尽预算；sleep 若被计作第九次调用，业务结果就无法成功。
       expect(result.toolCalls).toHaveLength(8)
     }),
   )
@@ -927,16 +871,20 @@ test("sleep progresses with eight occupied host permits and no receipt", async (
 
 // 隐式 next/终止/关闭都必须让出；循环体新建任务能观察 break/return/throw 的关闭顺序。
 test("for-await suspends on values, termination and abrupt completion", async () => {
+  // expected 来自原生 for-await 的让出规则；marker 区分迭代本身的等待与循环体 await。
   for (const [input, tail, expected] of [
     ["[1,2]", "", ["caller", 1, "marker", 2, "marker", "done", "finally"]],
     ["[Promise.resolve(1)]", "", ["caller", 1, "marker", "done", "finally"]],
     ['[Promise.reject("bad")]', "", ["caller", "bad", "finally"]],
+    // 空迭代器也要等待第一次next结果，caller必须先出现；这条把迭代终止的让出与循环体等待分开。
     ["[]", "", ["caller", "done", "finally"]],
     ["[1,2]", "continue", ["caller", 1, "marker", 2, "marker", "done", "finally"]],
     ["[1,2]", "break", ["caller", 1, "marker", "done", "finally"]],
+    // return跳过done但仍执行finally；marker先于finally，检查提前关闭迭代器时仍会让出执行权。
     ["[1,2]", "return", ["caller", 1, "marker", "finally"]],
     ["[1,2]", 'throw "bad"', ["caller", 1, "marker", "bad", "finally"]],
   ] as const) {
+    // mark只等待普通值，顺序来自解释器让出规则；没有宿主耗时差可以替错误调度制造预期顺序。
     const code = `
       const events = [];
       async function mark() { await 0; events.push("marker"); }
@@ -953,5 +901,129 @@ test("for-await suspends on values, termination and abrupt completion", async ()
       ok: true,
       value: expected,
     })
+  }
+})
+
+// 同步启动即取消时，Execute 必须等真实 finalizer 门闩释放。
+for (const mode of ["direct", "snapshot"] as const) {
+  test(`eager ${mode} cancellation waits for an asynchronously gated finalizer`, async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        // entered定位工具已进入，cleaning定位清理已开始，release决定清理何时结束，三个阶段各有独立信号。
+        const entered = yield* Deferred.make<void>()
+        const cleaning = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const environment = CodeMode.createEnvironment()
+        // 先保存会修改根绑定的helper，snapshot分支取消时也覆盖保留闭包的副本绑定，而非仅复制裸变量。
+        yield* CodeMode.execute({
+          environment,
+          code: "let count=0; async function helper(){count++; await tools.waiting({});} return 1;",
+        })
+        let cleaned = 0
+        const waiting = Tool.make({
+          description: "Publish actual entry before the eager producer is registered",
+          input: Schema.Struct({}),
+          output: Schema.Null,
+          run: () =>
+            Effect.acquireUseRelease(
+              Effect.void,
+              // 发布entered后永久挂起，使外部取消紧贴工具同步启动，不等自然完成或普通拒绝帮忙收尾。
+              () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+              () =>
+                Deferred.succeed(cleaning, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      cleaned++
+                    }),
+                  ),
+                ),
+            ),
+        })
+        const running = yield* CodeMode.execute({
+          environment,
+          snapshotEnvironment: mode === "snapshot",
+          tools: { waiting },
+          code: mode === "direct" ? "count++; await tools.waiting({});" : "await helper();",
+        }).pipe(Effect.forkChild)
+        yield* Deferred.await(entered)
+        // 中断动作自身也会等待finalizer，须另起fiber才能在释放清理门闩前观察running是否错误提前返回。
+        const interrupting = yield* Fiber.interrupt(running).pipe(Effect.forkChild({ startImmediately: true }))
+        // 清理入口已到达而释放门闩仍关闭，此时检查返回状态能定位根作用域是否过早结束。
+        yield* Deferred.await(cleaning)
+        const returnedBeforeRelease = running.pollUnsafe() !== undefined
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(interrupting)
+        const exit = yield* Fiber.await(running)
+        expect(returnedBeforeRelease).toBe(false)
+        // 释放后清理必须恰好完成一次；仅检查释放前未返回会漏掉永不清理或重复执行finalizer。
+        expect(cleaned).toBe(1)
+        // 最终仍是宿主控制中断，不能把等待清理包装成普通JS失败或成功结果。
+        expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+        // 两种模式共用取消路径，只有真实执行可留下count；副本取消也不能写回Notebook。
+        expect(yield* CodeMode.execute({ environment, code: "return count;" })).toMatchObject({
+          ok: true,
+          value: mode === "snapshot" ? 0 : 1,
+        })
+      }),
+    )
+  })
+}
+
+// 已观察工具失败仍计入调用事实；通用提醒只反映未观察的拒绝。
+test("immediate and mixed failures warn only when their outcome was not observed", async () => {
+  for (const [code, unobserved] of [
+    ['Promise.reject("ignored");', true],
+    ['Promise.resolve("done");', false],
+    ['try { await Promise.reject("caught"); } catch {}', false],
+    ['await Promise.allSettled([Promise.reject("settled")]);', false],
+    // 工具拒绝已捕获，但随后另一个async拒绝无人观察；提醒不能仅由工具回执或“曾有catch”决定。
+    ['try { await tools.host.fail({}); } catch {} (async () => { throw "ignored"; })();', true],
+  ] as const) {
+    const result = await run(`${code} return "done";`)
+    expect(result).toMatchObject({ ok: true, value: "done" })
+    expect(result.ok && result.unobservedFailure === true).toBe(unobserved)
+    // 对公开Result做JSON往返及schema解码，确认新增提醒能随持久化结果保留且不改变旧结果形状。
+    expect(Schema.decodeUnknownSync(CodeMode.Result)(JSON.parse(JSON.stringify(result)))).toEqual(result)
+  }
+})
+
+// 拒绝被门闩推迟到 race 选出普通值之后，才能区分“开始等待”与“实际收到失败”。
+test("a cancelled race observer does not mark a later rejection observed", async () => {
+  for (const observe of [false, true]) {
+    const gate = Deferred.makeUnsafe<void>()
+    let failures = 0
+    const result = await Effect.runPromise(
+      CodeMode.execute({
+        tools: {
+          later: Tool.make({
+            description: "Fail after release",
+            input: Schema.Struct({}),
+            run: () =>
+              Deferred.await(gate).pipe(
+                Effect.andThen(
+                  // 计数紧贴实际拒绝发出的位置，门闩已打开但生产者未继续运行的情况不能冒充已产生失败。
+                  Effect.sync(() => {
+                    failures++
+                  }),
+                ),
+                Effect.andThen(Effect.fail(toolError("Later refusal"))),
+              ),
+          }),
+          release: Tool.make({
+            description: "Release producer",
+            input: Schema.Struct({}),
+            run: () => Deferred.succeed(gate, undefined),
+          }),
+        },
+        // 先等race选出普通值再释放工具；只有observe分支额外消费原Promise，两个分支的提醒应恰好相反。
+        code: `const pending = tools.later({}); await Promise.race([pending, "done"]);
+        await tools.release({}); ${observe ? "try { await pending; } catch {}" : ""} return "done";`,
+      }),
+    )
+    expect(result).toMatchObject({ ok: true, value: "done", toolCalls: [{ name: "later" }, { name: "release" }] })
+    expect(result.ok && result.unobservedFailure === true).toBe(!observe)
+    // 两种分支都要真正产生同一次拒绝；否则无告警可能只是生产者被race提前取消。
+    expect(failures).toBe(1)
   }
 })

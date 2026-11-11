@@ -1,4 +1,4 @@
-// 注册出口也必须对照同一公开说明，避免只修工具实现而遗漏模型工具清单。
+// 注册表描述与库的公开说明比较，捕获两个提示词出口漂移。
 import { CodeMode } from "@opencode-ai/codemode"
 import { afterEach, describe, expect, spyOn } from "bun:test"
 import path from "path"
@@ -22,7 +22,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
-// 以真实 definition hook 变更展示，运行时 schema 仍由原 Tool.wrap 闭包拥有。
+// 插件钩子的载荷是 unknown；先收窄对象再修改实际工具定义。
 import { isRecord } from "@/util/record"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 
@@ -135,32 +135,68 @@ const withEmptyCodeMode = testEffect(
     ],
   ]),
 )
-const withDisplayMutation = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, Layer.mock(Plugin.Service, {
-  init:()=>Effect.void, list:()=>Effect.succeed([]),
-  trigger:(name,input,output)=>Effect.sync(()=>{
-    if(name === "tool.definition" && isRecord(input) && input.toolID === "read" && isRecord(output)) {
-      // 泛型 hook 保留返回类型；写入只针对已检查的对象视图，不把所有输出强转为 definition。
-      const definition: Record<string, unknown> = output
-      definition.parameters = Schema.Struct({displayOnly:Schema.Number})
-      definition.jsonSchema = {type:"object",properties:{displayOnly:{type:"number"}},required:["displayOnly"]}
-    }
-    return output
-  }),
-})]]))
+const withDisplayMutation = testEffect(
+  LayerNode.compile(root, [
+    ...replacements,
+    [
+      Plugin.node,
+      Layer.mock(Plugin.Service, {
+        init: () => Effect.void,
+        list: () => Effect.succeed([]),
+        trigger: (name, input, output) =>
+          Effect.sync(() => {
+            if (name === "tool.definition" && isRecord(input) && input.toolID === "read" && isRecord(output)) {
+              // 泛型 hook 保留返回类型；写入只针对已检查的对象视图，不把所有输出强转为 definition。
+              const definition: Record<string, unknown> = output
+              // 同时替换 Effect 展示参数与 JSON 展示声明，避免仅改其中一份而让另一份继续掩盖运行时来源。
+              definition.parameters = Schema.Struct({ displayOnly: Schema.Number })
+              definition.jsonSchema = {
+                type: "object",
+                properties: { displayOnly: { type: "number" } },
+                required: ["displayOnly"],
+              }
+            }
+            return output
+          }),
+      }),
+    ],
+  ]),
+)
 // 展示 schema 可被插件替换，但 decoder 不能跟着切换到未获真实工具支持的参数。
-withDisplayMutation.instance("definition hooks cannot replace the captured native runtime schema",()=>Effect.gen(function*(){
-  const registry=yield* ToolRegistry.Service
-  const agents=yield* Agent.Service
-  const native=(yield* registry.all()).find((tool)=>tool.id === "read")
-  const shown=(yield* registry.tools({providerID:ProviderV2.ID.opencode,modelID:ModelV2.ID.make("test"),agent:yield* agents.defaultInfo()})).find((tool)=>tool.id === "read")
-  if(!native || !shown) throw new Error("Missing native read")
-  expect(shown.parameters).not.toBe(native.parameters)
-  expect(shown.runtimeParameters).toBe(native.parameters)
-  const instance=yield* TestInstance
-  yield* Effect.promise(()=>Bun.write(path.join(instance.directory,"actual.txt"),"actual decoder"))
-  const result=yield* shown.execute({filePath:path.join(instance.directory,"actual.txt")},{sessionID:SessionID.create(),messageID:MessageID.ascending(),agent:"build",abort:new AbortController().signal,messages:[],metadata:()=>Effect.void,ask:()=>Effect.void})
-  expect(result.program?.value).toMatchObject({type:"text-page",content:"actual decoder"})
-}))
+withDisplayMutation.instance("definition hooks cannot replace the captured native runtime schema", () =>
+  Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    const agents = yield* Agent.Service
+    const native = (yield* registry.all()).find((tool) => tool.id === "read")
+    // all 取得原始定义，tools 才经过模型展示 hook；两份引用来自同一注册器而非测试自造副本。
+    const shown = (yield* registry.tools({
+      providerID: ProviderV2.ID.opencode,
+      modelID: ModelV2.ID.make("test"),
+      agent: yield* agents.defaultInfo(),
+    })).find((tool) => tool.id === "read")
+    if (!native || !shown) throw new Error("Missing native read")
+    // 先证明hook确实替换了展示对象，否则后面的真实读取会让未触发hook的夹具也通过。
+    expect(shown.parameters).not.toBe(native.parameters)
+    expect(shown.runtimeParameters).toBe(native.parameters)
+    const instance = yield* TestInstance
+    yield* Effect.promise(() => Bun.write(path.join(instance.directory, "actual.txt"), "actual decoder"))
+    // 执行只提供 filePath，故意不满足 displayOnly；成功读取能证明执行闭包仍使用原生参数。
+    const result = yield* shown.execute(
+      { filePath: path.join(instance.directory, "actual.txt") },
+      {
+        sessionID: SessionID.create(),
+        messageID: MessageID.ascending(),
+        agent: "build",
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      },
+    )
+    // 真实read返回文件正文，证明保留下来的不只是schema引用，执行闭包也仍用filePath合同。
+    expect(result.program?.value).toMatchObject({ type: "text-page", content: "actual decoder" })
+  }),
+)
 
 const withBrokenPlugin = testEffect(LayerNode.compile(root, [...replacements, [Plugin.node, brokenPluginLayer]]))
 
@@ -357,8 +393,10 @@ describe("tool.registry", () => {
       const ids = yield* registry.ids()
       expect(ids).toContain("read")
       expect(ids).toContain("broken_plugin_tool")
-      // 插件注册与磁盘自定义工具两条路径均不能获得同名 native 的隐式优先权。
-      expect((yield* registry.all()).find((tool) => tool.id === "broken_plugin_tool")?.runtimeParameters).toBeUndefined()
+      // 此处走插件列表入口；即使容忍缺失 args，也不能凭生成了 schema 就获得 native decoder 身份。
+      expect(
+        (yield* registry.all()).find((tool) => tool.id === "broken_plugin_tool")?.runtimeParameters,
+      ).toBeUndefined()
     }),
   )
 

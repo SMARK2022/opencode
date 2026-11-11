@@ -1,8 +1,6 @@
 import { Effect, Schema } from "effect"
+// 形式识别随真实输入合同派生，避免展示 schema 改写后简写误选字段。
 import { inputForms, type InputForms } from "./input-forms.js"
-
-// 宿主可从真实 validator 提取元数据，无须运行 decoder 或把展示 schema 变成验证器。
-export { inputForms, type InputForms } from "./input-forms.js"
 
 /**
  * JSON Schema subset accepted for render-only tool schemas.
@@ -97,11 +95,12 @@ export const isDefinition = <R = never>(value: unknown): value is Definition<R> 
 export const make = <I extends SchemaType, const O extends SchemaType | undefined = undefined, R = never>(
   options: Options<I, O, R>,
 ): Definition<R> => {
+  // 本层会执行的 Effect input 最权威；适配器只有在 input 纯展示时才补充原宿主合同。
   const contract = Schema.isSchema(options.input) ? options.input : (options.inputContract ?? options.input)
   return {
     _tag: "CodeModeTool",
     description: options.description,
-    // 展示与适配只从同一实际源推导；纯 JSON 只展示，不能授予快捷形式。
+    // 形式推导只读取元数据；执行一次 decoder 来猜输入会重复 default/transform 的效果。
     inputContract: contract,
     inputForms: Schema.isSchema(contract) ? inputForms(contract) : undefined,
     input: options.input,

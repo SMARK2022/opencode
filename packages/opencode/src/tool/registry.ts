@@ -350,6 +350,7 @@ const layer = Layer.effect(
               .join("\n"),
             parameters: output.parameters,
             // definition hook 仅改展示；shortcut 仍由原闭包实际使用的 decoder 决定。
+            // 展示 hook 的新 parameters 不会重编译原 execute 闭包，故不能拿它替代实际合同。
             runtimeParameters: tool.runtimeParameters,
             jsonSchema,
             output: tool.output,

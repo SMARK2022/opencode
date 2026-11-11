@@ -20,13 +20,17 @@ export class EnvironmentUnavailable extends Schema.TaggedErrorClass<EnvironmentU
   },
 ) {}
 
-// 目录只保留有限个环境；容量压力淘汰闲置项，不再按时间过期或设置会话公平配额。
+// 容量按环境计数；正在运行或仍有人排队的状态必须保留，满额时只能淘汰闲置项。
 const instanceCapacity = 64
 type Entry = Lease & {
   owner: Owner
+  // 每个环境独占一个许可，互相独立的 Notebook 不共用执行锁。
   gate: Semaphore.Semaphore
+  // 退休信号终止本环境全部租约；取消单个排队者不触发它。
   cancel: Deferred.Deferred<void>
+  // drain 表示本轮租约及其清理均已退出，与发出取消通知不是同一时点。
   drained: Deferred.Deferred<void>
+  // 计入排队租约，避免当前持有者结束时把仍等待使用的环境误判为闲置。
   users: number
   closed: boolean
 }
@@ -35,7 +39,6 @@ const sameLocation = (one: Location, two: Location) =>
   one.directory === two.directory && one.workspaceID === two.workspaceID
 const sameOwner = (one: Owner, two: Owner) => one.sessionID === two.sessionID && sameLocation(one, two)
 
-// 标识分配沿用宿主生成器；无需时钟注入或额外保留模式。
 export function makeRegistry(options: { nextID?: () => string } = {}) {
   const nextID = options.nextID ?? (() => Identifier.create("env", "ascending"))
   const entries = new Map<string, Entry>()
@@ -47,6 +50,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
     // 活动条目暂留到最后一个租约退出，close 才能等待真实清理而非丢失引用。
     if (entry.users === 0) entries.delete(entry.id)
   }
+  // 状态变动延迟到 Effect 真正执行，单纯构造一个 use 请求不会占用目录容量。
   const acquire = (owner: Owner, id: string | undefined) =>
     Effect.suspend(() => {
       if (closing) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environments are disposed." }))
@@ -86,9 +90,9 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
         entries.set(fresh, entry)
       }
       if (!entry) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environment is unavailable." }))
-      // 排队者也持有租约，回收时必须等待它释放，不能只统计已进入脚本的调用。
       // 闲置后的新一轮租约需要新的 drain 信号，不能复用上一轮已完成的 Deferred。
       if (entry.users === 0) entry.drained = Deferred.makeUnsafe()
+      // 等许可之前先计入使用者，才能让淘汰和关闭逻辑看见仍在队列里的请求。
       entry.users++
       return Effect.succeed(entry)
     })
@@ -98,6 +102,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
       id: string | undefined,
       run: (lease: Lease) => Effect.Effect<A, E, R>,
     ): Effect.Effect<A, E | EnvironmentUnavailable, R> {
+      // 增加 users 与安装释放逻辑之间不能被取消，否则失去回收者的租约会永久占用容量。
       return Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const entry = yield* acquire(owner, id)
@@ -130,6 +135,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
         }),
       )
     },
+    // 移动只退休旧位置的状态；目的位置匹配的环境可继续保留，删除则不传目的地。
     retireSession(sessionID: string, destination?: Location) {
       return Effect.sync(() => {
         for (const entry of entries.values())
@@ -140,8 +146,10 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
     close() {
       return Effect.uninterruptible(
         Effect.gen(function* () {
+          // 先关闭整个注册表，退休过程中即使有回调重入也不能创建新环境。
           closing = true
           const pending = [...entries.values()]
+          // 先通知全部条目，再等待各自清理，避免一个慢 finalizer 延迟其他执行收到取消。
           for (const entry of pending) retire(entry)
           // 不设置虚假的回收成功超时：原工具 finalizer 未退出时，目录实例必须继续等待。
           yield* Effect.forEach(pending, (entry) => (entry.users === 0 ? Effect.void : Deferred.await(entry.drained)), {
@@ -194,6 +202,7 @@ const layer = Layer.effect(
           { finalizerSafe: true },
         )
         // 内联通知只发取消信号，实例关闭才等待 drain，避免发布删除事件的单元等待自己。
+        // 清理期间继续接收 Session 变化；全部租约结束后才解除监听。
         yield* Effect.addFinalizer(() => registry.close().pipe(Effect.ensuring(off)))
         return registry
       }),

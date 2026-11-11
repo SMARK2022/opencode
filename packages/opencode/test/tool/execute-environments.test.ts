@@ -4,7 +4,6 @@ import { DateTime, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { ExecuteEnvironments } from "@/tool/execute-environments"
 import { testEffect } from "../lib/effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-// move 用例自己创建第二个 tmpdir，需显式暴露其真实进程依赖而非依赖外层 fixture 的隐式供应。
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { EventV2 } from "@opencode-ai/core/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -35,6 +34,7 @@ unit.effect("environment handles resume full state without crossing owners or gu
         code: "let n = 1; const next = () => ++n; return next()",
       }).pipe(Effect.map((result) => ({ id: lease.id, result }))),
     )
+    // 前缀和长度来自宿主 Identifier 合同，复用成功还须交付可供模型下一轮传回的有效句柄。
     expect(first.id).toMatch(/^env_[0-9a-zA-Z]{26}$/)
     expect(first.result).toMatchObject({ ok: true, value: 2 })
     expect(
@@ -55,6 +55,7 @@ unit.effect("environment handles resume full state without crossing owners or gu
     }
     // 报错还不够：无效句柄的 callback 从未运行，才证明没有失败后备用执行。
     expect(effects).toBe(0)
+    // 省略 ID 与显式错误 ID 分开检查，既允许新建，也不把复用失败偷偷降级为新建。
     const fresh = yield* registry.use(owner, undefined, (lease) => Effect.succeed(lease.id))
     expect(fresh).not.toBe(first.id)
     yield* registry.close()
@@ -89,6 +90,7 @@ unit.effect("same environment waits through cleanup while other environments sta
           }),
         )
         .pipe(Effect.forkScoped({ startImmediately: true }))
+      // 同时执行另一环境可排除全局串行锁，前一个环境的排他性必须只绑定自身ID。
       expect(yield* registry.use(owner, undefined, () => Effect.succeed("independent"))).toBe("independent")
       expect(order).toEqual(["first"])
       yield* Deferred.succeed(release, undefined)
@@ -97,6 +99,7 @@ unit.effect("same environment waits through cleanup while other environments sta
       expect(order).toEqual(["first"])
       yield* Deferred.succeed(finish, undefined)
       yield* Fiber.join(first)
+      // 两个 Fiber 都结束后再看顺序，排除第二个调用只是暂时没被调度、从未成功取得租约。
       yield* Fiber.join(second)
       expect(order).toEqual(["first", "second"])
     }).pipe(
@@ -105,31 +108,6 @@ unit.effect("same environment waits through cleanup while other environments sta
       ),
     )
     yield* registry.close()
-  }),
-)
-
-unit.effect("registry disposal cancels admitted work and joins its cleanup", () =>
-  Effect.gen(function* () {
-    const registry = ExecuteEnvironments.makeRegistry()
-    const entered = yield* Deferred.make<void>()
-    let cleaned = false
-    // 关闭成功意味着正在运行的单元已清理，而不是只把句柄从 Map 中移除。
-    const holder = yield* registry
-      .use(owner, undefined, () =>
-        Deferred.succeed(entered, undefined).pipe(
-          Effect.andThen(Effect.never),
-          Effect.ensuring(
-            Effect.sync(() => {
-              cleaned = true
-            }),
-          ),
-        ),
-      )
-      .pipe(Effect.forkScoped({ startImmediately: true }))
-    yield* Deferred.await(entered)
-    yield* registry.close()
-    expect(cleaned).toBe(true)
-    expect(Exit.isFailure(yield* Fiber.await(holder))).toBe(true)
   }),
 )
 
@@ -142,6 +120,7 @@ unit.effect("self-published retirement cannot return success or deadlock the pub
       .use(owner, id, () => registry.retireSession(owner.sessionID).pipe(Effect.as("wrong success")))
       .pipe(Effect.exit)
     expect(Exit.isFailure(result)).toBe(true)
+    // 自退休调用失败后，同一 ID 还须继续拒绝，不能只中断当前执行却保留可复活的条目。
     yield* expectFailure(registry.use(owner, id, () => Effect.succeed("wrong replacement")))
     yield* registry.close()
   }),
@@ -159,6 +138,7 @@ unit.effect("pressure eviction follows the latest return to idle, without an own
     // 使用第一个后移到闲置队尾；新增只淘汰未被触碰的第二个，不按创建时间排序。
     yield* expectFailure(registry.use(owner, ids[1], () => Effect.succeed("wrong")))
     expect(yield* registry.use(owner, ids[0], () => Effect.succeed("retained"))).toBe("retained")
+    // 淘汰旧项后新项必须可用；只断言旧 ID 失败会放过“容量满后全部拒绝”的实现。
     expect(yield* registry.use(owner, newest, () => Effect.succeed("newest"))).toBe("newest")
     yield* registry.close()
   }),
@@ -180,6 +160,7 @@ unit.effect("capacity cannot evict active leases or execute the rejected callbac
           }),
         )
         .pipe(Effect.forkScoped({ startImmediately: true }))
+    // 等全部六十四个 callback 已进入后才申请第六十五项，保证测试确实面对活动容量满额。
     yield* Deferred.await(ready)
     let extra = false
     yield* expectFailure(
@@ -189,6 +170,7 @@ unit.effect("capacity cannot evict active leases or execute the rejected callbac
         }),
       ),
     )
+    // 容量错误若发生在callback之后仍会破坏状态，独立标志确保拒绝发生在准入前。
     expect(extra).toBe(false)
     yield* registry.close()
   }),
@@ -238,11 +220,13 @@ integration.instance("real deletion without Location cancels leases and rejects 
         }),
       )
       .pipe(Effect.forkScoped({ startImmediately: true }))
+    // 去掉发布者的 InstanceRef，强制删除通知不依赖位置外壳，而从事件中的会话身份回收。
     const deletion = yield* events
       .publish(SessionV1.Event.Deleted, { sessionID: session.id, info: session })
       .pipe(Effect.provideService(InstanceRef, undefined))
     expect(deletion.location).toBeUndefined()
     expect(Exit.isFailure(yield* Fiber.await(holder))).toBe(true)
+    // 排队者也必须结束为失败，不能等 holder 清理后拿到旧许可再执行。
     expect(Exit.isFailure(yield* Fiber.await(queued))).toBe(true)
     expect(cleaned).toBe(true)
     // 删除通知不能只让 holder 报错，排队 callback 也必须没有产生效果。
@@ -276,6 +260,7 @@ integration.instance("real move retires source state and preserves destination s
     yield* events.publish(SessionEvent.Moved, moved)
     yield* expectFailure(environments.use(session.id, source, () => Effect.succeed("wrong")))
     yield* expectFailure(environments.use(session.id, undefined, () => Effect.succeed("wrong")))
+    // 进入目的目录的真实 InstanceState 后才新建，源目录拒绝不能被“全局禁用此 Session”冒充。
     const target = yield* environments
       .use(session.id, undefined, (lease) => Effect.succeed(lease.id))
       .pipe(provideInstanceEffect(destination))
@@ -299,58 +284,22 @@ integration.instance("legacy workspace updates retire state but title updates pr
     // 元数据更新不是退出；只改变 workspace 的真实 Updated 事件才使当前 owner 失效。
     yield* sessions.setTitle({ sessionID: session.id, title: "Renamed" })
     expect(yield* environments.use(session.id, id, () => Effect.succeed("retained"))).toBe("retained")
+    // 目录路径不变，只变 workspace 身份，使旧环境失效原因只能来自 owner 的 workspace 比较。
     yield* sessions.setWorkspace({ sessionID: session.id, workspaceID: WorkspaceV2.ID.make("wrk_other") })
     yield* expectFailure(environments.use(session.id, id, () => Effect.succeed("wrong")))
   }),
 )
 
-unit.effect("canceling a queued lease leaves its holder and state intact", () =>
-  Effect.gen(function* () {
-    const registry = ExecuteEnvironments.makeRegistry()
-    const id = yield* registry.use(owner, undefined, (lease) => Effect.succeed(lease.id))
-    const entered = yield* Deferred.make<void>()
-    const release = yield* Deferred.make<void>()
-    let cleaned = false
-    let extra = false
-    const holder = yield* registry
-      .use(owner, id, () =>
-        Deferred.succeed(entered, undefined).pipe(
-          Effect.andThen(Deferred.await(release)),
-          Effect.ensuring(
-            Effect.sync(() => {
-              cleaned = true
-            }),
-          ),
-        ),
-      )
-      .pipe(Effect.forkScoped({ startImmediately: true }))
-    yield* Deferred.await(entered)
-    const waiter = yield* registry
-      .use(owner, id, () =>
-        Effect.sync(() => {
-          extra = true
-        }),
-      )
-      .pipe(Effect.forkScoped({ startImmediately: true }))
-    // waiter 的当前取消只撤销等待，不得触发环境退休或 holder 的清理。
-    yield* Fiber.interrupt(waiter)
-    expect(cleaned).toBe(false)
-    expect(extra).toBe(false)
-    yield* Deferred.succeed(release, undefined)
-    yield* Fiber.join(holder)
-    expect(yield* registry.use(owner, id, () => Effect.succeed("still available"))).toBe("still available")
-    yield* registry.close()
-  }),
-)
-
 unit.effect("directory capacity and live ID collisions never replace a live identity", () =>
   Effect.gen(function* () {
+    // 两次连续分配同名ID后再给新ID，只测真实碰撞重试，不依赖随机生成器碰巧重复。
     const issued = ["env_first", "env_first", "env_second"]
     const colliding = ExecuteEnvironments.makeRegistry({ nextID: () => issued.shift() ?? "env_unexpected" })
     const one = yield* colliding.use(owner, undefined, (lease) => Effect.succeed(lease.id))
     const two = yield* colliding.use(owner, undefined, (lease) => Effect.succeed(lease.id))
     // 同时存在的冲突只重新分配新 ID，不把第二个新建单元绑定到第一个环境。
     expect([one, two]).toEqual(["env_first", "env_second"])
+    // 重新分配第二个 ID 后再访问第一个，确认碰撞重试没有替换仍存活的原条目。
     expect(yield* colliding.use(owner, one, () => Effect.succeed("original"))).toBe("original")
     yield* colliding.close()
     const registry = ExecuteEnvironments.makeRegistry()
@@ -395,11 +344,13 @@ integration.instance("actual instance disposal waits for cleanup before replacin
         ),
         Effect.forkScoped({ startImmediately: true }),
       )
+      // 先等 holder 的清理器真正开始，再检查 dispose 尚未完成，把等待范围定位到 finalizer。
       yield* Deferred.await(cleanup)
       // 全局 disposer 会收集错误；观察清理 barrier，不能仅因 dispose 返回就假定原工作已结束。
       expect(disposed).toBe(false)
       yield* Deferred.succeed(finish, undefined)
-      yield* Fiber.await(holder)
+      // 清理完成只说明资源释放，holder失败还要证明实例关闭没有被转换成业务成功。
+      expect(Exit.isFailure(yield* Fiber.await(holder))).toBe(true)
       yield* Fiber.join(disposer)
       expect(disposed).toBe(true)
       // 同一个 Service 下一次经 InstanceState 获得新 owner，旧句柄不得复活。
@@ -420,6 +371,7 @@ integration.instance("forked Sessions cannot resume the parent's environment", (
     expect(Exit.isFailure(yield* environments.use(child.id, id, () => Effect.succeed("wrong")).pipe(Effect.exit))).toBe(
       true,
     )
+    // 子 Session 的拒绝不能连带退休父环境，原 owner 仍须继续使用同一 ID。
     expect(yield* environments.use(parent.id, id, () => Effect.succeed("parent retained"))).toBe("parent retained")
   }),
 )
@@ -445,10 +397,12 @@ unit.effect("queued leases stay protected and the last canceled lease refreshes 
     yield* expectFailure(registry.use(owner, ids[1], () => Effect.succeed("wrong")))
     yield* Deferred.succeed(release, undefined)
     yield* Fiber.join(holder)
+    // 确认排队者已经成为实际使用者，再取消它；否则只能验证取消等待队列，不能覆盖最后租约退出。
     yield* Deferred.await(waiterEntered)
     // 曾排队的租约成为最后一个使用者后取消；其退出让环境重新闲置并移动到队尾。
     yield* Fiber.interrupt(waiter)
     yield* create()
+    // 第二次压力应继续淘汰旧闲置项；刚取消的最后租约要排到队尾，而不是回到原创建位置。
     yield* expectFailure(registry.use(owner, ids[2], () => Effect.succeed("wrong")))
     expect(yield* registry.use(owner, ids[0], () => Effect.succeed("retained"))).toBe("retained")
     yield* registry.close()

@@ -263,7 +263,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                       return Effect.tryPromise({ try: () => pending, catch: (error) => error }).pipe(
                         // 根作用域或宿主中断时先通知该次 child，再等待原清理；race 选出赢家本身不取消败方。
                         Effect.onInterrupt(() => Effect.sync(() => cancel.abort())),
-                        Effect.ensuring(Effect.promise(() => pending.then(() => undefined, () => undefined))),
+                        // abort 只发通知；等原 Promise 结束后，同环境下一格才能接管真实资源。
+                        Effect.ensuring(
+                          Effect.promise(() =>
+                            pending.then(
+                              () => undefined,
+                              () => undefined,
+                            ),
+                          ),
+                        ),
                       )
                     }),
                   ).pipe(Effect.onExit(() => Effect.gen(function* () {
@@ -611,21 +619,32 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const eligible = ToolSelection.filter(inventory, input.agent.permission, input.session.permission, input.userTools)
   // 捕获的 Agent 和模型工具选择保持整轮稳定，运行中只刷新 Session 开关与连接成员。
   const servers = Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize).sort((a, b) => b.length - a.length)
-  catalog.push(...Object.values(eligible)
-    // 审批内部工具与 execute 自身不进入脚本目录，避免扩大权限或递归包装。
-    .filter((item) => !["execute", "invalid", "_noop", "StructuredOutput", "permission_review_decision"].includes(item.id))
-    .map((item): CatalogEntry => {
-      const entry = mcpTools[item.id]
-      // 保持已发布的 MCP namespace.local 拼法，包含带下划线的 server 名。
-      const server = entry
-        ? servers.find((name) => item.id.startsWith(name + "_")) ?? (item.id.includes("_") ? item.id.slice(0, item.id.indexOf("_")) : item.id)
-        : "$opencode"
-      const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id
-      // 文字工具已有 output:string 合同；远端声明保持原状，原生结构化结果复用原 codec。
-      return { id: item.id, path: [server, local], description: item.description,
-        // 只转交真实包装器保留的原 schema；MCP/自定义工具不会从展示字段获得新输入权限。
-        runtimeParameters: item.runtimeParameters, inputSchema: ToolJsonSchema.fromTool(item), outputSchema: entry ? McpCatalog.schemas(entry.def).output : item.output ?? Schema.String }
-    }))
+  catalog.push(
+    ...Object.values(eligible)
+      // 审批内部工具与 execute 自身不进入脚本目录，避免扩大权限或递归包装。
+      .filter(
+        (item) => !["execute", "invalid", "_noop", "StructuredOutput", "permission_review_decision"].includes(item.id),
+      )
+      .map((item): CatalogEntry => {
+        const entry = mcpTools[item.id]
+        // 保持已发布的 MCP namespace.local 拼法，包含带下划线的 server 名。
+        const server = entry
+          ? (servers.find((name) => item.id.startsWith(name + "_")) ??
+            (item.id.includes("_") ? item.id.slice(0, item.id.indexOf("_")) : item.id))
+          : "$opencode"
+        const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id
+        // 文字工具已有 output:string 合同；远端声明保持原状，原生结构化结果复用原 codec。
+        return {
+          id: item.id,
+          path: [server, local],
+          description: item.description,
+          // 只转交真实包装器保留的原 schema；MCP/自定义工具不会从展示字段获得新输入权限。
+          runtimeParameters: item.runtimeParameters,
+          inputSchema: ToolJsonSchema.fromTool(item),
+          outputSchema: entry ? McpCatalog.schemas(entry.def).output : (item.output ?? Schema.String),
+        }
+      }),
+  )
   for (const item of Object.values(eligible)) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     // Provider 只负责参数呈现；直接与嵌套入口都继续复用工具原来的运行时校验。

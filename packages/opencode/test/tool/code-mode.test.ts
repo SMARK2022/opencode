@@ -1,4 +1,4 @@
-// 共享说明是宿主实际公开的合同来源；引用它可验证出口一致而不锁定过时文案摘要。
+// 宿主夹具沿用真实解释器与租约服务，覆盖跨调用状态和取消边界。
 import { CodeMode } from "@opencode-ai/codemode"
 import { afterEach, describe, expect, test } from "bun:test"
 import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
@@ -6,16 +6,17 @@ import { McpCatalog } from "@/mcp/catalog"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Agent } from "@/agent/agent"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { filesystem } from "@opencode-ai/core/effect/app-node-platform"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { MCP } from "@/mcp"
 import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
 import * as Truncate from "@/tool/truncate"
 import { MessageID, SessionID } from "@/session/schema"
-// 虚拟时钟在宿主执行接缝推进十分钟；不替换解释器或为测试新增生产超时入口。
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
-import { testEffect } from "../lib/effect"
-// 直接宿主夹具也使用真实环境引擎，不能把 registry stub 成每次新建状态。
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { ExecuteEnvironments } from "@/tool/execute-environments"
 
 const ctx: Tool.Context = {
@@ -53,11 +54,14 @@ afterEach(async () => {
 function harness() {
   return Layer.mergeAll(
     Layer.sync(ExecuteEnvironments.Service, () => {
+      // 只替代Session归属查询，租约和词法环境仍用真实引擎，跨调用状态由它持有。
       const registry = ExecuteEnvironments.makeRegistry()
       registries.add(registry)
       return { use: (sessionID, id, run) => registry.use({ sessionID, directory: "/fixture" }, id, run) }
     }),
+    // 常规宿主用例不落盘；大输出用例另接原Truncate服务验证完整恢复文件。
     Layer.mock(Truncate.Service, {
+      limits: () => Effect.succeed({ maxBytes: Truncate.MAX_BYTES, maxLines: Truncate.MAX_LINES }),
       output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
     }),
     Layer.mock(Agent.Service, {
@@ -91,17 +95,31 @@ async function build(
       Effect.provide(harness()),
     ),
   )
-  return { ...definition, execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) => definition.execute(params, {
-    ...ctx, codeMode: {
-      catalog, signal: ctx.abort, begin: () => Effect.void,
-      invoke: (id, input) => Effect.gen(function* () {
-        // transport/result 使用真实协议 owner；夹具只替代本测试范围外的 Session 宿主。
-        const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], input, ctx.abort))
-        // 测试与 SessionTools 一样传递声明，避免夹具误把已声明文本当成候选。
-        return { title: id, output: "", metadata: {}, program: McpCatalog.programResult(result, mcpTools[id].def.outputSchema) }
+  // 初始化 Effect 已返回，后续 execute 仍消费同一 registry；这能发现把环境误绑到初始化作用域的问题。
+  return {
+    ...definition,
+    execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      definition.execute(params, {
+        ...ctx,
+        codeMode: {
+          catalog,
+          signal: ctx.abort,
+          begin: () => Effect.void,
+          invoke: (id, input) =>
+            Effect.gen(function* () {
+              // transport/result 使用真实协议 owner；夹具只替代本测试范围外的 Session 宿主。
+              const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], input, ctx.abort))
+              // 测试与 SessionTools 一样传递声明，避免夹具误把已声明文本当成候选。
+              return {
+                title: id,
+                output: "",
+                metadata: {},
+                program: McpCatalog.programResult(result, mcpTools[id].def.outputSchema),
+              }
+            }),
+        },
       }),
-    },
-  }) }
+  }
 }
 
 function describeFor(mcpTools: Record<string, MCP.McpTool>, servers?: string[], permission: PermissionV1.Rule[] = []) {
@@ -129,7 +147,10 @@ describe("code mode execute", () => {
     await expect(Effect.runPromise(decode({ code: "return 1" }))).resolves.toEqual({ code: "return 1" })
     await expect(Effect.runPromise(decode({}))).rejects.toThrow()
     // 空 ID 是显式的恢复请求，schema 不能把它变成缺省的新环境创建。
-    expect(await Effect.runPromise(decode({ code: "return 1", environmentID: "" }))).toEqual({ code: "return 1", environmentID: "" })
+    expect(await Effect.runPromise(decode({ code: "return 1", environmentID: "" }))).toEqual({
+      code: "return 1",
+      environmentID: "",
+    })
     expect(Exit.isFailure(await Effect.runPromiseExit(decode({ code: "return 1", environmentID: 1 })))).toBe(true)
     // 缺省值留给宿主运行策略；解码只接受安全正整数，不把字符串、零或非有限数悄悄修正。
     for (const timeout of [1, 600000, Number.MAX_SAFE_INTEGER]) {
@@ -150,7 +171,10 @@ describe("code mode execute", () => {
 
   test("omission creates state and explicit IDs preserve results and mutations across errors", async () => {
     const tool = await build({})
-    const first = await Effect.runPromise(tool.execute({ code: 'let n = 0; function next() { return ++n }; return "created"' }, ctx))
+    const first = await Effect.runPromise(
+      tool.execute({ code: 'let n = 0; function next() { return ++n }; return "created"' }, ctx),
+    )
+    // next 捕获的 n 与后续单元共享同一绑定；只保存最后返回值无法通过下一次递增。
     const environmentID = first.metadata.environmentID
     expect(scriptOutput(first)).toBe("created")
     expect(scriptOutput(await Effect.runPromise(tool.execute({ environmentID, code: "return next()" }, ctx)))).toBe("1")
@@ -161,178 +185,361 @@ describe("code mode execute", () => {
       ["n++; await Promise.race([])", "3", 5],
     ] as const) {
       const error = await failure(tool.execute({ environmentID, code, ...(timeout ? { timeout } : {}) }, ctx))
+      // 失败文本必须给出原句柄，下一次读取才能验证同一环境中的修改，而非另建状态。
       expect(error.message.startsWith(`Environment: ${environmentID}\n\n`)).toBe(true)
       expect(scriptOutput(await Effect.runPromise(tool.execute({ environmentID, code: "return n" }, ctx)))).toBe(value)
     }
     // 没有显式句柄就没有状态继承；无效/跨会话 ID 不能偷偷创建替代环境。
+    // 这里省略 ID 而不是换用另一工具实例，排除宿主把最近环境当成默认值。
     expect((await failure(tool.execute({ code: "return n" }, ctx))).message).toContain("Unknown identifier")
-    for (const id of ["", "env_unknown"]) expect((await failure(tool.execute({ environmentID: id, code: 'return "wrong"' }, ctx))).message).toContain("unavailable")
-    expect((await failure(tool.execute({ environmentID, code: "return n" }, { ...ctx, sessionID: SessionID.make("ses_other") }))).message).toContain("unavailable")
+    for (const id of ["", "env_unknown"])
+      expect((await failure(tool.execute({ environmentID: id, code: 'return "wrong"' }, ctx))).message).toContain(
+        "unavailable",
+      )
+    expect(
+      (
+        await failure(
+          tool.execute({ environmentID, code: "return n" }, { ...ctx, sessionID: SessionID.make("ses_other") }),
+        )
+      ).message,
+    ).toContain("unavailable")
   })
 
-  testEffect(harness()).effect("runtime schema owns shortcuts while defaults and permission inputs execute once", () => Effect.gen(function* () {
-    let defaults = 0
-    const decoded: unknown[] = []
-    const asked: unknown[] = []
-    const observed: unknown[] = []
-    const parameters = Schema.Struct({count:Schema.NumberFromString, flag:Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.sync(() => { defaults++; return true })))})
-    // define 显式绑定 decoder 泛型，让 body 收到已解码类型；宿主适配边界仍以擦除的 Def 接收原始编码值。
-    // 不能为了类型检查在此再 decode 一次，否则默认值副作用与真实运行合同都会改变。
-    const native: Tool.Def = yield* Tool.define<typeof parameters, Record<string, unknown>, never>("count", Effect.succeed({
-      description:"count", parameters,
-      // initializer 给出的伪 provenance 必须被真实包装器覆盖，不能改变现有 decoder 的来源。
-      runtimeParameters: Schema.Struct({count:Schema.NumberFromString, flag:Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))) }),
-      execute: (input, context) => Effect.gen(function* () {
-        decoded.push(input)
-        yield* context.ask({permission:"read",patterns:[String(input.count)],always:[],metadata:input})
-        return {title:"count",output:"",metadata:{},program:{value:input}}
-      }),
-    })).pipe(Effect.flatMap(Tool.init))
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const catalog: CatalogEntry[] = [{id:"count",path:["host","count"],description:"count",runtimeParameters:native.runtimeParameters,
-      inputSchema:{type:"object",properties:{displayOnly:{type:"number"}},required:["displayOnly"]}}]
-    yield* describeCatalog(catalog)
-    expect(defaults).toBe(0)
-    for (const args of ['"42"', '{count:"42"}']) {
-      const result = yield* tool.execute({code:`return await tools.host.count(${args})`},{...ctx,
-        ask:(request)=>Effect.sync(()=>{asked.push(request.metadata)}),codeMode:{catalog,signal:ctx.abort,
-          begin:(_code,calls)=>Effect.sync(()=>{observed.push(...calls.map((call)=>call.input))}),
-          invoke:(_id,input)=>native.execute(input,{...ctx,ask:(request)=>Effect.sync(()=>{asked.push(request.metadata)})})}})
-      // 预跑及目录分类不运行默认值；真实 permission 与业务函数看到原 decoder 的同一结果。
-      expect(JSON.parse(scriptOutput(result))).toEqual({count:42,flag:true})
-    }
-    expect(observed).toEqual([{count:"42"},{count:"42"}])
-    expect(decoded).toEqual([{count:42,flag:true},{count:42,flag:true}])
-    expect(asked).toEqual(decoded)
-    expect(defaults).toBe(2)
-  }))
-
-  testEffect(harness()).effect("abort during first metadata publication preserves model-readable handle", () => Effect.gen(function* () {
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const controller = new AbortController()
-    const snapshots: Array<{ metadata?: Record<string, unknown> }> = []
-    let reviewed = false
-    const exit = yield* tool.execute({ code: "return 1" }, {
-      ...ctx, abort: controller.signal,
-      // 在预跑及运行 finalizer 安装之前取消；已接纳的句柄仍须能经父失败输出交付。
-      metadata: (value) => Effect.sync(() => { snapshots.push(value); controller.abort() }),
-      codeMode: { catalog: [], signal: controller.signal,
-        begin: () => Effect.sync(() => { reviewed = true }), invoke: () => Effect.die("Unexpected invocation") },
-    }).pipe(Effect.exit)
-    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
-    expect(reviewed).toBe(false)
-    expect(snapshots.length).toBeGreaterThan(0)
-    const id = snapshots[0].metadata?.environmentID
-    expect(id).toMatch(/^env_/)
-    // metadata 回调是替换协议，任一更新都不能仅留下 UI 可见但模型不可恢复的 ID。
-    for (const snapshot of snapshots) {
-      expect(snapshot.metadata?.environmentID).toBe(id)
-      expect(snapshot.metadata?.output).toBe(`Environment: ${String(id)}`)
-    }
-  }))
-
-  testEffect(harness()).effect("queued host abort releases only the waiter and does not spend its execution timeout", () => Effect.gen(function* () {
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const ready = yield* Deferred.make<void>()
-    const release = yield* Deferred.make<void>()
-    const host = {
-      catalog: [{ id: "wait", path: ["host", "wait"] as const, description: "wait", inputSchema: { type: "object" as const, properties: {} } }],
-      signal: ctx.abort, begin: () => Effect.void,
-      invoke: () => Deferred.succeed(ready, undefined).pipe(Effect.andThen(Deferred.await(release)),
-        Effect.as({ title: "wait", output: "done", metadata: {} })),
-    }
-    const first = yield* tool.execute({ code: "let n = 0; return n" }, { ...ctx, codeMode: host })
-    const environmentID = first.metadata.environmentID
-    const holder = yield* tool.execute({ environmentID, code: "n++; await tools.host.wait({}); return n", timeout: 1000 }, { ...ctx, codeMode: host }).pipe(Effect.forkScoped)
-    yield* Deferred.await(ready)
-    const controller = new AbortController()
-    const queued = yield* tool.execute({ environmentID, code: "n = 99; return n", timeout: 25 }, {
-      ...ctx, abort: controller.signal, codeMode: { ...host, signal: controller.signal },
-    }).pipe(Effect.exit, Effect.forkScoped)
-    // 虚拟时间越过等待者的执行预算；仍在队列中时，25ms 不能开始计时或触碰词法状态。
-    yield* TestClock.adjust(100)
-    expect(queued.pollUnsafe()).toBeUndefined()
-    controller.abort()
-    const exit = yield* Fiber.join(queued)
-    expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
-    // 取消排队请求不能取消当前持有者；释放真实等待后仍只有持有者执行的那次加一。
-    expect(holder.pollUnsafe()).toBeUndefined()
-    yield* Deferred.succeed(release, undefined)
-    expect(scriptOutput(yield* Fiber.join(holder))).toBe("1")
-    expect(scriptOutput(yield* tool.execute({ environmentID, code: "return n" }, { ...ctx, codeMode: host }))).toBe("1")
-  }))
-
-  testEffect(harness()).effect("single JS and TS fences share the raw permission and execution body", () => Effect.gen(function* () {
-    // 直接观察公开 begin 与 invoke；预跑记录的参数、审查源码和真实工具输入必须来自同一正文。
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const body = "return (await tools.host.echo({value:7})).value as number"
-    const reviewed: Array<{ code: string; calls: readonly { tool: string; input: unknown }[] }> = []
-    const inputs: unknown[] = []
-    // 外侧空白和 CRLF 只是围栏排版，正文自身仍逐字进入权限审查。
-    const sources = [body, ...["", "js", "javascript", "ts", "typescript"].map((tag) => `  \n\`\`\`${tag}\n${body}\n\`\`\`\n `), `\`\`\`ts\r\n${body}\r\n\`\`\``]
-    for (const code of sources) {
-      const out = yield* tool.execute({ code }, {
-        ...ctx, codeMode: {
-          catalog: [{ id: "echo", path: ["host", "echo"], description: "echo", inputSchema: { type: "object", properties: { value: { type: "number" } } } }],
-          signal: ctx.abort,
-          begin: (code, calls) => Effect.sync(() => { reviewed.push({ code, calls }) }),
-          invoke: (_id, input) => Effect.sync(() => { inputs.push(input); return { title: "echo", output: "", metadata: {}, program: { value: input } } }),
-        },
+  testEffect(harness()).effect("runtime schema owns shortcuts while defaults and permission inputs execute once", () =>
+    Effect.gen(function* () {
+      let defaults = 0
+      const decoded: unknown[] = []
+      const asked: unknown[] = []
+      const observed: unknown[] = []
+      // count 的编码类型是字符串、执行类型是数字；转换有可见差异，不能由恒等 decoder 凑绿。
+      const parameters = Schema.Struct({
+        count: Schema.NumberFromString,
+        flag: Schema.Boolean.pipe(
+          Schema.withDecodingDefaultKey(
+            Effect.sync(() => {
+              defaults++
+              return true
+            }),
+          ),
+        ),
       })
-      // 原 TS 编译路径继续处理类型断言；不是先尝试原文失败后再切换另一套解析器。
-      expect(scriptOutput(out)).toBe("7")
-      expect(reviewed.at(-1)).toEqual({ code: body, calls: [{ tool: "echo", input: { value: 7 } }] })
-    }
-    expect(inputs).toEqual(Array.from({ length: sources.length }, () => ({ value: 7 })))
-  }))
+      // define 显式绑定 decoder 泛型，让 body 收到已解码类型；宿主适配边界仍以擦除的 Def 接收原始编码值。
+      // 不能为了类型检查在此再 decode 一次，否则默认值副作用与真实运行合同都会改变。
+      const native: Tool.Def = yield* Tool.define<typeof parameters, Record<string, unknown>, never>(
+        "count",
+        Effect.succeed({
+          description: "count",
+          parameters,
+          // initializer 给出的伪 provenance 必须被真实包装器覆盖，不能改变现有 decoder 的来源。
+          runtimeParameters: Schema.Struct({
+            count: Schema.NumberFromString,
+            flag: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
+          }),
+          execute: (input, context) =>
+            Effect.gen(function* () {
+              decoded.push(input)
+              yield* context.ask({ permission: "read", patterns: [String(input.count)], always: [], metadata: input })
+              return { title: "count", output: "", metadata: {}, program: { value: input } }
+            }),
+        }),
+      ).pipe(Effect.flatMap(Tool.init))
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const catalog: CatalogEntry[] = [
+        {
+          id: "count",
+          path: ["host", "count"],
+          description: "count",
+          runtimeParameters: native.runtimeParameters,
+          // 展示声明故意要求不相关字段，标量简写仍须按原 decoder 找到唯一必填的 count。
+          inputSchema: { type: "object", properties: { displayOnly: { type: "number" } }, required: ["displayOnly"] },
+        },
+      ]
+      // 初始化器声明的默认值为false，真实decoder为true；返回值能识别provenance是否被伪造。
+      yield* describeCatalog(catalog)
+      // 尚未调用工具时默认值计数必须为零，目录生成若执行 decoder 会在此直接暴露。
+      expect(defaults).toBe(0)
+      for (const args of ['"42"', '{count:"42"}']) {
+        const result = yield* tool.execute(
+          { code: `return await tools.host.count(${args})` },
+          {
+            ...ctx,
+            ask: (request) =>
+              Effect.sync(() => {
+                asked.push(request.metadata)
+              }),
+            codeMode: {
+              catalog,
+              signal: ctx.abort,
+              begin: (_code, calls) =>
+                Effect.sync(() => {
+                  observed.push(...calls.map((call) => call.input))
+                }),
+              invoke: (_id, input) =>
+                native.execute(input, {
+                  ...ctx,
+                  ask: (request) =>
+                    Effect.sync(() => {
+                      asked.push(request.metadata)
+                    }),
+                }),
+            },
+          },
+        )
+        // 预跑及目录分类不运行默认值；真实 permission 与业务函数看到原 decoder 的同一结果。
+        expect(JSON.parse(scriptOutput(result))).toEqual({ count: 42, flag: true })
+      }
+      // 审查拿encoded字符串，权限和工具正文拿decoded数字；三个观察面共同定位转换所在入口。
+      expect(observed).toEqual([{ count: "42" }, { count: "42" }])
+      expect(decoded).toEqual([
+        { count: 42, flag: true },
+        { count: 42, flag: true },
+      ])
+      expect(asked).toEqual(decoded)
+      // 两种输入各执行一次默认值；权限检查与预跑若额外解码，计数就会超过实际调用数。
+      expect(defaults).toBe(2)
+    }),
+  )
+
+  testEffect(harness()).effect("abort during first metadata publication preserves model-readable handle", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const controller = new AbortController()
+      const snapshots: Array<{ metadata?: Record<string, unknown> }> = []
+      let reviewed = false
+      const exit = yield* tool
+        .execute(
+          { code: "return 1" },
+          {
+            ...ctx,
+            abort: controller.signal,
+            // 在预跑及运行 finalizer 安装之前取消；已接纳的句柄仍须能经父失败输出交付。
+            metadata: (value) =>
+              Effect.sync(() => {
+                snapshots.push(value)
+                controller.abort()
+              }),
+            codeMode: {
+              catalog: [],
+              signal: controller.signal,
+              begin: () =>
+                Effect.sync(() => {
+                  reviewed = true
+                }),
+              invoke: () => Effect.die("Unexpected invocation"),
+            },
+          },
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+      // 审查尚未开始就中断，证明句柄交付不依赖 begin 或任何 leaf 已经启动。
+      expect(reviewed).toBe(false)
+      expect(snapshots.length).toBeGreaterThan(0)
+      const id = snapshots[0].metadata?.environmentID
+      expect(id).toMatch(/^env_/)
+      // metadata 回调是替换协议，任一更新都不能仅留下 UI 可见但模型不可恢复的 ID。
+      for (const snapshot of snapshots) {
+        expect(snapshot.metadata?.environmentID).toBe(id)
+        expect(snapshot.metadata?.output).toBe(`Environment: ${String(id)}`)
+      }
+    }),
+  )
+
+  testEffect(harness()).effect(
+    "queued host abort releases only the waiter and does not spend its execution timeout",
+    () =>
+      Effect.gen(function* () {
+        const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+        const ready = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const host = {
+          catalog: [
+            {
+              id: "wait",
+              path: ["host", "wait"] as const,
+              description: "wait",
+              inputSchema: { type: "object" as const, properties: {} },
+            },
+          ],
+          signal: ctx.abort,
+          begin: () => Effect.void,
+          invoke: () =>
+            Deferred.succeed(ready, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as({ title: "wait", output: "done", metadata: {} }),
+            ),
+        }
+        const first = yield* tool.execute({ code: "let n = 0; return n" }, { ...ctx, codeMode: host })
+        const environmentID = first.metadata.environmentID
+        const holder = yield* tool
+          .execute(
+            { environmentID, code: "n++; await tools.host.wait({}); return n", timeout: 1000 },
+            { ...ctx, codeMode: host },
+          )
+          .pipe(Effect.forkScoped)
+        // holder已改写n并进入宿主等待后才创建排队者，后续n=1能定位谁真正取得租约。
+        yield* Deferred.await(ready)
+        const controller = new AbortController()
+        const queued = yield* tool
+          .execute(
+            { environmentID, code: "n = 99; return n", timeout: 25 },
+            {
+              ...ctx,
+              abort: controller.signal,
+              codeMode: { ...host, signal: controller.signal },
+            },
+          )
+          .pipe(Effect.exit, Effect.forkScoped)
+        // 虚拟时间越过等待者的执行预算；仍在队列中时，25ms 不能开始计时或触碰词法状态。
+        yield* TestClock.adjust(100)
+        expect(queued.pollUnsafe()).toBeUndefined()
+        controller.abort()
+        const exit = yield* Fiber.join(queued)
+        expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+        // 取消排队请求不能取消当前持有者；释放真实等待后仍只有持有者执行的那次加一。
+        expect(holder.pollUnsafe()).toBeUndefined()
+        yield* Deferred.succeed(release, undefined)
+        expect(scriptOutput(yield* Fiber.join(holder))).toBe("1")
+        // 再开一个单元检查 n，排除排队者取消后仍迟到执行 n = 99。
+        expect(scriptOutput(yield* tool.execute({ environmentID, code: "return n" }, { ...ctx, codeMode: host }))).toBe(
+          "1",
+        )
+      }),
+  )
+
+  testEffect(harness()).effect("single JS and TS fences share the raw permission and execution body", () =>
+    Effect.gen(function* () {
+      // 直接观察公开 begin 与 invoke；预跑记录的参数、审查源码和真实工具输入必须来自同一正文。
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const body = "return (await tools.host.echo({value:7})).value as number"
+      const reviewed: Array<{ code: string; calls: readonly { tool: string; input: unknown }[] }> = []
+      const inputs: unknown[] = []
+      // 外侧空白和 CRLF 只是围栏排版，正文自身仍逐字进入权限审查。
+      const sources = [
+        body,
+        ...["", "js", "javascript", "ts", "typescript"].map((tag) => `  \n\`\`\`${tag}\n${body}\n\`\`\`\n `),
+        `\`\`\`ts\r\n${body}\r\n\`\`\``,
+      ]
+      for (const code of sources) {
+        const out = yield* tool.execute(
+          { code },
+          {
+            ...ctx,
+            codeMode: {
+              catalog: [
+                {
+                  id: "echo",
+                  path: ["host", "echo"],
+                  description: "echo",
+                  inputSchema: { type: "object", properties: { value: { type: "number" } } },
+                },
+              ],
+              signal: ctx.abort,
+              begin: (code, calls) =>
+                Effect.sync(() => {
+                  reviewed.push({ code, calls })
+                }),
+              invoke: (_id, input) =>
+                Effect.sync(() => {
+                  inputs.push(input)
+                  return { title: "echo", output: "", metadata: {}, program: { value: input } }
+                }),
+            },
+          },
+        )
+        // 原 TS 编译路径继续处理类型断言；不是先尝试原文失败后再切换另一套解析器。
+        expect(scriptOutput(out)).toBe("7")
+        expect(reviewed.at(-1)).toEqual({ code: body, calls: [{ tool: "echo", input: { value: 7 } }] })
+      }
+      // 每种包裹只产生一次真实输入；仅核对审查正文会漏掉预跑错误调用宿主的重复副作用。
+      expect(inputs).toEqual(Array.from({ length: sources.length }, () => ({ value: 7 })))
+    }),
+  )
 
   test("mixed or multiple fences are not extracted and raw strings remain intact", async () => {
     // 把合法调用放进非法包裹；若实现擅自抽取其中一个块，独立副作用清单就会暴露执行。
     const called: string[] = []
-    const tool = await build({ host_touch: mcpTool("touch", () => { called.push("touch"); return "ok" }) })
+    const tool = await build({
+      host_touch: mcpTool("touch", () => {
+        called.push("touch")
+        return "ok"
+      }),
+    })
     const body = "await tools.host.touch({}); return 1"
     const fence = `\`\`\`js\n${body}\n\`\`\``
-    for (const code of [`prose\n${fence}`, `${fence}\nprose`, `${fence}\n${fence}`, `\`\`\`python\n${body}\n\`\`\``, `\`\`\`js\n${body}`, `\`\`\`js\n${fence}\n\`\`\``]) {
+    for (const code of [
+      `prose\n${fence}`,
+      `${fence}\nprose`,
+      `${fence}\n${fence}`,
+      `\`\`\`python\n${body}\n\`\`\``,
+      `\`\`\`js\n${body}`,
+      `\`\`\`js\n${fence}\n\`\`\``,
+    ]) {
       expect((await failure(tool.execute({ code }, ctx))).message.length).toBeGreaterThan(0)
     }
     expect(called).toEqual([])
     // 围栏样式可以是普通 JS 字符串数据，只有完整输入 envelope 才允许规范化。
     const literal = "```javascript\nnot code\n```"
-    expect(scriptOutput(await Effect.runPromise(tool.execute({ code: `return ${JSON.stringify(literal)}` }, ctx)))).toBe(literal)
+    expect(
+      scriptOutput(await Effect.runPromise(tool.execute({ code: `return ${JSON.stringify(literal)}` }, ctx))),
+    ).toBe(literal)
   })
 
-  for (const timeout of [undefined, 25]) testEffect(harness()).effect(`execution budget uses ${timeout ?? "default"} milliseconds after review`, () => Effect.gen(function* () {
-    // 默认十分钟与显式毫秒值走同一公开宿主；待审时间不能挤占真正执行的预算。
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const reviewing = yield* Deferred.make<void>()
-    const reviewed = yield* Deferred.make<void>()
-    const started = yield* Deferred.make<void>()
-    let cleaned = false
-    const pending = yield* tool.execute({ code: 'await tools.host.wait({}); return "unreachable"', ...(timeout === undefined ? {} : { timeout }) }, {
-      ...ctx, codeMode: {
-        catalog: [{ id: "wait", path: ["host", "wait"], description: "wait", inputSchema: { type: "object", properties: {} } }],
-        signal: ctx.abort,
-        begin: () => Deferred.succeed(reviewing, undefined).pipe(Effect.andThen(Deferred.await(reviewed))),
-        invoke: () => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never),
-          Effect.onInterrupt(() => Effect.sync(() => { cleaned = true }))),
-      },
-    }).pipe(Effect.exit, Effect.forkScoped)
-    yield* Deferred.await(reviewing)
-    yield* TestClock.adjust(600001)
-    expect(pending.pollUnsafe()).toBeUndefined()
-    yield* Deferred.succeed(reviewed, undefined)
-    // 工具发出开始信号后才推进时钟，避免把加载/预跑耗时误当运行超时。
-    yield* Deferred.await(started)
-    yield* TestClock.adjust((timeout ?? 600000) - 1)
-    expect(pending.pollUnsafe()).toBeUndefined()
-    expect(cleaned).toBe(false)
-    yield* TestClock.adjust(1)
-    // 到期必须已结束并完成清理，而不是只把超时原因写到仍运行的子调用上。
-    expect(pending.pollUnsafe()).toBeDefined()
-    const exit = yield* Fiber.join(pending)
-    expect(Exit.isFailure(exit) && String(Cause.squash(exit.cause))).toContain("timed out")
-    expect(cleaned).toBe(true)
-  }))
+  for (const timeout of [undefined, 25])
+    testEffect(harness()).effect(`execution budget uses ${timeout ?? "default"} milliseconds after review`, () =>
+      Effect.gen(function* () {
+        // 默认十分钟与显式毫秒值走同一公开宿主；待审时间不能挤占真正执行的预算。
+        const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+        const reviewing = yield* Deferred.make<void>()
+        const reviewed = yield* Deferred.make<void>()
+        const started = yield* Deferred.make<void>()
+        let cleaned = false
+        const pending = yield* tool
+          .execute(
+            { code: 'await tools.host.wait({}); return "unreachable"', ...(timeout === undefined ? {} : { timeout }) },
+            {
+              ...ctx,
+              codeMode: {
+                catalog: [
+                  {
+                    id: "wait",
+                    path: ["host", "wait"],
+                    description: "wait",
+                    inputSchema: { type: "object", properties: {} },
+                  },
+                ],
+                signal: ctx.abort,
+                begin: () => Deferred.succeed(reviewing, undefined).pipe(Effect.andThen(Deferred.await(reviewed))),
+                invoke: () =>
+                  Deferred.succeed(started, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() =>
+                      Effect.sync(() => {
+                        cleaned = true
+                      }),
+                    ),
+                  ),
+              },
+            },
+          )
+          .pipe(Effect.exit, Effect.forkScoped)
+        yield* Deferred.await(reviewing)
+        // 先越过默认十分钟再放行审查，省略和显式超时都必须从执行开始才消耗预算。
+        yield* TestClock.adjust(600001)
+        expect(pending.pollUnsafe()).toBeUndefined()
+        yield* Deferred.succeed(reviewed, undefined)
+        // 工具发出开始信号后才推进时钟，避免把加载/预跑耗时误当运行超时。
+        yield* Deferred.await(started)
+        yield* TestClock.adjust((timeout ?? 600000) - 1)
+        expect(pending.pollUnsafe()).toBeUndefined()
+        expect(cleaned).toBe(false)
+        yield* TestClock.adjust(1)
+        // 到期必须已结束并完成清理，而不是只把超时原因写到仍运行的子调用上。
+        expect(pending.pollUnsafe()).toBeDefined()
+        const exit = yield* Fiber.join(pending)
+        expect(Exit.isFailure(exit) && String(Cause.squash(exit.cause))).toContain("timed out")
+        expect(cleaned).toBe(true)
+      }),
+    )
 
   test("renders the supplied multi-underscore namespace", async () => {
     const description = await describeFor({ my_server_do_thing: mcpTool("do_thing", () => "") }, ["my_server"])
@@ -358,40 +565,78 @@ describe("code mode execute", () => {
       },
       ["weather"],
     )
-    // 紧凑目录仍由同一原始输入/输出 schema 渲染；字段说明保留在搜索索引，签名统一使用紧凑类型。
+    // 返回类型只由MCP声明决定，紧凑展示不能借模拟执行结果猜测业务结构。
     expect(description).toContain("tools.weather.current(input: { city: string }): Promise<{ tempC: number }>")
   })
 
   test("the static base description exposes shared guidance without a session catalog", async () => {
     const tool = await build({ github_list_issues: mcpTool("list_issues", () => "") })
     expect(tool.id).toBe(CODE_MODE_TOOL)
-    // 宿主沿用唯一共享说明，避免文案更新后仍锁定已废弃的上游摘要。
-    // 基础说明仍共享，只有宿主增加一句有实际 owner 支持的环境复用提示。
-    expect(tool.description).toBe(`${CodeMode.description}\nReuse the returned environmentID to continue with saved variables and functions; omit it for a fresh environment. Schema-less MCP object/array JSON text becomes data; use String(value) for its original text.`)
+    // 宿主只追加环境复用与MCP投影说明；通用使用指导仍须跟随共享文本更新。
+    expect(tool.description).toBe(
+      `${CodeMode.description}\nReuse the returned environmentID to continue with saved variables and functions; omit it for a fresh environment. Schema-less MCP object/array JSON text becomes data; use String(value) for its original text.`,
+    )
     expect(tool.description).not.toContain("Available tools")
     expect(tool.description).not.toContain("list_issues")
   })
 
-  testEffect(harness()).effect("only captured native core paths win catalog budget before shorter collisions", () => Effect.gen(function* () {
-    const native = yield* Tool.define("read",Effect.succeed({description:"native",parameters:Schema.Struct({filePath:Schema.String}),execute:()=>Effect.succeed({title:"",output:"",metadata:{}})})).pipe(Effect.flatMap(Tool.init))
-    // 足量短签名耗尽原预算；只有真正的 native provenance 能让较长 read 先获得展示机会。
-    const fillers:CatalogEntry[]=Array.from({length:250},(_,index)=>({id:`z${index}`,path:["host",`z${index}`],description:"",inputSchema:{type:"object",properties:{}}}))
-    // JSON schema 合同中的 required 是普通数组，不能由测试 as const 制造额外 readonly 限制。
-    const shape: CatalogEntry["inputSchema"] = {type:"object",properties:Object.fromEntries(Array.from({length:20},(_,index)=>[`field${index}`,{type:"string"}])),required:["field0"]}
-    for(const origin of ["native","custom","mcp"] as const){
-      const entry:CatalogEntry={id:origin === "mcp" ? "remote_read" : "read",path:[origin === "mcp" ? "remote" : "$opencode","read"],description:"",inputSchema:shape,
-        ...(origin === "native" ? {runtimeParameters:native.runtimeParameters} : {})}
-      const description=yield* describeCatalog([entry,...fillers])
-      expect(description).toContain("The catalog is partial")
-      // 同名自定义/MCP 条目不靠名字继承优先级；仍存在于原目录，不被删掉冒充安全过滤。
-      expect(description.includes(`tools.${entry.path[0]}.read(`)).toBe(origin === "native")
-      const tool=yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-      const result=yield* tool.execute({code:`return search({query:"read",namespace:${JSON.stringify(entry.path[0])},limit:1}).items.map(item=>item.path)`},{...ctx,codeMode:{catalog:[entry,...fillers],signal:ctx.abort,begin:()=>Effect.void,invoke:()=>Effect.die("Search must not invoke leaf")}})
-      expect(JSON.parse(scriptOutput(result))).toEqual([`tools.${entry.path[0]}.read`])
-    }
-    // 已过滤的核心条目不在输入目录中，优先策略不能重新创造它。
-    expect(yield* describeCatalog(fillers)).not.toContain("tools.$opencode.read(")
-  }))
+  testEffect(harness()).effect("only captured native core paths win catalog budget before shorter collisions", () =>
+    Effect.gen(function* () {
+      const native = yield* Tool.define(
+        "read",
+        Effect.succeed({
+          description: "native",
+          parameters: Schema.Struct({ filePath: Schema.String }),
+          execute: () => Effect.succeed({ title: "", output: "", metadata: {} }),
+        }),
+      ).pipe(Effect.flatMap(Tool.init))
+      // 足量短签名耗尽原预算；只有真正的 native provenance 能让较长 read 先获得展示机会。
+      const fillers: CatalogEntry[] = Array.from({ length: 250 }, (_, index) => ({
+        id: `z${index}`,
+        path: ["host", `z${index}`],
+        description: "",
+        inputSchema: { type: "object", properties: {} },
+      }))
+      // 非原生条目使用二十个字段的长签名，短填充条目会抢先耗尽预算，暴露同名条目是否冒领优先级。
+      const shape: CatalogEntry["inputSchema"] = {
+        type: "object",
+        properties: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`field${index}`, { type: "string" }])),
+        required: ["field0"],
+      }
+      for (const origin of ["native", "custom", "mcp"] as const) {
+        const entry: CatalogEntry = {
+          id: origin === "mcp" ? "remote_read" : "read",
+          path: [origin === "mcp" ? "remote" : "$opencode", "read"],
+          description: "",
+          inputSchema: shape,
+          ...(origin === "native" ? { runtimeParameters: native.runtimeParameters } : {}),
+        }
+        const description = yield* describeCatalog([entry, ...fillers])
+        expect(description).toContain("The catalog is partial")
+        // 同名自定义/MCP 条目不靠名字继承优先级；仍存在于原目录，不被删掉冒充安全过滤。
+        expect(description.includes(`tools.${entry.path[0]}.read(`)).toBe(origin === "native")
+        const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+        const result = yield* tool.execute(
+          {
+            code: `return search({query:"read",namespace:${JSON.stringify(entry.path[0])},limit:1}).items.map(item=>item.path)`,
+          },
+          {
+            ...ctx,
+            codeMode: {
+              catalog: [entry, ...fillers],
+              signal: ctx.abort,
+              begin: () => Effect.void,
+              invoke: () => Effect.die("Search must not invoke leaf"),
+            },
+          },
+        )
+        // 内联省略的条目仍能被 search 找到，预算裁剪不能变成调用目录的权限过滤。
+        expect(JSON.parse(scriptOutput(result))).toEqual([`tools.${entry.path[0]}.read`])
+      }
+      // 已过滤的核心条目不在输入目录中，优先策略不能重新创造它。
+      expect(yield* describeCatalog(fillers)).not.toContain("tools.$opencode.read(")
+    }),
+  )
 
   // 完整目录表示每个精确调用类型都可见，不要求字段说明占用内联预算。
   test("small catalogs inline every compact signature in the appended catalog", async () => {
@@ -409,7 +654,9 @@ describe("code mode execute", () => {
     expect(description).toContain("The catalog is complete.")
     expect(description).toContain("- github (2 tools)")
     expect(description).toContain("- linear (1 tool)")
-    expect(description).toContain("tools.github.create_issue(input: { title: string; body?: string }): Promise<unknown>")
+    expect(description).toContain(
+      "tools.github.create_issue(input: { title: string; body?: string }): Promise<unknown>",
+    )
     expect(description).toContain("tools.github.list_issues(")
     expect(description).toContain("tools.linear.search(")
     expect(description).toContain("tools.linear.search(): Promise<unknown>")
@@ -436,7 +683,9 @@ describe("code mode execute", () => {
       ),
     })
     // 压缩展示不能丢失返回值的可选字段，也不能把 outputSchema 降格成 unknown。
-    expect(description).toContain("tools.weather.current(input: { city: string }): Promise<{ tempC: number; summary?: string }>")
+    expect(description).toContain(
+      "tools.weather.current(input: { city: string }): Promise<{ tempC: number; summary?: string }>",
+    )
   })
 
   test("large catalogs inline a budgeted PARTIAL list plus runtime search", async () => {
@@ -469,9 +718,7 @@ describe("code mode execute", () => {
     expect(description).toContain("remaining: number; next: {")
     expect(description).toContain("offset: number } | null")
     expect(description).toContain("Use `search(...)` for unlisted tools.")
-    expect(description).toContain(
-      "Each result's `path` is the complete call expression",
-    )
+    expect(description).toContain("Each result's `path` is the complete call expression")
     expect(description).not.toContain("total_count")
     expect(description).toContain("tools.alpha.op_0(")
     expect(description).not.toContain("tools.alpha.op_99(")
@@ -487,7 +734,10 @@ describe("code mode execute", () => {
     const signature = result.items.find((i: any) => i.path === "tools.zeta.only_tool").signature
     // 搜索与内联共享紧凑签名，保留参数类型但不再承诺字段 JSDoc。
     expect(signature).toBe("tools.zeta.only_tool(input: { topic: string }): Promise<unknown>")
-    expect(tools.zeta_only_tool.def.inputSchema.properties?.topic).toEqual({type:"string",description:"Subject to look up"})
+    expect(tools.zeta_only_tool.def.inputSchema.properties?.topic).toEqual({
+      type: "string",
+      description: "Subject to look up",
+    })
     // 渲染不改声明本体，字段文档仍保留在原输入 schema。
     expect(description).not.toContain("/** Subject to look up */")
     expect(out.metadata.toolCalls).toEqual([
@@ -581,7 +831,7 @@ describe("code mode execute", () => {
       ),
     )
 
-    // 有效 MCP 输出仍按原 schema 解码；环境包装不放宽验证器。
+    // 两个返回值都是 JSON 数字文本，仍应保持字符串相加得到 12；只有对象或数组文本可成为数据候选。
     expect(scriptOutput(output)).toBe("12")
     expect(output.metadata.toolCalls.map((c) => c.tool).sort()).toEqual(["echo.one", "echo.two"])
     expect(output.metadata.toolCalls.every((c) => c.status === "completed")).toBe(true)
@@ -596,23 +846,58 @@ describe("code mode execute", () => {
 
   test("eligible MCP JSON text becomes data while raw source and business text survive", async () => {
     const raw = ' {"items":[1,2],"text":"business"} '
-    const tool = await build({json_read:mcpTool("read",()=>({content:[{type:"text",text:raw}]}))})
+    const tool = await build({ json_read: mcpTool("read", () => ({ content: [{ type: "text", text: raw }] })) })
     // 对象字段、原始字符串与业务 text 同时验证；不能靠 JSON.parse 在示例里绕开 ingress 合同。
-    const result = await Effect.runPromise(tool.execute({code:'const value = await tools.json.read({}); value.items.push(3); return {count:value.items.length,text:value.text,source:String(value),keys:Object.keys(value),json:JSON.stringify(value)}'},ctx))
-    expect(JSON.parse(scriptOutput(result))).toEqual({count:3,text:"business",source:raw,keys:["items","text"],json:'{"items":[1,2,3],"text":"business"}'})
+    const result = await Effect.runPromise(
+      tool.execute(
+        {
+          code: "const value = await tools.json.read({}); value.items.push(3); return {count:value.items.length,text:value.text,source:String(value),keys:Object.keys(value),json:JSON.stringify(value)}",
+        },
+        ctx,
+      ),
+    )
+    // push 改变业务数组而 String(value) 保留原文，两项一起区分可变数据与原始文本的不同职责。
+    expect(JSON.parse(scriptOutput(result))).toEqual({
+      count: 3,
+      text: "business",
+      source: raw,
+      keys: ["items", "text"],
+      json: '{"items":[1,2,3],"text":"business"}',
+    })
   })
 
   // 只有 MCP owner 明确标记的无声明文本才解析；原生 string 即便长得像 JSON 仍是字符串。
-  testEffect(harness()).effect("declared native strings are never reinterpreted as JSON objects", () => Effect.gen(function* () {
-    const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
-    const source = ' {"value":1} '
-    const out = yield* tool.execute({code:'const value = await tools.host.text({}); return {type:typeof value, source:value, upper:value.toUpperCase()}'},{...ctx,codeMode:{
-      catalog:[{id:"text",path:["host","text"],description:"native text",inputSchema:{type:"object",properties:{}},outputSchema:{type:"string"}}],
-      signal:ctx.abort,begin:()=>Effect.void,invoke:()=>Effect.succeed({title:"",output:"display only",metadata:{},program:{value:source}}),
-    }})
-    // 同时断言字符串方法与原始字节，防止只校验 typeof 而丢掉业务内容。
-    expect(JSON.parse(scriptOutput(out))).toEqual({type:"string",source,upper:source.toUpperCase()})
-  }))
+  testEffect(harness()).effect("declared native strings are never reinterpreted as JSON objects", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      const source = ' {"value":1} '
+      const out = yield* tool.execute(
+        {
+          code: "const value = await tools.host.text({}); return {type:typeof value, source:value, upper:value.toUpperCase()}",
+        },
+        {
+          ...ctx,
+          codeMode: {
+            catalog: [
+              {
+                id: "text",
+                path: ["host", "text"],
+                description: "native text",
+                inputSchema: { type: "object", properties: {} },
+                outputSchema: { type: "string" },
+              },
+            ],
+            signal: ctx.abort,
+            begin: () => Effect.void,
+            invoke: () =>
+              Effect.succeed({ title: "", output: "display only", metadata: {}, program: { value: source } }),
+          },
+        },
+      )
+      // 同时断言字符串方法与原始字节，防止只校验 typeof 而丢掉业务内容。
+      expect(JSON.parse(scriptOutput(out))).toEqual({ type: "string", source, upper: source.toUpperCase() })
+    }),
+  )
 
   test("reports an unknown tool as a failed execution", async () => {
     const tool = await build({ known_tool: mcpTool("tool", () => "ok") })
@@ -627,28 +912,44 @@ describe("code mode execute", () => {
     const output = await Effect.runPromise(
       tool.execute({ code: "try { await tools.bad.tool({}) } catch (e) { return 'caught: ' + e.message }" }, ctx),
     )
-    // 捕获异常仍是脚本成功；回执只补充工具终态，不能把 catch 结果改成父执行失败。
-    expect(scriptOutput(output)).toBe("Tool calls: 0 completed; 1 failed or interrupted.\nFailed or interrupted: bad.tool\n\nScript result:\ncaught: server exploded")
+    // catch 已观察失败，正文保持业务返回值；最终 metadata 仍记录失败 child。
+    expect(scriptOutput(output)).toBe("caught: server exploded")
     expect(output.metadata.error).toBeUndefined()
+    expect(output.metadata.toolCalls).toEqual([{ tool: "bad.tool", status: "error" }])
   })
 
-  test("terminal receipts bound failed names without exposing arguments or causes", async () => {
+  test("allSettled keeps observed failures out of the receipt and retains every child state", async () => {
     // 全部结算后主动只返回计数，证明宿主不会把私有工具错误或参数重新塞回模型文本。
     const names = ["a", "b", "c", "d", "e", "f", "x".repeat(201)]
-    const tool = await build(Object.fromEntries([
-      ...names.map((name) => [`batch_${name}`, mcpTool(name, () => ({ isError: true, content: [{ type: "text", text: "PRIVATE_CAUSE" }] }))]),
-      ["batch_ok", mcpTool("ok", () => ({ content: [{ type: "text", text: "ok" }] }))],
-    ]), ["batch"])
-    const out = await Effect.runPromise(tool.execute({ code: `
+    const tool = await build(
+      Object.fromEntries([
+        ...names.map((name) => [
+          `batch_${name}`,
+          mcpTool(name, () => ({ isError: true, content: [{ type: "text", text: "PRIVATE_CAUSE" }] })),
+        ]),
+        ["batch_ok", mcpTool("ok", () => ({ content: [{ type: "text", text: "ok" }] }))],
+      ]),
+      ["batch"],
+    )
+    const out = await Effect.runPromise(
+      tool.execute(
+        {
+          code: `
       const settled = await Promise.allSettled(Object.keys(tools.batch).map(name => tools.batch[name]({secret:"PRIVATE_ARGUMENT"})));
       return { fulfilled: settled.filter(item => item.status === "fulfilled").length };
-    ` }, ctx))
-    expect(scriptOutput(out)).toBe('Tool calls: 1 completed; 7 failed or interrupted.\nFailed or interrupted: batch.a, batch.b, batch.c, batch.d, batch.e (2 more)\n\nScript result:\n{\n  "fulfilled": 1\n}')
-    // 超长名称和第六个普通名称都计入省略数；脚本结果不受名称预算裁剪。
-    expect(scriptOutput(out)).not.toContain("batch.f")
-    expect(scriptOutput(out)).not.toContain("x".repeat(201))
-    expect(scriptOutput(out)).not.toContain("PRIVATE_")
-    expect(out.metadata.toolCalls.filter((call) => call.status === "error")).toHaveLength(7)
+    `,
+        },
+        ctx,
+      ),
+    )
+    expect(JSON.parse(scriptOutput(out))).toEqual({ fulfilled: 1 })
+    expect(out.output).not.toContain("PRIVATE_")
+    // 所有失败均已由 allSettled 观察；正文不列错误名称，恢复 metadata 仍保留完整调用事实。
+    expect(out.metadata.toolCalls).toEqual([
+      ...names.map((name) => ({ tool: `batch.${name}`, status: "error", input: { secret: "PRIVATE_ARGUMENT" } })),
+      { tool: "batch.ok", status: "completed", input: { secret: "PRIVATE_ARGUMENT" } },
+    ])
+    // 子调用全被观察后，父成功与子失败可以并存；父 error 标志不能直接取“是否有失败 child”。
     expect(out.metadata.error).toBeUndefined()
   })
 
@@ -658,62 +959,92 @@ describe("code mode execute", () => {
       bad_tool: mcpTool("tool", () => ({ isError: true, content: [{ type: "text", text: "PRIVATE_CAUSE" }] })),
       good_tool: mcpTool("tool", () => ({ content: [{ type: "text", text: "ok" }] })),
     })
-    const out = await Effect.runPromise(tool.execute({ code: "tools.bad.tool({}); await tools.good.tool({}); return 'done'" }, ctx))
-    expect(scriptOutput(out)).toBe("Tool calls: 1 completed; 1 failed or interrupted.\nFailed or interrupted: bad.tool\n\nScript result:\ndone")
+    const out = await Effect.runPromise(
+      tool.execute({ code: "tools.bad.tool({}); await tools.good.tool({}); return 'done'" }, ctx),
+    )
+    expect(scriptOutput(out)).toBe(
+      "Some asynchronous work failed or was interrupted without the script observing its outcome." +
+        "\n\nScript result:\ndone",
+    )
     // 错误详情仍由脚本自行决定是否输出，未捕获的工具终态不改变父 return 的成功身份。
     expect(out.metadata.error).toBeUndefined()
-    expect(out.metadata.toolCalls.every((call) => call.status !== "running")).toBe(true)
+    expect(out.output).not.toContain("PRIVATE_CAUSE")
+    expect(out.metadata.toolCalls).toEqual([
+      { tool: "bad.tool", status: "error" },
+      { tool: "good.tool", status: "completed" },
+    ])
   })
 
   // 权限终止、MCP ask 和 hooks 的验收移至 session/execute.test.ts 的真实共享宿主。
   // 此处继续验证解释器对宿主数据、普通错误、附件和取消的消费合同。
 
-  test("streams live per-call metadata as a call starts and finishes", async () => {
-    // 进度样本与真实替换载荷同形，句柄和模型可见前缀都是必要字段。
-    const snapshots: Array<{ environmentID: string; output: string; toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+  test("streams child progress and returns the complete successful terminal state", async () => {
+    const snapshots: Array<{ delivery?: "durable" | "ephemeral"; metadata?: Record<string, unknown> }> = []
     const recordingCtx: Tool.Context = {
       ...ctx,
-      metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
+      metadata: (value) =>
+        Effect.sync(() => {
+          snapshots.push(value)
+        }),
     }
     const tool = await build({ greeter_hello: mcpTool("hello", () => ({ content: [{ type: "text", text: "hi" }] })) })
-
-    await Effect.runPromise(
+    const out = await Effect.runPromise(
       tool.execute({ code: "await tools.greeter.hello({ name: 'Ada' }); return 'done'" }, recordingCtx),
     )
-
-    // 初始及终态进度都必须保留同一环境的恢复身份。
-    expect(snapshots).toContainEqual({
-      environmentID: expect.stringMatching(/^env_/),
-      output: expect.stringMatching(/^Environment: env_/),
+    const environmentID = out.metadata.environmentID
+    expect(scriptOutput(out)).toBe("done")
+    // 首个句柄先持久化，后续 running 允许临时发送；快速完成时也不能失去环境的恢复入口。
+    expect(snapshots[0]?.delivery).toBe("durable")
+    expect(snapshots.map((snapshot) => snapshot.metadata)).toContainEqual({
+      environmentID,
+      output: `Environment: ${environmentID}`,
       toolCalls: [{ tool: "greeter.hello", status: "running", input: { name: "Ada" } }],
     })
-    expect(snapshots).toContainEqual({
-      environmentID: expect.stringMatching(/^env_/),
-      output: expect.stringMatching(/^Environment: env_/),
-      toolCalls: [{ tool: "greeter.hello", status: "completed", input: { name: "Ada" } }],
-    })
+    // 100ms 窗口可合并 completed 进度；最终结果必须独立保留完整终态与输入。
+    expect(out.metadata.toolCalls).toEqual([{ tool: "greeter.hello", status: "completed", input: { name: "Ada" } }])
+    // metadata 按整份替换而非合并，逐条检查 ID 才能发现某次进度更新抹掉句柄。
+    expect(snapshots.every((snapshot) => snapshot.metadata?.environmentID === environmentID)).toBe(true)
   })
 
-  test("marks a failed child call as error in the live metadata", async () => {
-    // 进度样本与真实替换载荷同形，句柄和模型可见前缀都是必要字段。
-    const snapshots: Array<{ environmentID: string; output: string; toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+  test("caught child failures remain in the result and uncaught failures persist final metadata", async () => {
+    const snapshots: Array<{ delivery?: "durable" | "ephemeral"; metadata?: Record<string, unknown> }> = []
     const recordingCtx: Tool.Context = {
       ...ctx,
-      metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
+      metadata: (value) =>
+        Effect.sync(() => {
+          snapshots.push(value)
+        }),
     }
     const tool = await build({
       bad_tool: mcpTool("tool", () => ({ isError: true, content: [{ type: "text", text: "boom" }] })),
     })
-
-    await Effect.runPromise(
+    const out = await Effect.runPromise(
       tool.execute(
-        { code: "try { await tools.bad.tool({ reason: 'test' }) } catch (e) { return 'caught' }" },
+        {
+          code: "try { await tools.bad.tool({ reason: 'test' }) } catch (e) { return 'caught' }",
+        },
         recordingCtx,
       ),
     )
+    expect(scriptOutput(out)).toBe("caught")
+    expect(out.metadata.error).toBeUndefined()
+    expect(out.metadata.toolCalls).toEqual([{ tool: "bad.tool", status: "error", input: { reason: "test" } }])
 
-    // 异常进度同样交付句柄与实际错误调用，不能只覆盖成功路径。
-    expect(snapshots).toContainEqual({ environmentID: expect.stringMatching(/^env_/), output: expect.stringMatching(/^Environment: env_/), toolCalls: [{ tool: "bad.tool", status: "error", input: { reason: "test" } }] })
+    // 父执行失败没有成功 ToolResult，onExit 必须绕过进度节流持久化最终事实。
+    snapshots.length = 0
+    const error = await failure(tool.execute({ code: "await tools.bad.tool({ reason: 'uncaught' })" }, recordingCtx))
+    const environmentID = snapshots[0]?.metadata?.environmentID
+    expect(environmentID).toMatch(/^env_/)
+    expect(error.message).toContain(`Environment: ${environmentID}`)
+    expect(error.message).toContain("boom")
+    // 最终失败没有可返回的成功结果，最后一条更新必须可持久化，不能只停留在临时进度中。
+    expect(snapshots.at(-1)?.delivery).not.toBe("ephemeral")
+    expect(snapshots.at(-1)?.metadata).toEqual({
+      environmentID,
+      output: `Environment: ${environmentID}`,
+      error: true,
+      toolCalls: [{ tool: "bad.tool", status: "error", input: { reason: "uncaught" } }],
+    })
   })
 
   test("accumulates stripped media as execute attachments the sandbox never sees", async () => {
@@ -820,23 +1151,98 @@ describe("code mode execute", () => {
     expect(error.message).toContain("process")
   })
 
-  test("cancelling via ctx.abort interrupts the running program", async () => {
-    const controller = new AbortController()
-    const tool = await build({
-      host_trigger: mcpTool("trigger", () => {
-        controller.abort()
-        return new Promise(() => {})
-      }),
-    })
-    const output = await Effect.runPromiseExit(
-      tool.execute(
-        { code: "try { await tools.host.trigger({}) } catch {} while (true) {}" },
-        { ...ctx, abort: controller.signal },
-      ),
-    )
-    expect(Exit.isFailure(output)).toBe(true)
-    if (Exit.isFailure(output)) expect(Cause.hasInterrupts(output.cause)).toBe(true)
-  })
+  testEffect(harness()).live("synchronous and registered aborts await producer cleanup without late callbacks", () =>
+    Effect.gen(function* () {
+      const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
+      for (const mode of ["registered", "synchronous"] as const) {
+        const controller = new AbortController()
+        const started = yield* Deferred.make<void>()
+        const finalizing = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        // 若断言提前失败，外层清理仍释放门闩，避免测试自己把待验证的 producer 永久挂住。
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid))
+        const snapshots: Array<{ delivery?: "durable" | "ephemeral"; metadata?: Record<string, unknown> }> = []
+        // 原生Promise故意晚于取消结算，能在父退出后继续检验是否还会发送进度。
+        const pending = Promise.withResolvers<Tool.ExecuteResult>()
+        let cleaned = 0
+        const running = yield* tool
+          .execute(
+            {
+              code: "try { await tools.host.trigger({}) } catch {} return 'unreachable'",
+            },
+            {
+              ...ctx,
+              abort: controller.signal,
+              metadata: (value) =>
+                Effect.sync(() => {
+                  snapshots.push(value)
+                }),
+              codeMode: {
+                catalog: [
+                  {
+                    id: "trigger",
+                    path: ["host", "trigger"],
+                    description: "trigger",
+                    inputSchema: { type: "object" },
+                  },
+                ],
+                signal: controller.signal,
+                begin: () => Effect.void,
+                invoke: () =>
+                  Effect.promise(() => {
+                    // 在原生启动回调返回Promise之前取消，专门打到根Fiber尚在登记的窗口。
+                    if (mode === "synchronous") controller.abort()
+                    Deferred.doneUnsafe(started, Effect.void)
+                    return pending.promise
+                  }).pipe(
+                    Effect.ensuring(
+                      Deferred.succeed(finalizing, undefined).pipe(
+                        Effect.andThen(Deferred.await(release)),
+                        Effect.andThen(
+                          Effect.sync(() => {
+                            cleaned++
+                          }),
+                        ),
+                      ),
+                    ),
+                  ),
+              },
+            },
+          )
+          .pipe(Effect.exit, Effect.forkScoped)
+        if (mode === "registered") {
+          yield* awaitWithTimeout(Deferred.await(started), "host call did not start")
+          // 与同步通知对照：等待启动栈退出，再从外部取消已登记的 producer。
+          yield* Effect.yieldNow
+          controller.abort()
+        }
+        yield* awaitWithTimeout(Deferred.await(finalizing), `${mode} abort lost producer cleanup`)
+        // finalizer已开始但被门闩挡住，父调用此时必须仍未结算，不能只等取消通知发出。
+        expect(running.pollUnsafe()).toBeUndefined()
+        yield* Deferred.succeed(release, undefined)
+        const exit = yield* awaitWithTimeout(Fiber.join(running), "cancelled execute did not finish")
+        expect(Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)).toBe(true)
+        // 两个取消窗口都必须只完成一次真实清理；父 Fiber 中断本身不能替代这个资源断言。
+        expect(cleaned).toBe(1)
+        const environmentID = snapshots[0]?.metadata?.environmentID
+        expect(environmentID).toMatch(/^env_/)
+        expect(snapshots[0]?.delivery).toBe("durable")
+        expect(snapshots.at(-1)?.delivery).not.toBe("ephemeral")
+        expect(snapshots.at(-1)?.metadata).toMatchObject({
+          environmentID,
+          error: true,
+          toolCalls: [{ tool: "host.trigger", status: "error" }],
+        })
+        expect(snapshots.at(-1)?.metadata?.output).toContain(`Environment: ${environmentID}`)
+        // 原传输迟到结算不能再次发送进度或重复清理，父退出必须已切断回调归属。
+        const count = snapshots.length
+        pending.resolve({ title: "late", output: "late result", metadata: {} })
+        yield* Effect.yieldNow
+        expect(snapshots).toHaveLength(count)
+        expect(cleaned).toBe(1)
+      }
+    }),
+  )
 
   test("a pre-aborted signal cancels before the program runs", async () => {
     const controller = new AbortController()
@@ -850,14 +1256,89 @@ describe("code mode execute", () => {
     expect(ran).toEqual([])
   })
 
-  test("leaves oversized results to OpenCode's native tool-output truncation", async () => {
-    const tool = await build({})
-    const output = await Effect.runPromise(tool.execute({ code: "return 'x'.repeat(40000)" }, ctx))
-    expect(output.metadata.error).toBeUndefined()
-    // 大业务输出仍保持未截断长度，独立环境行不能掩盖数据丢失。
-    expect(scriptOutput(output)).not.toContain("[result truncated:")
-    expect(scriptOutput(output).length).toBeGreaterThanOrEqual(40_000)
-  })
+  testEffect(Layer.merge(harness(), LayerNode.compile(LayerNode.group([Truncate.node, FSUtil.node, filesystem])))).live(
+    "oversized results use the shared wrapper and retain one complete recovery file",
+    () =>
+      Effect.gen(function* () {
+        const truncate = yield* Truncate.Service
+        const fs = yield* FSUtil.Service
+        yield* fs.ensureDir(Truncate.DIR)
+        // 共享目录可能已有其它测试的恢复文件，只计算本次新增文件，避免历史文件造成假失败。
+        const before = new Set(yield* fs.readDirectory(Truncate.DIR))
+        let outputCalls = 0
+        // 只观察共享服务的调用次数，截断、notice 和落盘全部运行原实现。
+        const tool = yield* CodeModeTool.pipe(
+          Effect.flatMap(Tool.init),
+          Effect.provideService(Truncate.Service, {
+            ...truncate,
+            output: (...args) => {
+              outputCalls++
+              return truncate.output(...args)
+            },
+          }),
+        )
+        // 同一次大输出包含规则、日志和未观察失败，使恢复文件验证覆盖完整回执，而不只是数组正文。
+        const context: Tool.Context = {
+          ...ctx,
+          codeMode: {
+            catalog: ["info", "fail"].map((id) => ({
+              id,
+              path: ["host", id],
+              description: id,
+              inputSchema: { type: "object" },
+            })),
+            signal: ctx.abort,
+            begin: () => Effect.void,
+            invoke: (id) =>
+              id === "fail"
+                ? Effect.fail(new Error("unobserved failure"))
+                : Effect.succeed({
+                    title: "info",
+                    output: "ok",
+                    metadata: {},
+                    context: [{ kind: "instruction", key: "/fixture/AGENTS.md", text: "important instruction" }],
+                  }),
+          },
+        }
+        const result = yield* tool.execute(
+          {
+            code: `await tools.host.info({}); tools.host.fail({});
+        console.log("saved log"); const rows = Array.from({ length: 500 }).map((_, id) => ({ id, label: "row-" + id }));
+        return rows;`,
+          },
+          context,
+        )
+        // 调用次数和磁盘新增数分别约束双重截断与重复落盘，单看notice文本无法发现这两种回归。
+        expect(outputCalls).toBe(1)
+        expect(result.metadata).toMatchObject({ truncated: true })
+        expect(result.metadata.environmentID).toMatch(/^env_/)
+        if (!("outputPath" in result.metadata) || typeof result.metadata.outputPath !== "string")
+          throw new Error("Expected a managed recovery file")
+        expect((yield* fs.readDirectory(Truncate.DIR)).filter((name) => !before.has(name))).toHaveLength(1)
+        expect(result.output).toContain('<opencode_notice type="output_truncated" source="tool"')
+        expect(result.output).toContain(`path="${result.metadata.outputPath}`)
+        expect(result.output).toContain("read offset/limit")
+        // 恢复文件保留完整业务值及宿主上下文；模型预览无须是独立 JSON。
+        const full = yield* fs.readFileString(result.metadata.outputPath)
+        expect(full).toContain(`Environment: ${result.metadata.environmentID}`)
+        expect(full).toContain(
+          "Some asynchronous work failed or was interrupted without the script observing its outcome.",
+        )
+        // 规则由 host context 通道进入，脚本只返回 rows；此项防止截断器只保存程序 return。
+        expect(full).toContain("important instruction")
+        expect(full).toContain("Logs:\nsaved log")
+        // 完整解析并逐项比较全部五百行，防止恢复文件只含看似完整的头部或末尾标记。
+        expect(JSON.parse(full.split("Script result:\n")[1].split("\n\nLogs:")[0])).toEqual(
+          Array.from({ length: 500 }, (_, id) => ({ id, label: "row-" + id })),
+        )
+        // 显示截断不能改变保留环境中的数组长度或元素。
+        const resumed = yield* tool.execute(
+          { environmentID: result.metadata.environmentID, code: "return rows[499]" },
+          context,
+        )
+        expect(JSON.parse(scriptOutput(resumed))).toEqual({ id: 499, label: "row-499" })
+      }),
+  )
 
   test("appends logs after the result on success and after the message on error", async () => {
     const tool = await build({})

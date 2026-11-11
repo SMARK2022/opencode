@@ -30,6 +30,7 @@ export type Binding = {
 
 // 宿主只持有不透明词法状态；工具回调、执行 Scope 和权限均不属于可复用环境。
 export class Environment {
+  // 两个根分开后，用户可以遮蔽内建名称；刷新能力不会删除用户变量。
   private readonly roots = {
     globals: new Map<string, Binding>(),
     bindings: new Map<string, Binding>(),

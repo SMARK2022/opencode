@@ -1,11 +1,11 @@
 @@ comment.description
-中文维护说明：用实际 glob/read 合同串起发现、并发和有界摘要；可选工具与网络能力不能无条件承诺。
+中文维护说明：目录未显示所需工具时才发现；实际 glob/read 示例保留并发与有界摘要，不承诺可选能力。
 @@ description
 Run JavaScript/TypeScript in a confined runtime to compose tool calls and filter intermediate data before returning a concise result.
 
 Use execute to inspect several files or endpoints, chain calls whose inputs come from earlier results, or summarize large outputs in one turn. Return when the next step needs your judgment. Use the exact namespaced paths and argument shapes shown by the catalog or search({ query: "..." }); special names use bracket notation.
 
-Discover the file tools with `return search({ query: "glob read", namespace: "$opencode", limit: 2 })`. When these tools are available, their signatures support this eight-file bounded line-count check:
+If a needed file tool is not shown, discover it with `return search({ query: "glob read", namespace: "$opencode", limit: 2 })`. When these tools are available, their signatures support this eight-file bounded line-count check:
 ```js
 const { files, ...listing } = await tools.$opencode.glob({ pattern: "src/**/*.ts" });
 const pages = await Promise.all(files.slice(0, 8).map(({ path }) => tools.$opencode.read({ filePath: path, limit: 1 })));
@@ -18,7 +18,7 @@ Use sleep(ms) to wait within the script. Fetch is available when supplied by the
 @@ intro.empty
 No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
 @@ comment.intro.complete
-中文维护说明：完整目录与搜索共享紧凑类型，不再承诺搜索会补回已移除的字段文档。
+中文维护说明：内联只展示紧凑签名；字段描述、默认值与格式约束由按需搜索提供。
 @@ intro.complete
 # Code Mode
 

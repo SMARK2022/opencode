@@ -87,9 +87,9 @@ The description and schemas are part of the model-visible tool contract. Keep de
 
 Public tool types are grouped under the same namespace: `Tool.Definition`, `Tool.Options`, `Tool.SchemaType`, and `Tool.JsonSchema`.
 
-<!-- 简写由实际编码 schema 推导，并在同一个原始校验器之前转换，不能从展示文档猜主键。 -->
+<!-- 签名只展示原始合同；简写仍由实际编码 schema 推导并在原校验器前转换，不从展示文档猜主键。 -->
 
-Effect Schema tools infer deterministic scalar/object input forms. For an object with one required scalar property, or a single optional scalar property, `tool(value)` is accepted alongside `tool({ key: value })`. Scalar-only tools also accept a single-own-field object containing that scalar. The signature advertises these accepted forms. `undefined`, arrays, ambiguous objects and unsupported schema structures retain their original contract; names such as `path` or `query` are never guessed.
+Effect Schema tools infer deterministic scalar-to-object input forms. For an object with one required scalar property, or a single optional scalar property, `tool(value)` is accepted alongside `tool({ key: value })`. Scalar-only tools keep their original scalar contract; arbitrary single-field objects are not unwrapped. The signature shows the original input contract; these shorthand forms remain accepted at runtime. `undefined`, arrays, ambiguous objects and unsupported schema structures retain their original contract; names such as `path` or `query` are never guessed.
 
 For render-only JSON inputs, an adapter that retains its actual validator may provide `inputContract: actualDecoder`. This one contract supplies the signature, searchable fields and deterministic input forms; it does not add a second decoding step. Without it, JSON schemas remain display-only. Inference reads encoded structure without running transformations or defaults, and normalization precedes the original validator. Authorization still belongs to the tool.
 
@@ -170,6 +170,8 @@ interface Success {
   readonly value: CodeMode.DataValue
   readonly logs?: ReadonlyArray<string>
   readonly truncated?: boolean
+  // 未观察的后台失败不改变脚本值，由宿主决定如何附加事实提醒。
+  readonly unobservedFailure?: boolean
   readonly toolCalls: ReadonlyArray<CodeMode.ToolCall>
 }
 
@@ -182,7 +184,7 @@ interface Failure {
 }
 ```
 
-`toolCalls` contains the names of calls admitted by the runtime in call order. It is retained on failure so hosts can audit partial execution without exposing inputs or host failures. `truncated` is present when the value or logs were cut to fit `maxOutputBytes` (see Execution Limits).
+`toolCalls` contains the names of calls admitted by the runtime in call order. It is retained on failure so hosts can audit partial execution without exposing inputs or host failures. `truncated` is present when capture reached `maxLogBytes` or the value/logs were cut to fit `maxOutputBytes` (see Execution Limits).
 
 ### Tool-call hooks
 
@@ -221,7 +223,7 @@ Supported bearer, basic, header, and query authentication follows OpenAPI `secur
 
 <!-- 同一紧凑签名用于目录、搜索和误调用恢复；优先级只影响展示，不改变可调用集合。 -->
 
-The agent-tool instructions use a budgeted catalog. Every namespace is listed with its tool count. Inline entries, search results and namespace-call diagnostics share one compact TypeScript signature generated from the tool definition. Tool descriptions remain; field JSDoc and schema tags are not included in model-facing signatures. Original schema validation still applies.
+The agent-tool instructions use a budgeted catalog. Every namespace is listed with its tool count. Inline entries, search results and namespace-call diagnostics share one compact TypeScript signature generated from the tool definition. Tool descriptions remain; field JSDoc and schema tags are not included in compact signatures. Search results provide `inputSchema` and, when declared, `outputSchema` with field descriptions, defaults, formats and `$defs`. Inputs use the encoded contract and outputs use the decoded contract. An Effect schema that cannot be emitted is `null` on that side and named in `schemaUnavailable`; the tool and other results remain discoverable. Original schema validation still applies.
 
 Hosts may supply `discovery.priority` as canonical internal paths, such as `["$opencode.read", "$opencode.glob"]`. Priority entries are considered before other entries; each group is ordered by signature length and path. Entries that do not fit are skipped; namespace stubs and selected entries share the budget. Equal inputs render identically regardless of insertion order. Zero budgets and oversized signatures can omit even priority tools; full discovery remains available.
 
@@ -249,7 +251,7 @@ const matches = search({
 })
 ```
 
-`search` performs deterministic, additive field-weighted matching. The query is tokenized (camelCase boundaries split; every non-alphanumeric character is a separator; empties and `*` are dropped), and each term scores every tool: exact path or path-segment match (20), path substring (8), description substring (4), and searchable-text substring (2). Each term also carries naive singular variants (trailing `s`/`es` stripped), and a field check passes when the term or any variant matches - so a plural query term (`issues`) still finds a tool whose text only says `issue`, without changing the weights. The searchable text also includes the input schema's property names and their description strings, so a query naming a parameter finds its tool, and substring matching means partial words match. Scores sum across terms; matches are sorted by score (ties broken alphabetically by path), then sliced from the zero-based `offset` (default 0) to the configured `limit` (default 10). `remaining` counts matches after the current page. `next` is `{ offset }` when another page exists and `null` on the final page; spread it into the original request to preserve its query, namespace, and limit.
+`search` performs deterministic, additive field-weighted matching. The query is tokenized (camelCase boundaries split; every non-alphanumeric character is a separator; empties and `*` are dropped), and each term scores every tool: exact path or path-segment match (20), path substring (8), description substring (4), and searchable-text substring (2). Each term also carries naive singular variants (trailing `s`/`es` stripped), and a field check passes when the term or any variant matches - so a plural query term (`issues`) still finds a tool whose text only says `issue`, without changing the weights. The searchable text also includes the input schema's property names and their description strings, so a query naming a parameter finds its tool, and substring matching means partial words match. Scores sum across terms; matches are sorted by score (ties broken alphabetically by path), then sliced from the zero-based `offset` (default 0) to the configured `limit` (default 10). Pages also use a 16,384-character soft budget measured on the complete serialized response. The first whole entry that reaches or crosses the budget is included, so a single oversized tool stays accessible; `limit` remains a count ceiling. `remaining` counts matches after the current page. `next` is `{ offset }` when another page exists and `null` on the final page; spread it into the original request to preserve its query, namespace, and limit.
 
 ```ts
 // 翻页复用搜索条件；同步目录查询无需人为加入异步工具调度。
@@ -270,7 +272,7 @@ Result paths are rendered as JavaScript expressions rooted at `tools` (`tools.or
 
 <!-- 固定说明承载调用原则，动态目录只承载当下工具签名，避免重复注入工作流。 -->
 
-The shared `CodeMode.description` carries a short composition workflow and a search-then-call example. `runtime.instructions()` carries the current complete, partial, or empty catalog separately. Search by the task when a needed tool is not shown, use the exact returned path and signature, compose deterministic steps in code, and return only useful evidence. Independent calls can use `Promise.all`; use `Promise.allSettled` when partial results matter without hiding failures. Dependent calls and conflicting writes stay sequential. No blanket per-call `try`/`catch` scaffolding is required.
+The shared `CodeMode.description` carries a short composition workflow and an example that searches only when a needed tool is not shown. `runtime.instructions()` carries the current complete, partial, or empty catalog separately. Search by the task when a needed tool is not shown, use the exact returned path and signature, compose deterministic steps in code, and return only useful evidence. Independent calls can use `Promise.all`; use `Promise.allSettled` when partial results matter without hiding failures. Dependent calls and conflicting writes stay sequential. No blanket per-call `try`/`catch` scaffolding is required.
 
 A host cannot define its own `$codemode` top-level namespace.
 
@@ -313,9 +315,9 @@ OpenCode gives current native `read`, `grep`, `glob` and `edit` tools inline pri
 
 For a successful MCP result with no declared output schema or native structured content, OpenCode opts a single text block into JSON-text projection. Media attachments may accompany that text. Multiple text blocks, resource content, transport errors, declared outputs and existing structured results keep their established handling. SDK validation is not bypassed. In particular, declared strings and JSON primitives remain strings.
 
-<!-- 失败回执只呈现已接纳调用的事实，不能冒称检测了全部未观察的 Promise 或撤销了外部效果。 -->
+<!-- 只提示未观察失败；已 catch 或 allSettled 的失败留在调用审计，不再重复告警。 -->
 
-OpenCode keeps the script's return value separate from admitted tool-call outcomes. When a normally returning script has failed or interrupted calls, its output includes a bounded terminal summary before the script result. This also applies to deliberately caught failures; it does not turn them into fatal JavaScript errors. Successful calls and already-started external effects are not rolled back. The script value itself is unchanged; the host also prefixes the environment handle described below.
+OpenCode keeps the script's return value separate from admitted tool-call outcomes. When a normally returning script leaves a failed or interrupted Promise unobserved, its result carries `unobservedFailure` and the host adds a short warning. Deliberately caught or allSettled-observed failures remain in tool-call metadata without an extra warning. Successful calls and already-started external effects are not rolled back. The script value itself is unchanged; the host also prefixes the environment handle described below.
 
 <!-- 完整句柄只是同会话同位置的查找键；省略表示新建，错误句柄不能自动退回新环境。 -->
 
@@ -329,19 +331,28 @@ Environments are process-local, with at most 64 retained per directory instance.
 
 The host accepts either raw source or one complete JS/TS code fence with no surrounding prose or other fences. It removes that presentation envelope once before preflight, permission review and execution; the library itself continues to receive plain source. TypeScript annotations use the existing transpilation path, without a separate execution mode.
 
+<!-- 预跑只修改环境副本；无法复制或探测不完整时，真实调用仍经过权限入口。 -->
+
+Before review, the host deep-copies the leased environment for a best-effort probe with a 2,000ms execution budget. Old variables and helpers are visible in the copy. Unsupported copy state stops the probe; calls collected before an ordinary probe failure are retained. Current runtime permissions still apply to every real call. The copy is released after its execution scope closes. As with execution itself, a cooperative timeout cannot preempt synchronous cloning or compilation.
+
+<!-- 父进度合并不影响子调用审计和最终持久化；全文交给既有截断服务。 -->
+
+Parent progress uses a 100ms opportunity window without a background timer. Initial metadata and final settlement are durable; intermediate progress is ephemeral. Final metadata includes every admitted call. The complete textual result uses the shared output truncation service and its recoverable file path, without changing the program value.
+
 ## Execution Limits
 
-The limits are exactly three knobs:
+The limits are optional host-selected bounds:
 
 | Limit            |              Default | Bounds                                                               |
 | ---------------- | -------------------: | -------------------------------------------------------------------- |
 | `timeoutMs`      |    none - no timeout | Wall-clock execution time.                                           |
 | `maxToolCalls`   |     none - unlimited | Tool calls admitted during the execution.                            |
 | `maxOutputBytes` | none - no truncation | Model-facing output: the serialized result value plus captured logs. |
+| `maxLogBytes` | none - unlimited | UTF-8 bytes retained while appending logs; later lines are counted but not stored. |
 
 <!-- 库默认值与应用策略分离：十分钟只由 OpenCode 宿主选定，不能改变独立库调用者的合同。 -->
 
-The library has no default limits: execution budgets are host policy. OpenCode's `execute` tool accepts an optional positive safe-integer `timeout` in milliseconds and defaults to 600,000ms. The execution budget begins after any same-environment queue wait, preflight and whole-script review, and includes waits during the actual script. User cancellation and leaf-tool limits still apply independently. OpenCode also owns model-output truncation, so it leaves the library's `maxOutputBytes` unset. Other hosts should choose the bounds appropriate to their tool and output contracts.
+The library has no default limits: execution budgets are host policy. OpenCode's `execute` tool accepts an optional positive safe-integer `timeout` in milliseconds and defaults to 600,000ms. The execution budget begins after any same-environment queue wait, preflight and whole-script review, and includes waits during the actual script. User cancellation and leaf-tool limits still apply independently. OpenCode also owns model-output truncation, so it leaves the library's `maxOutputBytes` unset and uses the existing output byte limit for `maxLogBytes`. Other hosts should choose the bounds appropriate to their tool and output contracts.
 
 Pass only the overrides you need:
 

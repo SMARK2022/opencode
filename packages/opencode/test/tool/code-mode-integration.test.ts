@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { CodeModeTool, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
-// MCP 传输不替换环境 owner；引擎与服务器共同存活到本文件所有调用结束。
+// 线协议调用共享真实环境注册表，测试结束由同一所有者释放。
 import { ExecuteEnvironments } from "@/tool/execute-environments"
 import { McpCatalog } from "@/mcp/catalog"
 import { Agent } from "@/agent/agent"
@@ -113,7 +113,12 @@ function handleCall(name: string, args: Record<string, unknown>) {
   switch (name) {
     // 保留外层空白以证明 String(value) 来自原文本，而非重新序列化的近似文本。
     case "json":
-      return { content: [{ type: "text", text: ' [ {"value":3} ] ' }, { type: "image", data: PNG, mimeType: "image/png" }] }
+      return {
+        content: [
+          { type: "text", text: ' [ {"value":3} ] ' },
+          { type: "image", data: PNG, mimeType: "image/png" },
+        ],
+      }
     case "get_text":
       return { content: [{ type: "text", text: `hello ${args.name}` }] }
     case "add": {
@@ -144,6 +149,7 @@ async function buildTool() {
   const client = new RawJsonRpcClient(clientTransport)
   await client.connect()
 
+  // 目录取自传输返回的 tools/list，声明和真实调用共享远端定义，避免测试另造一份目录。
   const listed = (await client.listTools()).tools as MCPToolDef[]
   const mcpTools: Record<string, MCP.McpTool> = {}
   for (const def of listed) {
@@ -151,12 +157,18 @@ async function buildTool() {
   }
 
   const layer = Layer.mergeAll(
-        // 仅提供明确的夹具 owner；状态分配、续用和关闭仍走生产引擎。
-        Layer.succeed(ExecuteEnvironments.Service, { use: (sessionID, id, run) => environments.use({ sessionID, directory: "/mcp-fixture" }, id, run) }),
+    // 仅提供明确的夹具 owner；状态分配、续用和关闭仍走生产引擎。
+    Layer.succeed(ExecuteEnvironments.Service, {
+      use: (sessionID, id, run) => environments.use({ sessionID, directory: "/mcp-fixture" }, id, run),
+    }),
+    // 本组只隔离磁盘截断，限额仍取生产常量；图片分离和正文投影由真实宿主处理。
     Layer.mock(Truncate.Service, {
+      limits: () => Effect.succeed({ maxBytes: Truncate.MAX_BYTES, maxLines: Truncate.MAX_LINES }),
       output: (text: string) => Effect.succeed({ content: text, truncated: false as const }),
     }),
-    Layer.mock(Agent.Service, { get: () => Effect.succeed({ name: "build", mode: "primary" as const, options: {}, permission: [] }) }),
+    Layer.mock(Agent.Service, {
+      get: () => Effect.succeed({ name: "build", mode: "primary" as const, options: {}, permission: [] }),
+    }),
   )
   const catalog: CatalogEntry[] = Object.entries(mcpTools).map(([id, entry]) => ({
     id, path: [SERVER, entry.def.name], description: entry.def.description ?? "",
@@ -165,20 +177,34 @@ async function buildTool() {
   const definition = await Effect.runPromise(CodeModeTool.pipe(Effect.flatMap(Tool.init), Effect.provide(layer)))
   return {
     // Session 权限与 child 归属由 session/execute 的真实集成覆盖；本组保留真实 MCP wire/result 回归。
-    tool: { ...definition, execute: (params: { code: string }, ctx: Tool.Context) => definition.execute(params, { ...ctx, codeMode: {
-      catalog, signal: ctx.abort, begin: () => Effect.void,
-      invoke: (id, args) => Effect.gen(function* () {
-        const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], args, ctx.abort))
-        // 测试与 SessionTools 一样传递声明，避免夹具误把已声明文本当成候选。
-        return { title: id, output: "", metadata: {}, program: McpCatalog.programResult(result, mcpTools[id].def.outputSchema) }
-      }),
-    } }) },
+    tool: {
+      ...definition,
+      execute: (params: { code: string }, ctx: Tool.Context) =>
+        definition.execute(params, {
+          ...ctx,
+          codeMode: {
+            catalog,
+            signal: ctx.abort,
+            begin: () => Effect.void,
+            invoke: (id, args) =>
+              Effect.gen(function* () {
+                const result = yield* Effect.promise(() => McpCatalog.callTool(mcpTools[id], args, ctx.abort))
+                // 测试与 SessionTools 一样传递声明，避免夹具误把已声明文本当成候选。
+                return {
+                  title: id,
+                  output: "",
+                  metadata: {},
+                  program: McpCatalog.programResult(result, mcpTools[id].def.outputSchema),
+                }
+              }),
+          },
+        }),
+    },
     description: await Effect.runPromise(describeCatalog(catalog)),
   }
 }
 
 const run = (code: string) => Effect.runPromise(tool.execute({ code }, ctx))
-// Program failures die at the tool boundary; recover the defect for message assertions.
 // 断言真实 MCP 业务值之前先校验 ID 前缀，避免以宽松 contains 丢掉原协议精度。
 function scriptOutput(result: { output: string; metadata: { environmentID: string } }) {
   expect(result.metadata.environmentID).toMatch(/^env_/)
@@ -224,7 +250,9 @@ describe("code mode integration (real MCP server)", () => {
 
   // 真正的传输候选要同时保留可遍历数组、原文与附件，不能只证明某个本地 JSON helper。
   test("schema-less wire JSON exposes data with original text and separate attachments", async () => {
-    const out = await run('const value = await tools.fixtures.json({}); return {sum:value.map(item => item.value).reduce((a,b)=>a+b,0), source:String(value), array:Array.isArray(value)}')
+    const out = await run(
+      "const value = await tools.fixtures.json({}); return {sum:value.map(item => item.value).reduce((a,b)=>a+b,0), source:String(value), array:Array.isArray(value)}",
+    )
     expect(JSON.parse(scriptOutput(out))).toEqual({ sum: 3, source: ' [ {"value":3} ] ', array: true })
     expect(out.attachments).toEqual([{ type: "file", mime: "image/png", url: `data:image/png;base64,${PNG}` }])
     // 无参数签名省略空输入的既有回执形状不变；JSON 投影只影响程序返回值。
@@ -233,7 +261,7 @@ describe("code mode integration (real MCP server)", () => {
 
   test("exposes structured data natively from a tool with an outputSchema", async () => {
     const out = await run("const r = await tools.fixtures.add({ a: 2, b: 3 }); return r.sum")
-    // 真实远端数值必须原样保留，环境行只是独立宿主包装。
+    // 远端同时返回文本 5 和对象 { sum: 5 }；脚本读取 sum，能区分结构化优先与误用展示文本。
     expect(scriptOutput(out)).toBe("5")
   })
 
@@ -263,7 +291,7 @@ describe("code mode integration (real MCP server)", () => {
       const shot = await tools.fixtures.screenshot({})
       return { sawMarker: typeof shot === 'string' && shot.includes('attached'), value: shot }
     `)
-    // 结构化内容保留原类型和字段，不让环境输出污染 MCP 数据。
+    // sawMarker 由解释器内的 typeof/includes 算出，证明剥离发生在脚本消费图片结果之前。
     expect(JSON.parse(scriptOutput(out))).toEqual({
       sawMarker: true,
       value: "[1 image attached to the result]",
@@ -284,14 +312,15 @@ describe("code mode integration (real MCP server)", () => {
       return 'two shots: ' + both.length
     `)
     expect(scriptOutput(out)).toBe("two shots: 2")
+    // 两次返回的图片字节相同，仍是两个独立调用的附件，不能按内容去重。
     expect(out.attachments).toHaveLength(2)
     expect(out.metadata.toolCalls.map((c) => c.tool)).toEqual(["fixtures.screenshot", "fixtures.screenshot"])
   })
 
   test("propagates an MCP isError into the program as a catchable error", async () => {
     const out = await run("try { await tools.fixtures.boom({}) } catch (e) { return 'caught: ' + e.message }")
-    // 真实 MCP isError 仍进入 JS catch；附加终态事实不改写 catch 的有用返回值。
-    expect(scriptOutput(out)).toBe("Tool calls: 0 completed; 1 failed or interrupted.\nFailed or interrupted: fixtures.boom\n\nScript result:\ncaught: kaboom")
+    // 真实 MCP isError 已由 catch 观察，正文无额外警告，失败 child 仍保留在最终 metadata。
+    expect(scriptOutput(out)).toBe("caught: kaboom")
     expect(out.metadata.error).toBeUndefined()
     expect(out.metadata.toolCalls).toEqual([{ tool: "fixtures.boom", status: "error" }])
   })
@@ -336,26 +365,29 @@ describe("code mode integration (real MCP server)", () => {
     expect(out.metadata.toolCalls).toEqual([])
   })
 
-  test("streams running/completed metadata for child calls over a real transport", async () => {
+  test("streams real transport progress and returns complete child terminal metadata", async () => {
     // 进度样本与真实替换载荷同形，句柄和模型可见前缀都是必要字段。
-    const snapshots: Array<{ environmentID: string; output: string; toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[] }> = []
+    const snapshots: Array<{
+      environmentID: string
+      output: string
+      toolCalls: { tool: string; status: string; input?: Record<string, unknown> }[]
+    }> = []
     const recordingCtx: Tool.Context = {
       ...ctx,
       metadata: (val: any) => Effect.sync(() => void snapshots.push(val.metadata)),
     }
-    await Effect.runPromise(
+    const out = await Effect.runPromise(
       tool.execute({ code: "await tools.fixtures.add({ a: 1, b: 2 }); return 'done'" }, recordingCtx),
     )
-    // 每次远端调用进度都带句柄，终态更新不能覆盖掉恢复所需 ID。
+    // 实际发送的进度仍带句柄；completed 可被合并，最终结果必须有完整状态。
+    expect(scriptOutput(out)).toBe("done")
     expect(snapshots).toContainEqual({
-      environmentID: expect.stringMatching(/^env_/),
-      output: expect.stringMatching(/^Environment: env_/),
+      environmentID: out.metadata.environmentID,
+      output: `Environment: ${out.metadata.environmentID}`,
       toolCalls: [{ tool: "fixtures.add", status: "running", input: { a: 1, b: 2 } }],
     })
-    expect(snapshots).toContainEqual({
-      environmentID: expect.stringMatching(/^env_/),
-      output: expect.stringMatching(/^Environment: env_/),
-      toolCalls: [{ tool: "fixtures.add", status: "completed", input: { a: 1, b: 2 } }],
-    })
+    expect(out.metadata.toolCalls).toEqual([{ tool: "fixtures.add", status: "completed", input: { a: 1, b: 2 } }])
+    // 逐次进度都复用最终句柄，防止真实传输的后续状态更新用缺字段的对象覆盖恢复信息。
+    expect(snapshots.every((snapshot) => snapshot.environmentID === out.metadata.environmentID)).toBe(true)
   })
 })

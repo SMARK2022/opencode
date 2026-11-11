@@ -20,6 +20,8 @@ export type ExecutionLimits = {
   readonly maxToolCalls?: number
   /** Maximum UTF-8 bytes of model-facing output. No default: absent means no truncation. */
   readonly maxOutputBytes?: number
+  /** 日志按 UTF-8 字节限制留存；业务返回值仍受独立的 maxOutputBytes 控制。 */
+  readonly maxLogBytes?: number
 }
 
 /** Controls how much of the tool catalog is inlined in agent instructions. */
@@ -38,6 +40,7 @@ export type ResolvedExecutionLimits = {
   readonly timeoutMs: number | undefined
   readonly maxToolCalls: number | undefined
   readonly maxOutputBytes: number | undefined
+  readonly maxLogBytes: number | undefined
 }
 
 /** Options for one CodeMode execution. */
@@ -46,6 +49,8 @@ export type ExecuteOptions<Tools extends Record<string, unknown> = {}> = {
   code: string
   /** 仅复用词法状态；缺省仍逐次隔离，工具、取消与预算始终属于当前调用。 */
   environment?: Environment
+  /** 预跑只用副本；复制失败即结束本次预跑，不能退回真实环境继续执行。 */
+  snapshotEnvironment?: boolean
   /** Explicit tool tree exposed to the program as `tools`. */
   tools?: Tools & ToolTree<Services<Tools>>
   /** HTTP由宿主显式提供；未提供时沙箱没有环境网络权限。 */
@@ -102,6 +107,8 @@ export const Success = Schema.Struct({
   value: Schema.Json,
   logs: Schema.optionalKey(Schema.Array(Schema.String)),
   truncated: Schema.optionalKey(Schema.Boolean),
+  // 脚本成功不代表所有后台调用成功；仅暴露尚未观察的失败事实。
+  unobservedFailure: Schema.optionalKey(Schema.Boolean),
   toolCalls: Schema.Array(ToolCallSchema),
 })
 /** Successful execution after the result has crossed the plain-data boundary. */
@@ -144,6 +151,8 @@ const resolveExecutionLimits = (limits?: ExecutionLimits): ResolvedExecutionLimi
   timeoutMs: validateLimit("timeoutMs", limits?.timeoutMs, 1),
   maxToolCalls: validateLimit("maxToolCalls", limits?.maxToolCalls, 0),
   maxOutputBytes: validateLimit("maxOutputBytes", limits?.maxOutputBytes, 0),
+  // 零预算表示只记录省略数；不能按真值把它当成无限额。
+  maxLogBytes: validateLimit("maxLogBytes", limits?.maxLogBytes, 0),
 })
 
 /** Executes one Effect-native CodeMode program without constructing a reusable runtime. */
@@ -185,6 +194,7 @@ export const fromJsonText = (text: string): unknown => {
     if (error instanceof SyntaxError || error instanceof RangeError) return text
     throw error
   }
+  // 只有容器需要结构化访问；标量文本保留原格式，避免改变现有字符串工具的用法。
   if (parsed === null || typeof parsed !== "object") return text
   try {
     // 复用既有深度、危险键和普通对象边界，不引入第二套可表示性规则。

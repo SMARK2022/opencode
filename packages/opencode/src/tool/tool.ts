@@ -153,11 +153,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
   return () =>
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
-      // Compile the parser closure once per tool init; `decodeUnknownEffect`
-      // allocates a new closure per call, so hoisting avoids re-closing it for
-      // every LLM tool invocation.
-      // 只保存原引用，分类不得执行默认值或转换；initializer 不能伪造另一份 runtimeParameters。
+      // 在 init 时捕获实际合同，后续展示换掉 parameters 不影响真实解析来源。
       const runtimeParameters = toolInfo.parameters
+      // 每次 init 只编译一次解码器，避免每次工具调用重新创建同一个解析闭包。
       const decode = Schema.decodeUnknownEffect(runtimeParameters)
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {

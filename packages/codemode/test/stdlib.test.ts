@@ -3,11 +3,8 @@ import { describe, expect, test } from "bun:test"
 import { Cause, Effect, Exit, Schema } from "effect"
 import { CodeMode, Tool } from "../src/index.js"
 
-// Standard-library value types: Date, RegExp, Map, Set. Programs use them as ordinary JS;
-// intra-sandbox checkpoints (Object.* helpers, spread, coercion inputs) preserve the live
-// values, while at the host boundary (final result, tool arguments, JSON.stringify) they
-// serialize exactly as JSON.stringify would: Date -> ISO string (invalid -> null),
-// URL -> href, and RegExp/Map/Set/URLSearchParams -> {}.
+// 标准库值在Object.*、展开和强制转换等沙箱内部操作中保留对象；最终结果、工具参数和JSON.stringify使用JSON形式。
+// Date转ISO字符串（无效日期为null），URL转href，RegExp、Map、Set和URLSearchParams转空对象。
 const run = (code: string) => Effect.runPromise(CodeMode.execute({ code, tools: {} }))
 const value = async (code: string) => {
   const result = await run(code)
@@ -211,6 +208,7 @@ describe("RegExp", () => {
     expect(!missingAwait.ok && missingAwait.error.message).toContain("un-awaited Promise")
   })
 
+  // replace拥有既有async扩展；嵌套替换专门验证挂起期间保留外层匹配游标。
   test("nested async replacers keep independent output and preserve ordinary rejection", async () => {
     const echo = Tool.make({
       description: "Echo",
@@ -218,11 +216,11 @@ describe("RegExp", () => {
       output: Schema.String,
       run: (value) => Effect.succeed(value),
     })
-    // 内层替换可再次挂起；外层的匹配游标和输出不能由共享回调模式覆盖。
     expect(
       await Effect.runPromise(
         CodeMode.execute({
           tools: { host: { echo } },
+          // 外层连续匹配a、b，每次内层替换又await工具；AB同时检验外层游标与内层输出缓冲互不覆盖。
           code: 'return "ab".replace(/./g, async c => c.replace(/./g, async d => await tools.host.echo(d.toUpperCase())))',
         }),
       ),
@@ -255,6 +253,7 @@ describe("RegExp", () => {
       }).pipe(Effect.exit),
     )
     expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true)
+    // Exit含中断仍可能夹带catch里的副作用，宿主later清单独立证明取消后没有继续调用after。
     expect(later).toEqual([])
   })
 
@@ -771,6 +770,7 @@ test("sleep aliases and callbacks retain callable identity without exposing glob
     async function nested() { await pause(0); return 3; }
     return [typeof pause, await nested(), await pause(0)];`),
   ).toEqual(["function", 3, null])
+  // sleep可当回调传递但不暴露宿主函数属性；Math.abs的反例保留原有全局方法不可提取的限制。
   for (const code of [
     "return sleep.name",
     "return sleep.constructor",
@@ -779,6 +779,7 @@ test("sleep aliases and callbacks retain callable identity without exposing glob
   ]) {
     expect((await run(code)).ok).toBe(false)
   }
+  // 非法参数必须在调用sleep时同步抛出，脚本未await仍能catch；样本同时约束类型、有限性与计时器上限。
   for (const arg of ['"0"', "undefined", "null", "NaN", "Infinity", "-1", "2147483648"]) {
     expect(await value(`try { sleep(${arg}); } catch (e) { return true; } return false`)).toBe(true)
   }
@@ -786,9 +787,10 @@ test("sleep aliases and callbacks retain callable identity without exposing glob
   expect(await value("sleep(2147483647); return 1")).toBe(1)
 })
 
-// for-await 只扩展原来的可迭代域；逐项等待、解构和控制流共用原来的词法帧。
+// 循环后才调用闭包，才能发现各次迭代错误复用同一Binding；continue分支也必须保留自己的值。
 test("for-await settles yielded promises and preserves sequential bodies and iteration bindings", async () => {
   expect(
+    // out因continue跳过2，闭包仍各自保存1、2、3；assigned为4则覆盖复用外部变量的另一种绑定入口。
     await value(`const out = [], closures = [];
     for await (const [n] of [Promise.resolve([1]), [2], [3]]) {
       await sleep(0); closures.push(() => n); if (n === 2) continue; out.push(n);
@@ -796,7 +798,9 @@ test("for-await settles yielded promises and preserves sequential bodies and ite
     let assigned = 0; for await (assigned of [Promise.resolve(4)]) {}
     return [out, closures.map(f => f()), assigned];`),
   ).toEqual([[1, 3], [1, 2, 3], 4])
+  // Map产出的是条目数组，只等待最外层条目；其中的Promise值仍由循环体显式await。
   expect(
+    // 字符串按码点产出emoji，Set逐项等待Promise，Map条目内的Promise保持身份，三个迭代域分别约束一层等待。
     await value(`const chars = []; for await (const c of "A😀") chars.push(c);
     const set = []; for await (const n of new Set([Promise.resolve(1), 2])) set.push(n);
     const pairs = []; for await (const [k, v] of new Map([["a", Promise.resolve(3)]]))
@@ -805,9 +809,10 @@ test("for-await settles yielded promises and preserves sequential bodies and ite
   ).toEqual([["A", "😀"], [1, 2], [["a", true, 3]]])
 })
 
-// 拒绝必须在绑定之前进入 catch；默认值失败同样弹出帧，早退仍由根结束在途生产者。
+// 外层n在两次绑定失败后仍为7，区分循环帧正确释放与只返回了预期错误消息。
 test("for-await rejects before binding and cleans frames through destructuring and early exits", async () => {
   expect(
+    // no而非body证明拒绝先于循环体，break只留下1，return取得9；两次失败后外层n仍为7。
     await value(`let n = 7; let caught = "";
     try { for await (const n of [Promise.reject("no")]) { throw "body"; } } catch (e) { caught = e; }
     try { for await (const [n = missing] of [[]]) {} } catch (e) {}

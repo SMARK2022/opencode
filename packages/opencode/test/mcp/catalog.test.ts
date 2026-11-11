@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
-// SDK 的定义 schema 用于验证 discovery 原值，避免测试用类型断言假定输出声明存在。
+// 用 SDK 实际解码工具定义，验证扩展元数据能穿过协议层。
 import { CallToolRequestSchema, ListToolsRequestSchema, ToolSchema } from "@modelcontextprotocol/sdk/types.js"
 import { McpCatalog } from "@/mcp/catalog"
 import { Effect } from "effect"
@@ -109,9 +109,11 @@ test("preserves output schema validation across paginated tool discovery", async
 
 // 候选标记只是 transport 后的明确投影策略；不能把多个片段、资源或声明结果猜成 JSON。
 test("program projection marks only successful schema-less single text candidates", () => {
+  // 保留首尾空白，使候选标记与返回值的断言能发现投影阶段提前解析或重写原文。
   const raw = ' {"items":[1]} '
   const text = { type: "text" as const, text: raw }
   expect(McpCatalog.programResult({ content: [text] })).toMatchObject({ value: raw, rawText: raw })
+  // 图片从独立附件通道剥离后只剩一块文本，因此它不破坏单文本投影资格。
   expect(
     McpCatalog.programResult({ content: [text, { type: "image", mimeType: "image/png", data: "AAAA" }] }),
   ).toMatchObject({ value: raw, rawText: raw, attachments: [{ mime: "image/png" }] })
@@ -119,11 +121,13 @@ test("program projection marks only successful schema-less single text candidate
   for (const result of [
     { content: [text], structuredContent: { items: [2] } },
     { content: [text], isError: true },
+    // 多文本和资源都携带额外正文语义，不能仅挑出看似JSON的第一块当完整返回值。
     { content: [text, text] },
     { content: [text, { type: "resource" as const, resource: { uri: "fixture://note", text: "extra" } }] },
     { content: [text, { type: "resource_link" as const, uri: "fixture://note", name: "note" }] },
   ])
     expect(McpCatalog.programResult(result).rawText).toBeUndefined()
+  // 只增加 outputSchema 就取消候选资格，声明是否存在不能由这段文本恰好能解析来决定。
   expect(McpCatalog.programResult({ content: [text] }, { type: "object" }).rawText).toBeUndefined()
 })
 
@@ -138,6 +142,7 @@ test("SDK output validation still owns declared results before JSON text project
       ...(name === "plain" ? {} : { outputSchema }),
     })),
   }))
+  // 各工具的文本完全相同，只改变声明、结构化结果或isError，定位投影资格的协议来源。
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({
     content: [{ type: "text" as const, text: '{"value":1}' }],
     ...(params.name === "invalid" ? { structuredContent: { value: "wrong" } } : {}),
@@ -148,6 +153,7 @@ test("SDK output validation still owns declared results before JSON text project
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
   try {
+    // 先经真实 discovery 填充 Client 的输出校验缓存，再调用工具，避免绕过 SDK 的声明校验。
     const definitions = await Effect.runPromise(McpCatalog.defs(client))
     const invoke = async (name: string) => {
       const def = definitions?.find((item) => item.name === name)
@@ -159,9 +165,9 @@ test("SDK output validation still owns declared results before JSON text project
     }
     // 合法的无声明文本才携带候选标记；不能把 text 中的 JSON 当作声明结构的替代品。
     expect(await invoke("plain")).toMatchObject({ value: '{"value":1}', rawText: '{"value":1}' })
+    // 同一文本搭配合法 structuredContent 时以结构化对象为准，不能同时带上待解析标记。
     expect(await invoke("valid")).toEqual({ value: { value: 1 }, attachments: [] })
-    // 等待真实 SDK Promise 结算后检查原错误，不依赖 Bun matcher 的同步返回类型。
-    // isError 保留业务失败而非尝试解析文本后变成成功，错误出口与直接 MCP 一致。
+    // missing/invalid 分别触发缺正文和类型不符；failed 保留 isError 的原文，三种失败不能互相顶替。
     for (const [name, message] of [
       ["missing", "structured content"],
       ["invalid", "output schema"],

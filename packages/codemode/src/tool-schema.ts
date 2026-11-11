@@ -34,7 +34,7 @@ const intersection = (members: ReadonlyArray<string>): string => {
  */
 const MAX_RENDER_DEPTH = 8
 
-// 渲染状态只携带引用定义，紧凑签名不再维护第二种 pretty 模式。
+// 各出口用同一份引用定义展开类型，避免目录和搜索对同一个 $ref 给出不同形状。
 type RenderContext = {
   readonly definitions: Readonly<Record<string, JsonSchema>>
 }
@@ -63,7 +63,7 @@ const hasUnresolvedRef = (
   ].some((item) => hasUnresolvedRef(item, definitions, seen, nextVisited))
 }
 
-// 字段说明供搜索索引使用；这里只保留一套递归类型渲染，不再拼装 JSDoc。
+// 字段描述、默认值和格式约束由 search 的原 schema 交付，TS 签名只提供类型概览。
 const renderSchema = (
   schema: JsonSchema,
   ctx: RenderContext,
@@ -137,7 +137,7 @@ const renderSchema = (
     const field = ([name, value]: readonly [string, JsonSchema]) =>
       `${renderKey(name)}${required.has(name) ? "" : "?"}: ${renderSchema(value, nested, depth + 1, seen)}`
 
-    // 所有展示入口共用紧凑类型；字段说明仅用于搜索索引。
+    // 省略文档仍须保留必填、可选和索引字段，紧凑展示不能改变可见的参数形状。
     const fields = properties.map(field)
     if (indexType !== undefined) fields.push(`[key: string]: ${indexType}`)
     return fields.length === 0 ? "{}" : `{ ${fields.join("; ")} }`
@@ -213,21 +213,14 @@ export const inputProperties = <R>(definition: Definition<R>): Array<InputProper
   }
 }
 
-// 输入展示与实际适配共用描述符，标量根不采信适配器的展示对象。
-export const inputTypeScript = <R>(definition: Definition<R>): string => {
-  const original = isEffectSchema(definition.inputContract)
+// 只展示原始输入合同；运行时简写仍由同一合同推导，不把宽容形式重复注入每条签名。
+export const inputTypeScript = <R>(definition: Definition<R>): string =>
+  isEffectSchema(definition.inputContract)
     ? toTypeScript(definition.inputContract, false)
     : jsonSchemaToTypeScript(definition.inputContract)
-  // 形式说明与执行共用同一实际描述符；显示字段变更不能移走真实参数键。
-  const forms = definition.inputForms
-  if (!forms) return original
-  const scalar = toTypeScript(forms.scalar)
-  return forms.kind === "object"
-    ? `${original} | ${scalar}`
-    : `${scalar} | Record<string, ${scalar}> /* exactly one own enumerable field; undefined values are not unwrapped */`
-}
 
 /** 无输出 schema 时保留 unknown，不从样例推断结果。 */
+// 输出按解码后的域展示，例如 NumberFromString 的返回值为 number，而输入仍是 string。
 export const outputTypeScript = <R>(definition: Definition<R>): string =>
   definition.output === undefined
     ? "unknown"

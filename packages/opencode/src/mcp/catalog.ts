@@ -59,7 +59,10 @@ export async function callTool(entry: MCP.McpTool, args: unknown, signal?: Abort
 
 // 同一次 transport 的程序投影保留结构化值；媒体留在宿主，避免字节进入解释器。
 // 声明随结果进入投影，仅用于排除文本候选，不替代 SDK 的输出校验。
-export function programResult(result: CallToolResult, outputSchema?: MCP.McpTool["def"]["outputSchema"]): NonNullable<Tool.ExecuteResult["program"]> {
+export function programResult(
+  result: CallToolResult,
+  outputSchema?: MCP.McpTool["def"]["outputSchema"],
+): NonNullable<Tool.ExecuteResult["program"]> {
   // 原 structuredContent 优先级保持不变，文本格式化不能把原生对象变成待解析 JSON。
   const text: string[] = []
   const attachments: NonNullable<Tool.ExecuteResult["attachments"]> = []
@@ -97,8 +100,16 @@ export function programResult(result: CallToolResult, outputSchema?: MCP.McpTool
   const value = result.structuredContent ?? (text.length > 0 ? text.join("\n")
     : attachments.length > 0 ? `[${attachments.length} ${noun}${attachments.length === 1 ? "" : "s"} attached to the result]` : null)
   // 只标记成功的单文本；图片/音频仍独立交付，资源、分段文本及声明输出不参与猜测。
-  const rawText = !result.isError && outputSchema === undefined && result.structuredContent === undefined && text.length === 1 &&
-    result.content.every((block) => block.type === "text" || block.type === "image" || block.type === "audio") ? text[0] : undefined
+  const rawText =
+    !result.isError &&
+    outputSchema === undefined &&
+    // 结构化结果已有协议语义，不能再把展示文本作为另一份数据来源。
+    result.structuredContent === undefined &&
+    text.length === 1 &&
+    // 资源中的 text 可能已并入正文，仍须检查原内容块，避免把资源误标成普通单文本。
+    result.content.every((block) => block.type === "text" || block.type === "image" || block.type === "audio")
+      ? text[0]
+      : undefined
   return { value, attachments, ...(rawText !== undefined ? { rawText } : {}) }
 }
 
