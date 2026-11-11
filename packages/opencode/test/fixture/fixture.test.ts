@@ -1,6 +1,7 @@
 import { $ } from "bun"
 import { describe, expect, test } from "bun:test"
 import fs from "fs/promises"
+import { withTimeout } from "../../src/util/timeout"
 import { DISPOSAL_TIMEOUT, disposeAllInstances, tmpdir, withDisposalTimeout, withTestInstance } from "./fixture"
 import { registerDisposer } from "../../src/effect/instance-registry"
 
@@ -44,11 +45,15 @@ describe("withDisposalTimeout", () => {
     // （Effect.cachedWithTTL(Duration.zero) 缓存 in-flight fiber，永不 settle
     // 则永久缓存，后续所有 disposeAll 调用 join 同一个 stuck fiber）。
     const start = Date.now()
-    await withDisposalTimeout(new Promise(() => {}), "test-hang")
+    // 先让出异步测试再断言结果，避免 resolves 匹配器同步重入事件循环。
+    const result = await withTimeout(
+      withDisposalTimeout(new Promise(() => {}), "test-hang"),
+      DISPOSAL_TIMEOUT + 2_000,
+    )
+    expect(result).toBeUndefined()
     const elapsed = Date.now() - start
 
-    // DISPOSAL_TIMEOUT + 2 秒余量覆盖 setTimeout 精度和 CI 调度延迟
-    expect(elapsed).toBeLessThan(DISPOSAL_TIMEOUT + 2_000)
+    // 同一事件循环内比较五秒完成与原七秒保护，宿主暂停不应变成 disposal 的额外耗时。
     expect(elapsed).toBeGreaterThanOrEqual(DISPOSAL_TIMEOUT)
   })
 
