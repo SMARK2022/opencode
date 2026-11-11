@@ -1,7 +1,7 @@
 // 宿主夹具沿用真实解释器与租约服务，覆盖跨调用状态和取消边界。
 import { CodeMode } from "@opencode-ai/codemode"
 import { afterEach, describe, expect, test } from "bun:test"
-import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, type CatalogEntry } from "@/tool/code-mode"
+import { CODE_MODE_TOOL, CodeModeTool, Parameters, describeCatalog, makeExecutionBudget, type CatalogEntry } from "@/tool/code-mode"
 import { McpCatalog } from "@/mcp/catalog"
 import type { Tool as MCPToolDef } from "@modelcontextprotocol/sdk/types.js"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
@@ -153,10 +153,10 @@ describe("code mode execute", () => {
     })
     expect(Exit.isFailure(await Effect.runPromiseExit(decode({ code: "return 1", environmentID: 1 })))).toBe(true)
     // 缺省值留给宿主运行策略；解码只接受安全正整数，不把字符串、零或非有限数悄悄修正。
-    for (const timeout of [1, 600000, Number.MAX_SAFE_INTEGER]) {
+    for (const timeout of [1, 600000, 2_147_483_647]) {
       expect(await Effect.runPromise(decode({ code: "return 1", timeout }))).toEqual({ code: "return 1", timeout })
     }
-    for (const timeout of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, null, "10"]) {
+    for (const timeout of [0, -1, 1.5, 2_147_483_648, Number.MAX_SAFE_INTEGER, NaN, Infinity, null, "10"]) {
       expect(Exit.isFailure(await Effect.runPromiseExit(decode({ code: "return 1", timeout })))).toBe(true)
     }
     expect(Schema.toJsonSchemaDocument(Parameters).schema).toMatchObject({
@@ -662,10 +662,10 @@ describe("code mode execute", () => {
     expect(description).toContain("tools.linear.search(): Promise<unknown>")
     expect(description).not.toContain("$codemode")
     expect(description).not.toContain("Browse one namespace")
-    expect(description).toContain("## Code Mode tools (call only inside `execute`)")
+    expect(description).toContain("## Code Mode tools")
     expect(description).not.toContain("JSON.parse(res)")
     // 目录外工具仍走直接调用，精简文案不能扩大 Execute 的可调用集合。
-    expect(description).toContain("call tools outside this catalog directly.")
+    expect(description).toContain("Other tools shown in the conversation can be called directly.")
     expect(description).not.toContain("total_count")
   })
 
@@ -1422,3 +1422,118 @@ describe("code mode permission visibility", () => {
     expect(Object.keys(visible)).toEqual(["b_tool", "c_tool"])
   })
 })
+
+testEffect(Layer.empty).effect("execution budget resumes only the remaining time after overlapping waits", () =>
+  Effect.gen(function* () {
+    const budget = yield* makeExecutionBudget
+    const entered = Deferred.makeUnsafe<void>()
+    const go = Deferred.makeUnsafe<void>()
+    let ended = false
+    const execution = yield* CodeMode.execute({
+      code: "await tools.work(); return 1",
+      tools: {
+        work: () =>
+          Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(go)),
+            Effect.andThen(Effect.never),
+            Effect.ensuring(
+              Effect.sync(() => {
+                ended = true
+              }),
+            ),
+          ),
+      },
+      limits: { timeoutMs: 100 },
+      waitForTimeout: budget.wait,
+    }).pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.await(entered)
+    yield* TestClock.adjust(30)
+    // 两个等待共用暂停计数，结束第一个不能提前恢复预算。
+    const one = Deferred.makeUnsafe<void>()
+    const two = Deferred.makeUnsafe<void>()
+    const a = yield* budget.pause(Deferred.await(one)).pipe(Effect.forkScoped({ startImmediately: true }))
+    const b = yield* budget.pause(Deferred.await(two)).pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* TestClock.adjust(1000)
+    expect(execution.pollUnsafe()).toBeUndefined()
+    yield* Deferred.succeed(one, undefined)
+    yield* Fiber.join(a)
+    yield* TestClock.adjust(1000)
+    expect(execution.pollUnsafe()).toBeUndefined()
+    yield* Fiber.interrupt(b)
+    yield* Deferred.succeed(go, undefined)
+    // 先前已用30毫秒，恢复后只剩70毫秒，不重新获得完整预算。
+    yield* TestClock.adjust(69)
+    expect(execution.pollUnsafe()).toBeUndefined()
+    yield* TestClock.adjust(1)
+    expect(yield* Fiber.join(execution)).toMatchObject({ ok: false, error: { kind: "TimeoutExceeded" } })
+    expect(ended).toBe(true)
+  }),
+)
+
+testEffect(Layer.empty).effect("external cancellation cleans children while the execution budget is paused", () =>
+  Effect.gen(function* () {
+    const budget = yield* makeExecutionBudget
+    const entered = Deferred.makeUnsafe<void>()
+    let ended = false
+    const execution = yield* CodeMode.execute({
+      code: "await tools.question()",
+      tools: {
+        question: () =>
+          budget.pause(
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  ended = true
+                }),
+              ),
+            ),
+          ),
+      },
+      limits: { timeoutMs: 100 },
+      waitForTimeout: budget.wait,
+    }).pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.await(entered)
+    yield* TestClock.adjust(1000)
+    expect(execution.pollUnsafe()).toBeUndefined()
+    yield* Fiber.interrupt(execution)
+    expect(ended).toBe(true)
+  }),
+)
+
+testEffect(Layer.empty).effect(
+  "explicit pause closure crosses independent runPromise and leaves other executions timed",
+  () =>
+    Effect.gen(function* () {
+      const budget = yield* makeExecutionBudget
+      const entered = Deferred.makeUnsafe<void>()
+      const answer = Deferred.makeUnsafe<void>()
+      const execution = yield* CodeMode.execute({
+        code: "return await tools.question()",
+        tools: {
+          question: () =>
+            Effect.tryPromise(() =>
+              Effect.runPromise(
+                budget.pause(
+                  Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(answer)), Effect.as("ok")),
+                ),
+              ),
+            ),
+        },
+        limits: { timeoutMs: 100 },
+        waitForTimeout: budget.wait,
+      }).pipe(Effect.forkScoped({ startImmediately: true }))
+      yield* Deferred.await(entered)
+      // 闭包显式跨独立Effect入口；另一次没有暂停的执行仍应按时结束。
+      const other = yield* CodeMode.execute({
+        code: "await tools.wait()",
+        tools: { wait: () => Effect.never },
+        limits: { timeoutMs: 100 },
+      }).pipe(Effect.forkScoped({ startImmediately: true }))
+      yield* TestClock.adjust(1000)
+      expect(execution.pollUnsafe()).toBeUndefined()
+      expect(yield* Fiber.join(other)).toMatchObject({ ok: false, error: { kind: "TimeoutExceeded" } })
+      yield* Deferred.succeed(answer, undefined)
+      expect(yield* Fiber.join(execution)).toMatchObject({ ok: true, value: "ok" })
+    }),
+)

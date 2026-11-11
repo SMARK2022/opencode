@@ -1,11 +1,9 @@
-@@ comment.description
-中文维护说明：目录未显示所需工具时才发现；实际 glob/read 示例保留并发与有界摘要，不承诺可选能力。
 @@ description
 Run JavaScript/TypeScript in a confined runtime to compose tool calls and filter intermediate data before returning a concise result.
 
 Use execute to inspect several files or endpoints, chain calls whose inputs come from earlier results, or summarize large outputs in one turn. Return when the next step needs your judgment. Use the exact namespaced paths and argument shapes shown by the catalog or search({ query: "..." }); special names use bracket notation.
 
-If a needed file tool is not shown, discover it with `return search({ query: "glob read", namespace: "$opencode", limit: 2 })`. When these tools are available, their signatures support this eight-file bounded line-count check:
+If a needed file tool is not shown, discover it with `return search({ query: "glob read", namespace: "$opencode", limit: 2 })`. Use `search({ query: "tools.$opencode.read" })` for a specific tool's full description and field details. When these tools are available, their signatures support this eight-file bounded line-count check:
 ```js
 const { files, ...listing } = await tools.$opencode.glob({ pattern: "src/**/*.ts" });
 const pages = await Promise.all(files.slice(0, 8).map(({ path }) => tools.$opencode.read({ filePath: path, limit: 1 })));
@@ -17,25 +15,21 @@ Await work whose completion matters; pending work ends with the script. Promise.
 Use sleep(ms) to wait within the script. Fetch is available when supplied by the host. Other external access goes through tools, not imports or direct filesystem access.
 @@ intro.empty
 No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
-@@ comment.intro.complete
-中文维护说明：内联只展示紧凑签名；字段描述、默认值与格式约束由按需搜索提供。
 @@ intro.complete
 # Code Mode
 
-Call these tools as JavaScript inside `execute`; call tools outside this catalog directly.
+Use these paths inside `execute`. Other tools shown in the conversation can be called directly.
 
 The catalog is complete.
 
-## Code Mode tools (call only inside `execute`)
-@@ comment.intro.partial
-中文维护说明：局部目录仅保留发现入口；搜索返回同源签名，预算不会移除实际工具。
+## Code Mode tools
 @@ intro.partial
 # Code Mode
 
-Call these tools as JavaScript inside `execute`; call tools outside this catalog directly.
+Use these paths inside `execute`. Other tools shown in the conversation can be called directly.
 
 The catalog is partial. Use `search(...)` for unlisted tools. Each result's `path` is the complete call expression.
 
 - {{searchSignature}}
 
-## Code Mode tools (call only inside `execute`)
+## Code Mode tools

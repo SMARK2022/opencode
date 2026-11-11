@@ -822,3 +822,13 @@ test("for-await rejects before binding and cleans frames through destructuring a
   ).toEqual([7, "no", [1], 9])
   expect((await run("for await (const x of { a: 1 }) {} ")).ok).toBe(false)
 })
+
+// 字段过滤和末项选择使用已有标准库，直接验证脚本值，不为它们添加替代实现。
+test("entry filtering and negative indexing compose through the existing standard library", async () => {
+  expect(
+    await value(`
+      const entries = Object.entries({ keep: 2, skip: 0 }).filter(([, count]) => count > 0)
+      return { object: Object.fromEntries(entries), last: entries.at(-1) }
+    `),
+  ).toEqual({ object: { keep: 2 }, last: ["keep", 2] })
+})

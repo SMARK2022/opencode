@@ -480,13 +480,12 @@ describe("timeout interruption of forked calls", () => {
 })
 
 describe("unsupported promise surface", () => {
-  test(".then/.catch/.finally give a clear await-instead error", async () => {
-    for (const method of ["then", "catch", "finally"]) {
-      const diagnostic = await error(`return tools.host.sleepy({ id: 1 }).${method}((x) => x)`)
-      expect(diagnostic.kind).toBe("UnsupportedSyntax")
-      expect(diagnostic.message).toContain(`Promise.prototype.${method} is not supported`)
-      expect(diagnostic.message).toContain("await")
-    }
+  // then/catch 的开放不包含 finally，未实现的方法仍应明确诊断而非返回 undefined。
+  test(".finally gives a clear await-instead error", async () => {
+    const diagnostic = await error(`return tools.host.sleepy({ id: 1 }).finally((x) => x)`)
+    expect(diagnostic.kind).toBe("UnsupportedSyntax")
+    expect(diagnostic.message).toContain("Promise.prototype.finally is not supported")
+    expect(diagnostic.message).toContain("await")
   })
 
   test("other property reads on a promise hint at the missing await", async () => {
@@ -1026,4 +1025,114 @@ test("a cancelled race observer does not mark a later rejection observed", async
     // 两种分支都要真正产生同一次拒绝；否则无告警可能只是生产者被race提前取消。
     expect(failures).toBe(1)
   }
+})
+
+describe("promise chaining", () => {
+  test("batch catch recovers tool errors and then transforms successful results", async () => {
+    expect(
+      await value(`return await Promise.all([1,2,3].map(id => tools.host.fail({}).catch(() => id).then(x => x * 2)))`),
+    ).toEqual([2, 4, 6])
+    // 成功源不能误走拒绝处理器，99若出现就说明分支选择错误。
+    expect(await value(`return tools.host.sleepy({id: 7}).catch(() => 99).then(x => x + 1)`)).toBe(8)
+  })
+
+  test("missing and non-function handlers preserve values and rejection identity", async () => {
+    // 非函数handler须传递同一个拒绝值，不能重新包装后丢失对象身份。
+    expect(await value(`const e = {n:3}; return await Promise.reject(e).then(null, 7).catch(x => x === e)`)).toBe(true)
+    expect(await value(`return Promise.resolve(4).then().then(null).catch(7)`)).toBe(4)
+    expect(await value(`return Promise.reject(5).then(undefined, x => x + 1)`)).toBe(6)
+  })
+
+  test("built-in handlers share the collection callback surface", async () => {
+    // 这些调用走集合方法已有的callback边界，不能要求模型额外套箭头函数。
+    expect(await value(`return Promise.resolve(4).then(String)`)).toBe("4")
+    expect(await value(`return Promise.resolve("a b").then(encodeURIComponent)`)).toBe("a%20b")
+    expect(await value(`return Promise.resolve(0).then(sleep).then(() => 7)`)).toBe(7)
+  })
+
+  test("callbacks adopt sync and async returned promises and callback exceptions", async () => {
+    expect(
+      await value(
+        `return Promise.resolve(1).then(x => tools.host.sleepy({id:x+1})).then(async x => { await sleep(1); return x+1; })`,
+      ),
+    ).toBe(3)
+    // 同步抛出和返回拒绝Promise都应交给后续catch，而不是提前从宿主抛出。
+    expect(await value(`return Promise.resolve(1).then(() => { throw {n:7}; }).catch(e => e.n)`)).toBe(7)
+    expect(await value(`return Promise.resolve(1).then(() => Promise.reject("bad")).catch(e => e)`)).toBe("bad")
+    expect(await value(`return Promise.reject(1).catch(async () => {throw "again"}).catch(e => e)`)).toBe("again")
+  })
+
+  test("callback runs after current statement and direct self-resolution rejects", async () => {
+    expect(
+      await value(
+        `const out = []; const p = Promise.resolve(1).then(() => out.push("callback")); out.push("sync"); await p; return out;`,
+      ),
+    ).toEqual(["sync", "callback"])
+    // 等同一个新Promise会永远挂起；直接自返回必须成为可捕获的TypeError。
+    expect(await value(`let p; p = Promise.resolve(1).then(() => p); return p.catch(e => e.name)`)).toBe("TypeError")
+  })
+
+  test("independent chain callbacks keep separate frames and shared captured bindings", async () => {
+    expect(
+      await value(
+        `let count=0; const out = await Promise.all([1,2,3].map(id => Promise.resolve(id).then(async x => { await sleep(1); count++; return x; }))); return {out,count};`,
+      ),
+      // 参数按各帧保留，外层count却由三个回调共享，二者必须同时成立。
+    ).toEqual({ out: [1, 2, 3], count: 3 })
+  })
+
+  test("host interruption passes through catch and rejection handler without invoking either", async () => {
+    let invoked = false
+    const exit = await Effect.runPromise(
+      CodeMode.execute({
+        tools: {
+          stop: Tool.make({ description: "stop", input: Schema.Struct({}), run: () => Effect.interrupt }),
+          mark: Tool.make({
+            description: "mark",
+            input: Schema.Struct({}),
+            run: () =>
+              Effect.sync(() => {
+                invoked = true
+                return null
+              }),
+          }),
+        },
+        code: `return tools.stop({}).catch(() => tools.mark({})).then(undefined, () => tools.mark({}));`,
+      }).pipe(Effect.exit),
+    )
+    expect(Exit.isFailure(exit)).toBe(true)
+    // 失败类别与handler副作用一起验证，避免把宿主取消降格为普通可恢复错误。
+    if (Exit.isFailure(exit)) expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(invoked).toBe(false)
+  })
+
+  test("retained chain methods use the current execution and preview copies their receiver", async () => {
+    const environment = CodeMode.createEnvironment()
+    expect(
+      (
+        await Effect.runPromise(
+          CodeMode.execute({
+            environment,
+            tools: {},
+            code: `const p = Promise.resolve({n:1}); const then = p.then; await p;`,
+          }),
+        )
+      ).ok,
+    ).toBe(true)
+    expect(
+      (
+        await Effect.runPromise(
+          CodeMode.execute({
+            environment,
+            snapshotEnvironment: true,
+            tools: {},
+            code: `await then(x => {x.n=9; return x;});`,
+          }),
+        )
+      ).ok,
+    ).toBe(true)
+    // 已确认副本中的then真正运行；真实receiver仍为1才排除浅拷贝泄漏。
+    const result = await Effect.runPromise(CodeMode.execute({ environment, tools: {}, code: `return then(x => x.n);` }))
+    expect(result.ok && result.value).toBe(1)
+  })
 })

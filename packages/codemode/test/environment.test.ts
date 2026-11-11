@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { Cause, Deferred, Effect, Exit, Fiber, Schema } from "effect"
+import { TestClock } from "effect/testing"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
 // 从公开执行入口跨两次调用观察闭包；只复用目录的 make 不能满足这个状态合同。
@@ -549,4 +550,104 @@ test("one two-second preview timeout leaves real bindings untouched", async () =
     ok: true,
     value: 1,
   })
+})
+
+// 任务已结束不代表结果不可变；预跑必须复制保留Promise的成功值和拒绝值。
+test("preview clones settled promise payloads without changing retained values", async () => {
+  for (const setup of [
+    "const p = Promise.resolve({ n: 1 }); await p;",
+    "const p = Promise.reject({ n: 1 }); try { await p; } catch {}",
+    "async function f() { return { n: 1 }; } const p = f(); await p;",
+    "async function f() { throw { n: 1 }; } const p = f(); try { await p; } catch {}",
+  ]) {
+    const environment = CodeMode.createEnvironment()
+    expect(await Effect.runPromise(CodeMode.execute({ environment, code: setup }))).toMatchObject({ ok: true })
+    const calls: unknown[] = []
+    const preview = await Effect.runPromise(
+      CodeMode.execute({
+        environment,
+        snapshotEnvironment: true,
+        tools: {
+          capture: Tool.make({
+            description: "Record cloned promise value",
+            input: Schema.Unknown,
+            output: Schema.Number,
+            run: (input) => Effect.sync(() => calls.push(input)),
+          }),
+        },
+        code: "let value; try { value = await p; } catch (error) { value = error; } value.n = 2; return await tools.capture({ n: value.n });",
+      }),
+    )
+    // 先确认探针确实走到工具调用，再验证真实状态，避免复制失败造成“没有污染”的假通过。
+    expect(preview.ok).toBe(true)
+    expect(calls).toEqual([{ n: 2 }])
+    expect(
+      await Effect.runPromise(
+        CodeMode.execute({
+          environment,
+          code: "try { return (await p).n; } catch (error) { return error.n; }",
+        }),
+      ),
+    ).toMatchObject({ ok: true, value: 1 })
+  }
+})
+
+// 旧别名使用本次宿主计时；预跑修改副本，真实调用仍按默认时钟等待。
+test("preview sleep overrides retained aliases without changing real timing or state", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const environment = CodeMode.createEnvironment()
+      const waits: number[] = []
+      const calls: number[] = []
+      const tools = {
+        record: Tool.make({
+          description: "Record the counter after sleep",
+          input: Schema.Struct({ count: Schema.Number }),
+          output: Schema.Null,
+          run: ({ count }) =>
+            Effect.sync(() => {
+              calls.push(count)
+              return null
+            }),
+        }),
+      }
+      expect(
+        yield* CodeMode.execute({
+          environment,
+          code: "let count = 0; const pause = sleep; const work = async () => { await pause(100); count++; await tools.record({ count }); return count; };",
+        }),
+      ).toMatchObject({ ok: true })
+      expect(
+        yield* CodeMode.execute({
+          environment,
+          tools,
+          snapshotEnvironment: true,
+          sleep: (ms) =>
+            Effect.sync(() => {
+              waits.push(ms)
+            }),
+          code: "return await work();",
+        }),
+      ).toMatchObject({ ok: true, value: 1 })
+      // 工具已收到副本里的增量，随后真实count仍为零才证明预跑没有写回。
+      expect(waits).toEqual([100])
+      expect(calls).toEqual([1])
+      expect(yield* CodeMode.execute({ environment, code: "return count;" })).toMatchObject({ value: 0 })
+
+      const running = yield* CodeMode.execute({
+        environment,
+        tools,
+        code: "return await work();",
+      }).pipe(Effect.forkChild)
+      // 不靠墙钟猜测：推进到到期前一毫秒仍不能出现第二次真实调用。
+      yield* TestClock.adjust(99)
+      expect(calls).toEqual([1])
+      yield* TestClock.adjust(1)
+      expect(yield* Fiber.join(running)).toMatchObject({ ok: true, value: 1 })
+      expect(calls).toEqual([1, 1])
+      // 旧闭包没有保存探针的sleep能力，真实格子不再触发那个hook。
+      expect(waits).toEqual([100])
+      expect(yield* CodeMode.execute({ environment, code: "return count;" })).toMatchObject({ value: 1 })
+    }).pipe(Effect.provide(TestClock.layer())),
+  )
 })

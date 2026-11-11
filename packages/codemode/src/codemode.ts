@@ -51,10 +51,14 @@ export type ExecuteOptions<Tools extends Record<string, unknown> = {}> = {
   environment?: Environment
   /** 预跑只用副本；复制失败即结束本次预跑，不能退回真实环境继续执行。 */
   snapshotEnvironment?: boolean
+  /** 宿主选择 sleep 的等待效果；执行期限仍由独立根预算决定。 */
+  sleep?: (milliseconds: number) => Effect.Effect<void>
   /** Explicit tool tree exposed to the program as `tools`. */
   tools?: Tools & ToolTree<Services<Tools>>
   /** HTTP由宿主显式提供；未提供时沙箱没有环境网络权限。 */
   fetch?: HostTool<Services<Tools>>
+  /** Host timer may exclude time spent awaiting external input. */
+  waitForTimeout?: (milliseconds: number) => Effect.Effect<void>
   /** Per-execution overrides for the default resource limits. */
   limits?: ExecutionLimits
   /** Observes decoded tool input immediately before tool execution. */
@@ -140,15 +144,17 @@ const validateLimit = <Value extends number | undefined>(
   name: keyof ExecutionLimits,
   value: Value,
   minimum: number,
+  maximum = Number.MAX_SAFE_INTEGER,
 ): Value => {
-  if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) {
-    throw new RangeError(`${name} must be a safe integer greater than or equal to ${minimum}.`)
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum || value > maximum)) {
+    throw new RangeError(`${name} must be a safe integer between ${minimum} and ${maximum}.`)
   }
   return value
 }
 
 const resolveExecutionLimits = (limits?: ExecutionLimits): ResolvedExecutionLimits => ({
-  timeoutMs: validateLimit("timeoutMs", limits?.timeoutMs, 1),
+  // Effect 的计时器只支持有符号32位毫秒；超界不能悄悄变成无期限执行。
+  timeoutMs: validateLimit("timeoutMs", limits?.timeoutMs, 1, 2_147_483_647),
   maxToolCalls: validateLimit("maxToolCalls", limits?.maxToolCalls, 0),
   maxOutputBytes: validateLimit("maxOutputBytes", limits?.maxOutputBytes, 0),
   // 零预算表示只记录省略数；不能按真值把它当成无限额。

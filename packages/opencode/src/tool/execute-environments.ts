@@ -20,8 +20,8 @@ export class EnvironmentUnavailable extends Schema.TaggedErrorClass<EnvironmentU
   },
 ) {}
 
-// 容量按环境计数；正在运行或仍有人排队的状态必须保留，满额时只能淘汰闲置项。
-const instanceCapacity = 64
+// 每个会话和位置只保留最近调用的八个环境；最旧租约收尾后再回收。
+const ownerCapacity = 8
 type Entry = Lease & {
   owner: Owner
   // 每个环境独占一个许可，互相独立的 Notebook 不共用执行锁。
@@ -51,7 +51,7 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
     if (entry.users === 0) entries.delete(entry.id)
   }
   // 状态变动延迟到 Effect 真正执行，单纯构造一个 use 请求不会占用目录容量。
-  const acquire = (owner: Owner, id: string | undefined) =>
+  const acquire = (owner: Owner, id: string | undefined): Effect.Effect<Entry, EnvironmentUnavailable> =>
     Effect.suspend(() => {
       if (closing) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environments are disposed." }))
       // 空字符串仍是显式句柄，不能用真值判断把无效复用请求悄悄变成新环境。
@@ -63,15 +63,12 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
           }),
         )
       if (id === undefined) {
-        if (entries.size >= instanceCapacity) {
-          // Map 顺序就是最近回到闲置的顺序；活动或排队租约从不成为淘汰候选。
-          const oldest = [...entries.values()].find((entry) => entry.users === 0 && !entry.closed)
-          if (!oldest)
-            return Effect.fail(
-              new EnvironmentUnavailable({
-                message: "All Execute environment slots are in use. Wait for an active execution to finish.",
-              }),
-            )
+        const owned = [...entries.values()].filter((entry) => sameOwner(owner, entry.owner) && !entry.closed)
+        if (owned.length >= ownerCapacity) {
+          const oldest = owned[0]!
+          // 等待最旧租约收尾，再依据最新调用顺序重新选择，不能跳过忙项淘汰较新状态。
+          if (oldest.users > 0)
+            return Deferred.await(oldest.drained).pipe(Effect.interruptible, Effect.andThen(acquire(owner, id)))
           retire(oldest)
         }
         let fresh = nextID()
@@ -93,6 +90,8 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
       // 闲置后的新一轮租约需要新的 drain 信号，不能复用上一轮已完成的 Deferred。
       if (entry.users === 0) entry.drained = Deferred.makeUnsafe()
       // 等许可之前先计入使用者，才能让淘汰和关闭逻辑看见仍在队列里的请求。
+      entries.delete(entry.id)
+      entries.set(entry.id, entry)
       entry.users++
       return Effect.succeed(entry)
     })
@@ -125,9 +124,8 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
                 entry.users--
                 if (entry.users === 0) {
                   Deferred.doneUnsafe(entry.drained, Effect.void)
-                  // 最后一个租约退出才重新进入闲置队尾；关闭项只能删除，不能复活。
-                  entries.delete(entry.id)
-                  if (!entry.closed) entries.set(entry.id, entry)
+                  // 完成顺序不能覆盖调用顺序；关闭项在最后一个租约退出后删除。
+                  if (entry.closed) entries.delete(entry.id)
                 }
               }),
             ),

@@ -234,8 +234,8 @@ describe("code mode integration (real MCP server)", () => {
     expect(description).toContain("tools.fixtures.get_text(input: { name: string }): Promise<unknown>")
     expect(description).toContain("// Add two numbers and return the structured sum")
     expect(description).not.toContain("$codemode")
-    expect(description).toContain("## Code Mode tools (call only inside `execute`)")
-    expect(description).toContain("call tools outside this catalog directly.")
+    expect(description).toContain("## Code Mode tools")
+    expect(description).toContain("Other tools shown in the conversation can be called directly.")
     expect(description).not.toContain("total_count")
   })
 

@@ -107,6 +107,8 @@ const namespaceSignatureBudget = 2_000
 const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 const SearchInput = Schema.Struct({
+  // 先取工具概览；详细视图另取少量完整字段合同，不重复广播全部schema。
+  detail: Schema.optionalKey(Schema.Boolean),
   query: Schema.optionalKey(Schema.String),
   namespace: Schema.optionalKey(Schema.String),
   limit: Schema.optionalKey(PositiveInt),
@@ -116,8 +118,8 @@ const SearchItem = Schema.Struct({
   path: Schema.String,
   description: Schema.String,
   signature: Schema.String,
-  // 详情保留 schema 元数据；不可表示的侧用标记说明，不能拖垮整页发现。
-  inputSchema: Schema.Unknown,
+  // 仅详细视图提供schema；不可表示的侧用标记说明，不能拖垮整页发现。
+  inputSchema: Schema.optionalKey(Schema.Unknown),
   outputSchema: Schema.optionalKey(Schema.Unknown),
   schemaUnavailable: Schema.optionalKey(Schema.Array(Schema.Literals(["input", "output"]))),
 })
@@ -454,6 +456,8 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
           : scoped.find(
               (entry) => entry.description.path === pathQuery || toolExpression(entry.description.path) === trimmed,
             )
+      // 精确路径自动返回合同详情；宽泛搜索仅在显式请求时携带 schema。
+      const detail = exact !== undefined || request.detail === true
       const ranked = exact !== undefined ? [exact] : rank(scoped, query)
       const items: Array<typeof SearchItem.Type> = []
       // 每加入完整工具后重新计算续页位置，页大小由字符预算或条数上限先达到者决定。
@@ -463,7 +467,7 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
       }
       for (const { description, inputContract, outputContract } of ranked.slice(
         offset,
-        offset + (request.limit ?? defaultSearchLimit),
+        offset + (detail ? Math.min(request.limit ?? 3, 3) : request.limit ?? defaultSearchLimit),
       )) {
         // 诊断按条目局部保存，前一个工具不可描述不会污染后一个工具的状态。
         const schemaUnavailable: Array<"input" | "output"> = []
@@ -488,9 +492,9 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
         items.push({
           ...description,
           path: toolExpression(description.path),
-          inputSchema: describeSchema(inputContract, "input"),
+          ...(detail ? { inputSchema: describeSchema(inputContract, "input") } : {}),
           // 未声明输出时省略字段；声明存在但发射失败时才返回 null，两种状态不能合并。
-          ...(outputContract === undefined ? {} : { outputSchema: describeSchema(outputContract, "output") }),
+          ...(!detail || outputContract === undefined ? {} : { outputSchema: describeSchema(outputContract, "output") }),
           ...(schemaUnavailable.length === 0 ? {} : { schemaUnavailable }),
         })
         // 完整条目跨过16K后结束本页，单项超长仍可读，下一页从后项继续。

@@ -5,7 +5,9 @@ import { inputTypeScript, jsonSchemaToTypeScript, outputTypeScript } from "../sr
 
 // 发现 fixture 统一经过公开执行入口，不直接调用内部索引或重写分页算法。
 const search = async (runtime: CodeMode.Runtime, request: { limit?: number; offset?: number } = {}) => {
-  const result = await Effect.runPromise(runtime.execute(`return search(${JSON.stringify(request)})`))
+  const result = await Effect.runPromise(
+    runtime.execute(`return search(${JSON.stringify({ detail: true, ...request })})`),
+  )
   // 公开入口失败必须使fixture失败，不能把诊断对象误当成空页继续验证分页。
   if (!result.ok) throw new Error(result.error.message)
   return result.value as {
@@ -399,7 +401,7 @@ test("search pages complete schema entries by count and serialized character bud
       expect(page.remaining).toBe(sample.descriptions.length - paths.length)
       expect(page.next).toEqual(page.remaining ? { offset: paths.length } : null)
       // 未碰数量上限却换页时，应已容纳越过16K的完整条目；低于阈值就停会让预算规则失效。
-      if (page.remaining && page.items.length < sample.limit)
+      if (page.remaining && page.items.length < Math.min(sample.limit, 3))
         expect(JSON.stringify(page).length).toBeGreaterThanOrEqual(16_384)
     }
     // 前三个样本分别锁定字符上限、数量上限和超长项的跨页进度，最后一个把输出schema纳入计量。
@@ -568,7 +570,9 @@ test("one unavailable schema side preserves neighboring tools and the other side
       ]),
     ),
   })
-  const full = await search(runtime)
+  const head = await search(runtime)
+  const tail = await search(runtime, { offset: 3 })
+  const full = { ...tail, items: [...head.items, ...tail.items] }
   expect(full.items.map((item) => item.path)).toEqual(["tools.tool0", "tools.tool1", "tools.tool2", "tools.tool3"])
   expect(full.items.map((item) => item.schemaUnavailable)).toEqual([
     undefined,

@@ -118,7 +118,9 @@ import {
 } from "../values.js"
 
 const parseProgram = (code: string): ProgramNode => {
-  const transpiled = transpileModule(`async function __codemode__() {\n${code}\n}`, {
+  // 保存真实包装长度，解析诊断才能区分用户源码与解释器添加的内容。
+  const prefix = "async function __codemode__() {\n"
+  const transpiled = transpileModule(`${prefix}${code}\n}`, {
     reportDiagnostics: true,
     compilerOptions: {
       target: ScriptTarget.ESNext,
@@ -128,8 +130,17 @@ const parseProgram = (code: string): ProgramNode => {
   const diagnostic = transpiled.diagnostics?.find((item) => item.category === DiagnosticCategory.Error)
 
   if (diagnostic) {
+    // 只映射用户源码中的诊断；包装器或EOF位置不能冒充精确的用户行号。
+    const location =
+      diagnostic.file &&
+      diagnostic.start !== undefined &&
+      diagnostic.start >= prefix.length &&
+      diagnostic.start < prefix.length + code.length
+        ? diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start)
+        : undefined
+    const position = location ? ` (source line ${location.line}, column ${location.character + 1})` : ""
     throw new InterpreterRuntimeError(
-      `Failed to parse TypeScript: ${flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+      `Failed to parse TypeScript${position}: ${flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
       undefined,
       "ParseError",
     )
@@ -659,6 +670,7 @@ type Execution<R> = {
   scope: Scope.Scope
   // 清单只供终态回执和释放 Fiber 引用使用；真正取消与等待仍由根 Scope 负责。
   promises: Array<SandboxPromise>
+  sleep: (milliseconds: number) => Effect.Effect<void>
   fetchResponse?: CodeModeFunction
 }
 
@@ -681,6 +693,7 @@ class Interpreter<R> {
     hasFetch: boolean,
     promises: Array<SandboxPromise>,
     environment = new Environment(),
+    sleep: (milliseconds: number) => Effect.Effect<void> = Effect.sleep,
   ) {
     // 闭包继续引用同一组根 Map；刷新内建名称，不能把上一轮的 fetch 可见性带过来。
     const roots = Environment.scopes(environment)
@@ -693,6 +706,7 @@ class Interpreter<R> {
       log,
       scope,
       promises,
+      sleep,
     }
     globalScope.set("tools", { mutable: false, value: new ToolReference([]) })
     // 全局search与既有内部入口共用当前目录，调用处分辨同步发现与异步操作。
@@ -836,8 +850,8 @@ class Interpreter<R> {
 
   // `await promise`: succeed with the fulfilled value or re-raise the failure so try/catch
   // observes it exactly like a synchronous throw at the await site.
-  private settlePromise(promise: SandboxPromise): Effect.Effect<unknown, unknown> {
-    return Effect.flatten(this.observePromise(promise))
+  private settlePromise(promise: unknown): Effect.Effect<unknown, unknown> {
+    return promise instanceof SandboxPromise ? Effect.flatten(this.observePromise(promise)) : Effect.succeed(promise)
   }
 
   private evaluateStatement(node: AstNode): Effect.Effect<StatementResult, unknown, R> {
@@ -1531,7 +1545,7 @@ class Interpreter<R> {
         return Effect.flatMap(this.evaluateExpression(getNode(node, "argument")), (value) =>
           Effect.andThen(
             Effect.yieldNow,
-            value instanceof SandboxPromise ? self.settlePromise(value) : Effect.succeed(value),
+            self.settlePromise(value),
           ),
         )
       }
@@ -2049,7 +2063,7 @@ class Interpreter<R> {
     if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 || ms > 2 ** 31 - 1)
       throw new InterpreterRuntimeError("sleep expects a finite number between 0 and 2147483647 milliseconds.", node)
     // 计时器没有工具预算、回执或许可；根退出依赖现有 Effect 中断释放计时器。
-    return this.createPromise(Effect.sleep(ms))
+    return this.createPromise(this.execution.sleep(ms))
   }
 
   // Object.* over a tool reference: `Object.keys(tools)` / `Object.keys(tools.ns)` enumerate
@@ -2249,9 +2263,7 @@ class Interpreter<R> {
         switch (name) {
           case "all": {
             // 同时观察才能及时暴露后项失败；结果仍按输入保序，取消观察不取消成员。
-            const settles = items.map((item) =>
-              item instanceof SandboxPromise ? this.settlePromise(item) : Effect.succeed(item),
-            )
+            const settles = items.map((item) => this.settlePromise(item))
             // 无界的是结果观察；实际宿主调用仍在唯一的八许可入口排队。
             return Effect.all(settles, { concurrency: "unbounded" })
           }
@@ -2294,42 +2306,40 @@ class Interpreter<R> {
   }
 
   private invokeFunction(fn: CodeModeFunction, args: Array<unknown>): Effect.Effect<unknown, unknown, R> {
-    // 仅复制作用域栈，闭包 Binding 保持同一引用；局部隔离不能变成闭包快照。
-    const self = new Interpreter(this.execution, [...fn.capturedScopes, new Map<string, Binding>()])
-    const run = Effect.gen(function* () {
-      // 所有参数先占位；默认值引用后面的同名参数时应触发 TDZ，不能误读外层变量。
-      const paramScope = self.currentScope()
-      for (const parameter of fn.parameters) {
-        for (const name of collectPatternNames(parameter)) {
-          paramScope.set(name, { mutable: true, value: undefined, initialized: false })
+    return Effect.suspend(() => {
+      // 仅复制作用域栈，闭包 Binding 保持同一引用；局部隔离不能变成闭包快照。
+      const self = new Interpreter(this.execution, [...fn.capturedScopes, new Map<string, Binding>()])
+      const run = Effect.gen(function* () {
+        // 所有参数先占位；默认值引用后面的同名参数时应触发 TDZ，不能误读外层变量。
+        const paramScope = self.currentScope()
+        for (const parameter of fn.parameters) {
+          for (const name of collectPatternNames(parameter)) {
+            paramScope.set(name, {
+              mutable: true,
+              value: undefined,
+              initialized: false,
+            })
+          }
         }
-      }
-      for (const [index, parameter] of fn.parameters.entries()) {
-        if (parameter.type === "RestElement") {
-          yield* self.declarePattern(getNode(parameter, "argument"), args.slice(index), true, parameter)
-          break
+        for (const [index, parameter] of fn.parameters.entries()) {
+          if (parameter.type === "RestElement") {
+            yield* self.declarePattern(getNode(parameter, "argument"), args.slice(index), true, parameter)
+            break
+          }
+          yield* self.declarePattern(parameter, args[index], true, parameter)
         }
-        yield* self.declarePattern(parameter, args[index], true, parameter)
-      }
 
-      if (fn.body.type === "BlockStatement") {
-        const result = yield* self.evaluateStatement(fn.body)
-        return result.kind === "return" || result.kind === "value" ? result.value : undefined
-      }
+        if (fn.body.type === "BlockStatement") {
+          const result = yield* self.evaluateStatement(fn.body)
+          return result.kind === "return" || result.kind === "value" ? result.value : undefined
+        }
 
-      return yield* self.evaluateExpression(fn.body)
+        return yield* self.evaluateExpression(fn.body)
+      })
+      // 参数默认值的求值也在生产者内，async 的默认值错误因此表现为拒绝而非同步抛出。
+      // async 返回另一个 Promise 时采用其终态；同步函数仍保留普通返回语义。
+      return fn.async ? this.createPromise(run.pipe(Effect.flatMap((value) => self.settlePromise(value)))) : run
     })
-    // 参数默认值的求值也在生产者内，async 的默认值错误因此表现为拒绝而非同步抛出。
-    // async 返回另一个 Promise 时采用其终态；同步函数仍保留普通返回语义。
-    return fn.async
-      ? this.createPromise(
-          run.pipe(
-            Effect.flatMap((value) =>
-              value instanceof SandboxPromise ? self.settlePromise(value) : Effect.succeed(value),
-            ),
-          ),
-        )
-      : run
   }
 
   private invokeIntrinsic(
@@ -2337,6 +2347,33 @@ class Interpreter<R> {
     args: Array<unknown>,
     node: AstNode,
   ): Effect.Effect<unknown, unknown, R> {
+    if (ref.receiver instanceof SandboxPromise) {
+      const self = this
+      const source = ref.receiver
+      let chained: SandboxPromise
+      return Effect.map(
+        this.createPromise(
+          Effect.gen(function* () {
+            // 回调排到当前语句之后；返回自身时可识别循环，不能一直等到执行超时。
+            yield* Effect.yieldNow
+            const exit = yield* self.observePromise(source)
+            if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
+            const handler =
+              ref.name === "catch" ? (Exit.isFailure(exit) ? args[0] : undefined) : args[Exit.isSuccess(exit) ? 0 : 1]
+            if (typeofValue(handler) !== "function") return yield* exit
+            const apply = self.applyCollectionCallback(handler, `Promise.${ref.name}`, node)
+            const value = yield* apply([
+              Exit.isSuccess(exit) ? exit.value : caughtErrorValue(Cause.squash(exit.cause)),
+            ])
+            if (value === chained)
+              throw new ProgramThrow(createErrorValue("TypeError", "Chaining cycle detected for promise."))
+            // 同步回调返回的 Promise 与 async 回调使用同一套采用终态规则。
+            return yield* self.settlePromise(value)
+          }),
+        ),
+        (promise) => (chained = promise),
+      )
+    }
     if (typeof ref.receiver === "string") {
       if (
         (ref.name === "replace" || ref.name === "replaceAll") &&
@@ -3138,11 +3175,10 @@ class Interpreter<R> {
         return new ComputedValue(undefined)
       }
 
-      // Any property access on a promise is a confused program (`p.then(...)`, `p.value`);
-      // reading `undefined` here would hide the missing await, so both paths get an explicit,
-      // await-hinting error instead of the forgiving unknown-property fallthrough.
+      // 链式方法绑定当前 Promise；其它属性仍提示先 await，避免误读工具结果。
       if (objectValue instanceof SandboxPromise) {
-        if (key === "then" || key === "catch" || key === "finally") {
+        if (key === "then" || key === "catch") return new IntrinsicReference(objectValue, key)
+        if (key === "finally") {
           throw new InterpreterRuntimeError(
             `Promise.prototype.${String(key)} is not supported in CodeMode; use await instead (with try/catch to handle failures) - e.g. \`const result = await tools.ns.tool(...)\`.`,
             propertyNode,
@@ -3475,9 +3511,9 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     // 作用域在成功、失败和中断时都先收尾，再把结果交给宿主继续执行。
     // 正常 return 也关闭仍在运行的生产者；已完成的宿主副作用保持原样。
     const value = yield* Effect.scopedWith((scope) =>
-      Interpreter.make(tools.invoke, tools.keys, log, scope, options.fetch !== undefined, promises, environment).run(
-        program,
-      ),
+      Interpreter.make(
+        tools.invoke, tools.keys, log, scope, options.fetch !== undefined, promises, environment, options.sleep,
+      ).run(program),
     ).pipe(
       Effect.ensuring(
         Effect.forEach(promises, (promise) =>
@@ -3518,17 +3554,20 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     const timeoutMs = limits.timeoutMs
     // 无显式期限的库调用仍走同一个根 Scope，只有外层时间竞争可以省略。
     if (timeoutMs === undefined) return program
-    return program.pipe(
-      Effect.timeoutOrElse({
-        duration: timeoutMs,
-        orElse: () =>
-          Effect.succeed({
+    return Effect.raceFirst(
+      program,
+      (options.waitForTimeout?.(timeoutMs) ?? Effect.sleep(timeoutMs)).pipe(Effect.as(null)),
+    ).pipe(
+      Effect.map(
+        (result) =>
+          result ??
+          ({
             ok: false,
             error: { kind: "TimeoutExceeded", message: `Execution timed out after ${timeoutMs}ms.` },
             ...logged(),
             toolCalls: tools.calls,
           } satisfies Result),
-      }),
+      ),
     )
   })
 

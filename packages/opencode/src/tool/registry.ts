@@ -283,7 +283,8 @@ const layer = Layer.effect(
 
     const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
       const s = yield* InstanceState.get(state)
-      return [...s.builtin, ...s.custom] as Tool.Def[]
+      // 在共同列表出口关闭 Execute，工具选择器、HTTP 和调试入口保持一致。
+      return ([...s.builtin, ...s.custom] as Tool.Def[]).filter((tool) => tool.id !== "execute" || flags.execute)
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {

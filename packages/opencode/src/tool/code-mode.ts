@@ -1,11 +1,60 @@
 import { Tool } from "./tool"
 import { Truncate } from "./truncate"
-import { Cause, Effect, Schema } from "effect"
+import { Cause, Clock, Deferred, Effect, Schema } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { isRecord } from "@/util/record"
 import type { PermissionPrecheck } from "@/permission/precheck"
 import { MAX_RESPONSE_SIZE } from "./webfetch"
 import { ExecuteEnvironments } from "./execute-environments"
+
+// 单个预算只属于一次执行；并发人工等待合并成一段暂停时间。
+export const makeExecutionBudget = Effect.gen(function* () {
+  const clock = yield* Clock.Clock
+  let waiting = 0
+  let remaining = 0
+  let started = clock.currentTimeMillisUnsafe()
+  let changed = Deferred.makeUnsafe<void>()
+  // 每次唤醒后换一个Deferred，让恢复和下一次暂停不会读到旧信号。
+  const signal = () => {
+    Deferred.doneUnsafe(changed, Effect.void)
+    changed = Deferred.makeUnsafe<void>()
+  }
+  const wait = (milliseconds: number): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      // 在真实执行的竞争启动时才计时，创建预算及前置审查不消耗它。
+      remaining = milliseconds
+      started = clock.currentTimeMillisUnsafe()
+      const tick: Effect.Effect<void> = Effect.suspend(() => {
+        if (waiting) return Deferred.await(changed).pipe(Effect.andThen(tick))
+        const duration = Math.max(0, remaining - (clock.currentTimeMillisUnsafe() - started))
+        return Effect.raceFirst(
+          Effect.sleep(duration).pipe(Effect.as(true)),
+          Deferred.await(changed).pipe(Effect.as(false)),
+        ).pipe(Effect.flatMap((expired) => (expired ? Effect.void : tick)))
+      })
+      return tick
+    })
+  const pause = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        // 重叠等待只在第一个入口扣除已用时间，避免双重暂停。
+        if (waiting++ === 0) {
+          remaining -= clock.currentTimeMillisUnsafe() - started
+          signal()
+        }
+      }),
+      () => effect,
+      () =>
+        Effect.sync(() => {
+          // 最后一个等待离开才续跑；拒绝和取消也通过release归还计数。
+          if (--waiting === 0) {
+            started = clock.currentTimeMillisUnsafe()
+            signal()
+          }
+        }),
+    )
+  return { wait, pause }
+})
 
 export const CODE_MODE_TOOL = "execute"
 
@@ -14,9 +63,9 @@ export const Parameters = Schema.Struct({
   environmentID: Schema.optionalKey(Schema.String).annotate({
     description: "Environment ID from a prior execute result; omit to create a fresh environment.",
   }),
-  // 与 Shell 一样由宿主选择毫秒预算；只接受库支持的正安全整数，不引入任意上限。
+  // 期限与库内 Effect 计时器的32位毫秒范围一致，避免超大值失去超时约束。
   timeout: Schema.optionalKey(
-    Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+    Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(2_147_483_647)),
   ).annotate({
     description: "Maximum execution time in milliseconds (default: 600000).",
   }),
@@ -51,6 +100,7 @@ export type CatalogEntry = {
 
 export interface CodeModeHost {
   catalog: readonly CatalogEntry[]
+  waitForTimeout?: (milliseconds: number) => Effect.Effect<void>
   signal: AbortSignal
   begin(code: string, calls: readonly PermissionPrecheck.ExecuteCall[]): Effect.Effect<void>
   invoke(id: string, input: unknown): Effect.Effect<Tool.ExecuteResult, unknown>
@@ -206,9 +256,10 @@ export const CodeModeTool = Tool.define(
                 tools,
                 environment: lease.environment,
                 discovery: discovery(host.catalog),
-                // 十分钟只约束真实执行（含工具/权限等待）；预跑和整段审查保留原有独立边界。
+                // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
                 limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
                 fetch: host.fetch,
+                waitForTimeout: host.waitForTimeout,
                 onToolCallStart: ({ index, name, input }) =>
                   Effect.suspend(() => {
                     const shown = (() => {
@@ -256,6 +307,8 @@ export const CodeModeTool = Tool.define(
                   tools: probe,
                   environment: lease.environment,
                   snapshotEnvironment: true,
+                  // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
+                  sleep: () => Effect.void,
                   limits: { timeoutMs: 2000, maxLogBytes: outputLimits.maxBytes },
                   // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
                   fetch: host.fetch

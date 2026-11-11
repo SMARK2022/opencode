@@ -14,6 +14,9 @@ const enabledByExperimental = (name: string) =>
   )
 
 export class Service extends ConfigService.Service<Service>()("@opencode/RuntimeFlags", {
+  // 两个显示开关默认保留双入口，工具权限仍由原审批规则决定。
+  execute: Config.boolean("OPENCODE_EXECUTE").pipe(Config.withDefault(true)),
+  executeKeepTools: Config.boolean("OPENCODE_EXECUTE_KEEP_TOOLS").pipe(Config.withDefault(true)),
   autoShare: bool("OPENCODE_AUTO_SHARE"),
   pure: bool("OPENCODE_PURE"),
   disableDefaultPlugins: bool("OPENCODE_DISABLE_DEFAULT_PLUGINS"),

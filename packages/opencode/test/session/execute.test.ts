@@ -1,7 +1,7 @@
 import { expect, spyOn } from "bun:test"
 // 从库的已发布描述取示例，避免宿主测试维护另一份提示词。
 import { CodeMode } from "@opencode-ai/codemode"
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
+import { ConfigProvider, Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
 import path from "node:path"
 import { mkdir } from "node:fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -365,7 +365,7 @@ it.instance("execute catalog reaches final system and OAuth instructions with up
         expect(prepared.tools.execute.description).toContain("Promise.allSettled")
         // 工具说明承载发现示例，动态目录承载本轮精确签名；两种 provider 出口均须保留各自职责。
         expect(system).toContain(
-          "Call these tools as JavaScript inside `execute`; call tools outside this catalog directly.",
+          "Use these paths inside `execute`. Other tools shown in the conversation can be called directly.",
         )
         expect(system).toContain("The catalog is complete.")
         expect(system).toContain("tools.$opencode.read(input: { filePath: string;")
@@ -1643,7 +1643,7 @@ it.instance("execute timeout settles real children and preserves completed mutat
     // 真实计时覆盖 SessionTools 的子调用与父错误投影；虚拟时钟用例另行验证精确十分钟默认值。
     const instance = yield* TestInstance
     const fixture = yield* resolveTools()
-    const question = yield* Question.Service
+    const command = process.platform === "win32" ? "Write-Output TIMEOUT_READY; Start-Sleep -Seconds 30" : "echo TIMEOUT_READY; sleep 30"
     const first = "*** Begin Patch\n*** Add File: before-timeout.txt\n+completed\n*** End Patch"
     const later = "*** Begin Patch\n*** Add File: after-timeout.txt\n+unreachable\n*** End Patch"
     const pending = yield* fixture.processor
@@ -1654,7 +1654,7 @@ it.instance("execute timeout settles real children and preserves completed mutat
         agent: fixture.agent,
         system: [
           `await tools.$opencode.apply_patch({patchText:${JSON.stringify(first)}});
-      await tools.$opencode.question({questions:[{question:"Timeout gate",header:"Test",options:[]}]});
+      await tools.$opencode.bash({command:${JSON.stringify(command)}});
       await tools.$opencode.apply_patch({patchText:${JSON.stringify(later)}});`,
           "1000",
         ],
@@ -1662,11 +1662,11 @@ it.instance("execute timeout settles real children and preserves completed mutat
         tools: fixture.tools,
       })
       .pipe(Effect.forkScoped)
-    // 已公开问题才等待超时，证明预算终止的是实际工具等待，而非初始化或预跑。
-    yield* pollWithTimeout(
-      question.list().pipe(Effect.map((items) => items.find((item) => item.questions[0]?.question === "Timeout gate"))),
-      "timeout child never started",
-    )
+    // 实际普通工具已启动后才等超时；人工问题改由暂停预算用例验证。
+    yield* pollWithTimeout(fixture.sessions.messages({ sessionID: fixture.session.id }).pipe(Effect.map((messages) =>
+      messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "bash" &&
+        part.state.status === "running" && String(part.state.metadata?.output).includes("TIMEOUT_READY")) || undefined)),
+      "timeout child never started")
     yield* awaitWithTimeout(Fiber.join(pending), "execute timeout did not settle its parent")
     const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
     const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
@@ -1677,9 +1677,10 @@ it.instance("execute timeout settles real children and preserves completed mutat
     expect(parent.state.error).toContain("timed out")
     // 父超时不是事务回滚；已完成的写入和 child 记录必须仍能被模型及审计消费者看见。
     expect(parts.filter((part) => part.tool === "apply_patch")).toMatchObject([{ state: { status: "completed" } }])
-    expect(parts.find((part) => part.tool === "question")?.state.status).toBe("error")
+    const shellChild = parts.find((part) => part.tool === "bash")
+    expect(["completed", "error"]).toContain(shellChild?.state.status)
+    if (shellChild && "metadata" in shellChild.state) expect(shellChild.state.metadata?.output).toContain("TIMEOUT_READY")
     expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
-    expect(yield* question.list()).toEqual([])
     expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "before-timeout.txt")).text())).toBe(
       "completed\n",
     )
@@ -2000,3 +2001,161 @@ for (const scenario of ["mixed", "bounded", "truncated", "inexact"] as const)
       if (scenario === "mixed") expect(result.files[0].lines).toBe(250)
     }),
   )
+
+
+for (const kind of ["question", "permission"] as const)
+  for (const ending of ["answer", "reject", "abort"] as const)
+    it.instance(`execution budget pauses ${kind} until ${ending}`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* resolveTools()
+        const instance = yield* TestInstance
+        const question = yield* Question.Service
+        const permission = yield* Permission.Service
+        if (kind === "permission") {
+          yield* Effect.promise(() => Bun.write(path.join(instance.directory, "pause.txt"), "paused"))
+          yield* fixture.sessions.setPermission({
+            sessionID: fixture.session.id,
+            permission: [{ permission: "read", pattern: "*", action: "ask" }],
+          })
+        }
+        const execute = fixture.tools.execute?.execute
+        if (!execute) throw new Error("execute missing")
+        const controller = new AbortController()
+        const code =
+          kind === "question"
+            ? 'await tools.$opencode.question({questions:[{question:"Budget pause",header:"Test",options:[]}]}); return "resumed";'
+            : 'const files = await tools.$opencode.glob({pattern:"pause.txt"}); await tools.$opencode.read({filePath:files.files[0].path}); return "resumed";'
+        const pending = yield* Effect.tryPromise({
+          try: () =>
+            Promise.resolve(
+              execute(
+                { code, timeout: 1000 },
+                { toolCallId: "pause-host", abortSignal: controller.signal, messages: [] },
+              ),
+            ),
+          catch: (error) => error,
+        }).pipe(Effect.exit, Effect.forkScoped)
+        const respond = yield* kind === "question"
+          ? pollWithTimeout(question.list().pipe(Effect.map((items) => items[0])), "question never appeared").pipe(
+              Effect.map((request) =>
+                ending === "answer"
+                  ? question.reply({ requestID: request.id, answers: [["continue"]] })
+                  : question.reject(request.id),
+              ),
+            )
+          : pollWithTimeout(permission.list().pipe(Effect.map((items) => items[0])), "permission never appeared").pipe(
+              Effect.map((request) => {
+                expect(request.permission).toBe("read")
+                expect(request.tool?.callID).toBe("pause-host/2")
+                return permission.reply({ requestID: request.id, reply: ending === "answer" ? "once" : "reject" })
+              }),
+            )
+        if (kind === "permission") {
+          const before = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap(
+            (message) => message.parts,
+          )
+          expect(
+            before.some((part) => part.type === "tool" && part.tool === "glob" && part.state.status === "completed"),
+          ).toBe(true)
+        }
+        // 超出全部显式预算仍保持真实待答，再决定回答、拒绝或取消。
+        yield* Effect.sleep(1200)
+        expect(pending.pollUnsafe()).toBeUndefined()
+        if (ending === "abort") controller.abort()
+        else yield* respond
+        const result = yield* awaitWithTimeout(Fiber.join(pending), "human wait did not finish")
+        expect(Exit.isSuccess(result)).toBe(ending === "answer")
+        if (Exit.isSuccess(result)) expect(scriptResult(result.value).output).toBe("resumed")
+        expect(yield* question.list()).toEqual([])
+        expect(yield* permission.list()).toEqual([])
+        const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id }))
+          .flatMap((message) => message.parts)
+          .filter((part) => part.type === "tool")
+        expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
+      }),
+    )
+
+// 显示组合由配置决定，不能靠权限拒绝后自动恢复另一种工具面。
+for (const flags of [
+  {},
+  { execute: false },
+  { execute: false, executeKeepTools: false },
+  { executeKeepTools: false },
+]) {
+  testEffect(layer(flags)).instance("execute display switches " + JSON.stringify(flags), () =>
+    Effect.gen(function* () {
+      const fixture = yield* resolveTools()
+      const registry = yield* ToolRegistry.Service
+      const enabled = flags.execute !== false
+      const retained = !enabled || flags.executeKeepTools !== false
+      expect(Boolean(fixture.tools.execute)).toBe(enabled)
+      expect(Boolean(fixture.tools.read)).toBe(retained)
+      expect((yield* registry.ids()).includes("execute")).toBe(enabled)
+      expect(fixture.instructions.length > 0).toBe(enabled)
+      if (!enabled) return
+      // Execute-only 必须真实调用目录里的 read，不能只验证隐藏后的名称列表。
+      const instance = yield* TestInstance
+      yield* Effect.promise(() => Bun.write(path.join(instance.directory, "mode.txt"), "mode succeeds"))
+      yield* fixture.processor.process({
+        user: fixture.user,
+        sessionID: fixture.session.id,
+        model: provider.model,
+        agent: fixture.agent,
+        system: ['return tools.$opencode.read("mode.txt").then(page => page.content)'],
+        messages: [],
+        tools: fixture.tools,
+      })
+      const parent = (yield* fixture.sessions.messages({ sessionID: fixture.session.id }))
+        .flatMap((m) => m.parts)
+        .find((p) => p.type === "tool" && p.tool === "execute")
+      expect(parent?.type === "tool" && parent.state.status).toBe("completed")
+      if (parent?.type === "tool" && parent.state.status === "completed")
+        expect(parent.state.output).toContain("mode succeeds")
+      // 会话权限禁用 Execute 后，用户选择的原工具显示模式保持不变。
+      yield* fixture.sessions.setPermission({
+        sessionID: fixture.session.id,
+        permission: [{ permission: "execute", pattern: "*", action: "deny" }],
+      })
+      const denied = yield* resolveTools(provider.model, undefined, undefined, fixture.session.id)
+      expect(denied.tools.execute).toBeUndefined()
+      expect(Boolean(denied.tools.read)).toBe(retained)
+      // 禁用 read 同时从目录移除它，脚本猜到路径也不能绕过真实权限。
+      const noRead = yield* resolveTools(provider.model, { read: false })
+      expect(noRead.instructions.join("\n")).not.toContain("tools.$opencode.read(")
+      yield* noRead.sessions.setPermission({
+        sessionID: noRead.session.id,
+        permission: [{ permission: "read", pattern: "*", action: "deny" }],
+      })
+      yield* noRead.processor.process({
+        user: noRead.user,
+        sessionID: noRead.session.id,
+        model: provider.model,
+        agent: noRead.agent,
+        system: ['return (await tools.$opencode.read("mode.txt")).content'],
+        messages: [],
+        tools: noRead.tools,
+      })
+      const refused = (yield* noRead.sessions.messages({ sessionID: noRead.session.id }))
+        .flatMap((m) => m.parts)
+        .find((p) => p.type === "tool" && p.tool === "execute")
+      expect(refused?.type === "tool" && refused.state.status).toBe("error")
+    }),
+  )
+}
+
+// 使用真实 ConfigProvider 解码字符串开关，避免测试替身绕过配置默认值。
+it.effect("execute environment switches default on and decode explicit false", () =>
+  Effect.gen(function* () {
+    for (const input of [{}, { OPENCODE_EXECUTE: "false", OPENCODE_EXECUTE_KEEP_TOOLS: "false" }]) {
+      const flags = yield* Effect.gen(function* () {
+        return yield* RuntimeFlags.Service
+      }).pipe(
+        Effect.provide(
+          RuntimeFlags.Service.layer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(input)))),
+        ),
+      )
+      expect(flags.execute).toBe(!("OPENCODE_EXECUTE" in input))
+      expect(flags.executeKeepTools).toBe(!("OPENCODE_EXECUTE_KEEP_TOOLS" in input))
+    }
+  }),
+)

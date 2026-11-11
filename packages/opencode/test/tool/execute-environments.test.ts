@@ -126,16 +126,17 @@ unit.effect("self-published retirement cannot return success or deadlock the pub
   }),
 )
 
-unit.effect("pressure eviction follows the latest return to idle, without an owner quota", () =>
+unit.effect("owner capacity keeps the latest eight unique calls", () =>
   Effect.gen(function* () {
     const registry = ExecuteEnvironments.makeRegistry()
     const create = () => registry.use(owner, undefined, (lease) => Effect.succeed(lease.id))
     const ids: string[] = []
-    // 一个 owner 可以使用全部目录容量；旧第九项策略不再隐式销毁它的第一个环境。
-    for (let i = 0; i < 64; i++) ids.push(yield* create())
-    expect(yield* registry.use(owner, ids[0], () => Effect.succeed("touched"))).toBe("touched")
+    // 每个 owner 独立保留八个唯一环境，重复复用只刷新调用顺序。
+    for (let i = 0; i < 8; i++) ids.push(yield* create())
+    for (let i = 0; i < 20; i++)
+      expect(yield* registry.use(owner, ids[0], () => Effect.succeed("touched"))).toBe("touched")
     const newest = yield* create()
-    // 使用第一个后移到闲置队尾；新增只淘汰未被触碰的第二个，不按创建时间排序。
+    // 调用第一个后刷新顺序；新增只淘汰未被触碰的第二个。
     yield* expectFailure(registry.use(owner, ids[1], () => Effect.succeed("wrong")))
     expect(yield* registry.use(owner, ids[0], () => Effect.succeed("retained"))).toBe("retained")
     // 淘汰旧项后新项必须可用；只断言旧 ID 失败会放过“容量满后全部拒绝”的实现。
@@ -144,34 +145,48 @@ unit.effect("pressure eviction follows the latest return to idle, without an own
   }),
 )
 
-unit.effect("capacity cannot evict active leases or execute the rejected callback", () =>
+unit.effect("new environments wait for the oldest drain and cancelled waiters leave no lease", () =>
   Effect.gen(function* () {
     const registry = ExecuteEnvironments.makeRegistry()
-    const ready = yield* Deferred.make<void>()
-    let entered = 0
-    // 六十四个活动租约占满目录；新建不能靠淘汰运行中的环境而成功。
-    for (let i = 0; i < 64; i++)
-      yield* registry
-        .use(owner, undefined, () =>
-          Effect.gen(function* () {
-            entered++
-            if (entered === 64) yield* Deferred.succeed(ready, undefined)
-            return yield* Effect.never
-          }),
-        )
-        .pipe(Effect.forkScoped({ startImmediately: true }))
-    // 等全部六十四个 callback 已进入后才申请第六十五项，保证测试确实面对活动容量满额。
-    yield* Deferred.await(ready)
-    let extra = false
-    yield* expectFailure(
-      registry.use(owner, undefined, () =>
-        Effect.sync(() => {
-          extra = true
+    const entered = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    let oldest = ""
+    const holder = yield* registry
+      .use(owner, undefined, (lease) =>
+        Effect.gen(function* () {
+          oldest = lease.id
+          yield* Deferred.succeed(entered, undefined)
+          yield* Deferred.await(release)
         }),
-      ),
-    )
-    // 容量错误若发生在callback之后仍会破坏状态，独立标志确保拒绝发生在准入前。
-    expect(extra).toBe(false)
+      )
+      .pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.await(entered)
+    const ids: string[] = []
+    for (let i = 0; i < 7; i++) ids.push(yield* registry.use(owner, undefined, (lease) => Effect.succeed(lease.id)))
+    let admitted = 0
+    const create = () =>
+      registry.use(owner, undefined, (lease) =>
+        Effect.sync(() => {
+          admitted++
+          return lease.id
+        }),
+      )
+    const first = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
+    const second = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
+    const cancelled = yield* create().pipe(Effect.forkScoped({ startImmediately: true }))
+    expect(admitted).toBe(0)
+    yield* Fiber.interrupt(cancelled)
+    // 等待期间复用最旧环境；drain 完成后必须按最新顺序重选，不能误删已刷新状态。
+    const reuse = yield* registry
+      .use(owner, oldest, () => Effect.void)
+      .pipe(Effect.forkScoped({ startImmediately: true }))
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(holder)
+    yield* Fiber.join(reuse)
+    const added = yield* Effect.all([Fiber.join(first), Fiber.join(second)])
+    expect(admitted).toBe(2)
+    for (const id of ids.slice(0, 2)) yield* expectFailure(registry.use(owner, id, () => Effect.void))
+    for (const id of [...ids.slice(2), oldest, ...added]) yield* registry.use(owner, id, () => Effect.void)
     yield* registry.close()
   }),
 )
@@ -290,7 +305,7 @@ integration.instance("legacy workspace updates retire state but title updates pr
   }),
 )
 
-unit.effect("directory capacity and live ID collisions never replace a live identity", () =>
+unit.effect("owner quotas and live ID collisions never replace another live identity", () =>
   Effect.gen(function* () {
     // 两次连续分配同名ID后再给新ID，只测真实碰撞重试，不依赖随机生成器碰巧重复。
     const issued = ["env_first", "env_first", "env_second"]
@@ -306,8 +321,10 @@ unit.effect("directory capacity and live ID collisions never replace a live iden
     const ids: string[] = []
     for (let i = 0; i < 65; i++)
       ids.push(yield* registry.use({ ...owner, sessionID: `ses_${i}` }, undefined, (lease) => Effect.succeed(lease.id)))
-    // 目录容量跨 owner 共用；第六十五项淘汰最早回到闲置的环境。
-    yield* expectFailure(registry.use({ ...owner, sessionID: "ses_0" }, ids[0], () => Effect.succeed("wrong")))
+    // 超过旧全局容量仍保留每个 owner 的状态，容量只按各自八项计算。
+    expect(yield* registry.use({ ...owner, sessionID: "ses_0" }, ids[0], () => Effect.succeed("retained"))).toBe(
+      "retained",
+    )
     expect(yield* registry.use({ ...owner, sessionID: "ses_64" }, ids[64], () => Effect.succeed("newest"))).toBe(
       "newest",
     )
@@ -376,12 +393,12 @@ integration.instance("forked Sessions cannot resume the parent's environment", (
   }),
 )
 
-unit.effect("queued leases stay protected and the last canceled lease refreshes idle order", () =>
+unit.effect("queued leases stay protected and cancellation does not refresh call order", () =>
   Effect.gen(function* () {
     const registry = ExecuteEnvironments.makeRegistry()
     const create = () => registry.use(owner, undefined, (lease) => Effect.succeed(lease.id))
     const ids: string[] = []
-    for (let i = 0; i < 64; i++) ids.push(yield* create())
+    for (let i = 0; i < 8; i++) ids.push(yield* create())
     const entered = yield* Deferred.make<void>()
     const release = yield* Deferred.make<void>()
     const waiterEntered = yield* Deferred.make<void>()
@@ -392,19 +409,19 @@ unit.effect("queued leases stay protected and the last canceled lease refreshes 
     const waiter = yield* registry
       .use(owner, ids[0], () => Deferred.succeed(waiterEntered, undefined).pipe(Effect.andThen(Effect.never)))
       .pipe(Effect.forkScoped({ startImmediately: true }))
-    // 最老环境同时持有运行与排队租约；压力淘汰必须跳过它，不能靠回收活动状态腾位。
+    // 两次复用已经把该环境刷新为最近调用；新增淘汰更早调用的第二项。
     yield* create()
     yield* expectFailure(registry.use(owner, ids[1], () => Effect.succeed("wrong")))
     yield* Deferred.succeed(release, undefined)
     yield* Fiber.join(holder)
     // 确认排队者已经成为实际使用者，再取消它；否则只能验证取消等待队列，不能覆盖最后租约退出。
     yield* Deferred.await(waiterEntered)
-    // 曾排队的租约成为最后一个使用者后取消；其退出让环境重新闲置并移动到队尾。
+    // 后续调用另一环境，再取消最后租约；完成和取消都不能刷新最近调用顺序。
+    yield* registry.use(owner, ids[3], () => Effect.void)
     yield* Fiber.interrupt(waiter)
-    yield* create()
-    // 第二次压力应继续淘汰旧闲置项；刚取消的最后租约要排到队尾，而不是回到原创建位置。
-    yield* expectFailure(registry.use(owner, ids[2], () => Effect.succeed("wrong")))
-    expect(yield* registry.use(owner, ids[0], () => Effect.succeed("retained"))).toBe("retained")
+    for (let i = 0; i < 6; i++) yield* create()
+    yield* expectFailure(registry.use(owner, ids[0], () => Effect.succeed("wrong")))
+    expect(yield* registry.use(owner, ids[3], () => Effect.succeed("retained"))).toBe("retained")
     yield* registry.close()
   }),
 )
