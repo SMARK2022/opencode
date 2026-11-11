@@ -159,7 +159,8 @@ describe("AppProcess", () => {
           (directory) => {
             const ready = path.join(directory, "ready")
             const settled = path.join(directory, "settled")
-            const script = `const fs=require('fs');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(settled)},'settled');process.exit(0)});setInterval(()=>{},60000)`
+            // ready 表示清理处理器已安装，不能先公布 PID 再开始接收终止信号。
+            const script = `const fs=require('fs');process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(settled)},'settled');process.exit(0)});fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},60000)`
             return Effect.gen(function* () {
               const svc = yield* AppProcess.Service
               const exit = yield* Effect.exit(svc.run(cmd("-e", script), { timeout: "250 millis" }))
@@ -180,7 +181,8 @@ describe("AppProcess", () => {
           (directory) => {
             const ready = path.join(directory, "ready")
             const settled = path.join(directory, "settled")
-            const script = `const fs=require('fs');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(settled)},'settled');process.exit(0)});setInterval(()=>{},60000)`
+            // 父进程一见 ready 就会中断；先注册处理器才能保证 settled 的真实清理证据。
+            const script = `const fs=require('fs');process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(settled)},'settled');process.exit(0)});fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},60000)`
             return Effect.gen(function* () {
               const svc = yield* AppProcess.Service
               const fiber = yield* svc.run(cmd("-e", script)).pipe(Effect.forkChild)

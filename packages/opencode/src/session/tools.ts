@@ -28,7 +28,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
-import { describeCatalog, fetchHTTP, type CatalogEntry } from "@/tool/code-mode"
+import { describeCatalog, fetchHTTP, makeExecutionBudget, type CatalogEntry } from "@/tool/code-mode" // 人工等待只暂停父执行预算。
 
 type ToolTimingInput = {
   source: "local" | "mcp"
@@ -108,7 +108,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const run = yield* EffectBridge.make()
   const plugin = yield* Plugin.Service
   const permission = yield* Permission.Service
+  // 注册表拥有配置读取，两处工具面使用同一模式，不从权限结果反推。
   const registry = yield* ToolRegistry.Service
+  const mode = yield* registry.codemode()
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const sessions = yield* Session.Service
@@ -116,6 +118,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   type Execution = {
     // child 继承本次批准与已完成上下文，身份始终由宿主分配而非脚本传参。
+    // 原生Promise桥不继承Fiber上下文，暂停能力随当前Execution传递。
+    pause: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
     parentCallID: string
     review: Permission.ExecuteReview
     messages: SessionV1.WithParts[]
@@ -172,7 +176,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         })
         // #216：权限询问与 abort 信号竞速——cancel 时不再阻塞在 permission.ask 而是立即失败
         .pipe(Effect.raceFirst(waitForAbort(options.abortSignal)))
-    }).pipe(Effect.orDie),
+    // 仅嵌套Execute审批暂停脚本预算，直接工具继续原调用方式。
+    }).pipe((effect) => execution ? execution.pause(effect) : effect, Effect.orDie),
   })
 
   const inventory: Record<string, Tool.Def> = Object.fromEntries((yield* registry.tools({
@@ -197,6 +202,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             let parent: SessionV1.ToolPart | undefined
             return yield* Effect.gen(function* () {
             if (item.id === "execute") {
+              // 每次执行独占预算，初始审批结束后才由解释器启动扣时。
+              const budget = yield* makeExecutionBudget
               const controller = new AbortController()
               // 用户取消与权限终止共享 signal，后续 leaf 和已运行任务观察同一结束原因。
               const signal = AbortSignal.any(options.abortSignal ? [options.abortSignal, controller.signal] : [controller.signal])
@@ -204,6 +211,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               let sequence = 0
               ctx.codeMode = {
                 catalog, signal,
+                // 只有真实执行消费这个期限，预跑继续使用自己的短预算。
+                waitForTimeout: budget.wait,
                 fetch: (url, init) => Effect.gen(function* () {
                   if (signal.aborted) return yield* Effect.interrupt
                   const approved = review
@@ -212,6 +221,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   // 复用真实子调用的权限上下文，HTTP也服从整段批准、升阶及终止。
                   return yield* fetchHTTP(url, init, context({}, { ...options, abortSignal: signal }, {
                     parentCallID: options.toolCallId, review: approved, settled, messages: input.messages,
+                    pause: budget.pause,
                   }))
                 }),
                 begin: (code, calls) => Effect.gen(function* () {
@@ -253,6 +263,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                     })
                   const child: Execution = {
                     parentCallID: options.toolCallId, review: approved, settled,
+                    // 真实 child 的独立 Promise 仍暂停父 Execute 的同一剩余预算。
+                    pause: budget.pause,
                     messages: [...input.messages, { info: input.processor.message, parts: completed }],
                   }
                   return yield* input.processor.runChild({ parentCallID: options.toolCallId, callID, tool: id, input: args },
@@ -261,8 +273,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                       const cancel = new AbortController()
                       const pending = invoke(leaf, args, { ...options, toolCallId: callID, abortSignal: AbortSignal.any([signal, cancel.signal]) }, child)
                       return Effect.tryPromise({ try: () => pending, catch: (error) => error }).pipe(
-                        // race 取消只针对败方；先通知该次宿主执行，再等待原清理，父 scope 继续可用。
+                        // 根作用域或宿主中断时先通知该次 child，再等待原清理；race 选出赢家本身不取消败方。
                         Effect.onInterrupt(() => Effect.sync(() => cancel.abort())),
+                        // abort 只发通知；等原 Promise 结束后，同环境下一格才能接管真实资源。
                         Effect.ensuring(Effect.promise(() => pending.then(() => undefined, () => undefined))),
                       )
                     }),
@@ -303,7 +316,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               // hook 后的真实参数留给原 decoder/body；权限事实由工具自身的 ctx.ask 产生。
               yield* input.processor.updateToolCall(options.toolCallId, (part) => ({ ...part, state: { ...part.state, input: args } }))
             }
-            const result = yield* timedToolExecution(timing, item.execute(args, ctx))
+            // question 不经过 ctx.ask；只暂停它的人工等待，普通工具仍消耗执行预算。
+            const result = yield* timedToolExecution(
+              timing,
+              execution && item.id === "question" ? execution.pause(item.execute(args, ctx)) : item.execute(args, ctx),
+            )
             const output = {
               ...result,
               attachments: result.attachments?.map((attachment) => ({
@@ -327,11 +344,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
               if (notice) output.output += "\n\n" + notice
             }
-            if (item.id === "execute" && output.metadata.truncated === true) {
-              // 部分可见正文不能证明整份规则已交付，下一轮允许按原加载机制补齐。
-              output.metadata.loaded = []
-              output.metadata.skills = []
-            }
+            // 交付声明留到完整终态裁剪后再清理，此处尚有后续正文装饰。
             return output
             }).pipe(Effect.onExit((exit) => Effect.gen(function* () {
               if (item.id !== "execute" || Exit.isSuccess(exit) || !parent) return
@@ -343,11 +356,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               const text = [typeof metadata.output === "string" ? metadata.output : "",
                 `Partial execution:\n${JSON.stringify([...evidence(settled), ...requests])}`].filter(Boolean).join("\n\n")
               // 包住 hooks 和结果投影：这些步骤失败时，已完成副作用同样需要可恢复回执。
-              const partial = yield* truncate.output(text, {}, input.agent)
-              yield* ctx.metadata({ metadata: { ...metadata, error: true, output: partial.content,
-                loaded: [], skills: [], truncated: partial.truncated,
-                ...(partial.truncated && { outputPath: partial.outputPath }),
-              } })
+              yield* ctx.metadata({ metadata: { ...metadata, error: true, output: text, loaded: [], skills: [] } })
             })))
           }),
           // Bash自己等待kill/drain并保留partial，不能被runtime抢先中断。
@@ -601,7 +610,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             output: truncated.content,
             attachments,
             content: result.content,
-            program: McpCatalog.programResult(result),
+            // 原声明直接约束候选资格，不能以格式转换规避 SDK 的 structuredContent 要求。
+            program: McpCatalog.programResult(result, entry.def.outputSchema),
           }
         }).pipe(Effect.orDie),
     }
@@ -621,10 +631,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         : "$opencode"
       const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id
       // 文字工具已有 output:string 合同；远端声明保持原状，原生结构化结果复用原 codec。
-      return { id: item.id, path: [server, local], description: item.description,
-        inputSchema: ToolJsonSchema.fromTool(item), outputSchema: entry ? McpCatalog.schemas(entry.def).output : item.output ?? Schema.String }
+      return {
+        id: item.id,
+        path: [server, local],
+        description: item.description,
+        // 只转交真实包装器保留的原 schema；MCP/自定义工具不会从展示字段获得新输入权限。
+        runtimeParameters: item.runtimeParameters,
+        inputSchema: ToolJsonSchema.fromTool(item),
+        outputSchema: entry ? McpCatalog.schemas(entry.def).output : (item.output ?? Schema.String),
+      }
     }))
   for (const item of Object.values(eligible)) {
+    // 目录先保留完整内部能力；这里只隐藏可嵌套工具的直接入口，不影响控制工具。
+    if (mode.enabled && !mode.keepTools && catalog.some((entry) => entry.id === item.id)) continue
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     // Provider 只负责参数呈现；直接与嵌套入口都继续复用工具原来的运行时校验。
     tools[item.id] = tool({
@@ -635,7 +654,18 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   }
 
   // 上游将稳定说明放工具定义，动态目录放当轮指令；V1保持原provider-turn边界。
-  return { tools, instructions: eligible.execute ? [yield* describeCatalog(catalog)] : [] }
+  return {
+    tools,
+    instructions: eligible.execute && catalog.length > 0
+      ? [
+          // 直接入口是否存在由本轮模式决定，不能向 Execute-only 推荐隐藏的工具。
+          mode.keepTools
+            ? "Prefer execute when you can chain dependent tool calls, or batch queries and filter or summarize their outputs in code before returning them. Use a direct tool for a simple standalone action."
+            : "Use execute for the tools in its catalog, including simple standalone actions. Chain dependent calls, or batch queries and filter or summarize their outputs in code before returning them.",
+          yield* describeCatalog(catalog, mode.keepTools),
+        ]
+      : [],
+  }
 })
 
 function toRecord(value: unknown) {

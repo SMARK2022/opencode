@@ -57,7 +57,12 @@ export interface ExecuteResult<M extends Metadata = Metadata> {
   output: string
   attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
   // 程序值与模型文本使用不同投影；媒体沿宿主附件通道交付。
-  program?: { value: unknown; attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[] }
+  // 只有协议 owner 可标记可解析原文；宿主展示正文不因此改变，也不向模型暴露第二份业务值。
+  program?: {
+    value: unknown
+    rawText?: string
+    attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
+  }
   // 指令由宿主强制交付，脚本的 return 只决定普通聚合数据。
   context?: { kind: "instruction" | "skill"; key: string; text: string }[]
 }
@@ -69,6 +74,8 @@ export interface Def<
   id: string
   description: string
   parameters: Parameters
+  // 原 decoder 的来源独立于插件可改的展示 schema；不向启动路径引入解释器依赖。
+  readonly runtimeParameters?: Parameters
   jsonSchema?: JSONSchema7
   // 程序值的同一声明服务目录和解码；输入校验仍由 parameters 独立拥有。
   output?: Schema.Decoder<unknown> | JSONSchema7
@@ -146,9 +153,8 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
   return () =>
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
-      // Compile the parser closure once per tool init; `decodeUnknownEffect`
-      // allocates a new closure per call, so hoisting avoids re-closing it for
-      // every LLM tool invocation.
+      // 在 init 时捕获实际合同，后续展示换掉 parameters 不影响真实解析来源。
+      // 每次 init 只编译一次解码器，避免每次工具调用重新创建同一个解析闭包。
       const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
@@ -199,7 +205,8 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
-      return toolInfo
+      // initializer 即使提供同名字段也不能覆盖真实 parser 的来源。
+      return { ...toolInfo, runtimeParameters: toolInfo.parameters }
     })
 }
 

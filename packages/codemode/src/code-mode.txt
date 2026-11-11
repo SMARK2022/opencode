@@ -1,27 +1,42 @@
 @@ description
-Run JavaScript in a confined Code Mode runtime to script tool calls and HTTP requests and compose their results.
-`fetch` is available for HTTP requests. Imports, direct filesystem access, and timers are unavailable: there is no `setTimeout` or sleep. All other external access goes through `tools`.
-Within `{ code }`, the only callable tools are those explicitly listed in the Code Mode catalog instructions or returned by the `search` function. Inside `{ code }`, ignore tools shown outside the Code Mode catalog. They are not available in the Code Mode runtime.
-Call tools through `tools` using only exact paths and signatures from the catalog. Do not infer or normalize tool names; preserve bracket notation such as `tools.<namespace>["tool-name"](input)`.
-Prefer an explicit `return`; if omitted, the final top-level expression becomes the result.
-Await every call whose completion matters; pending calls are interrupted when execution ends. Run independent calls concurrently with `Promise.allSettled`.
+Run JavaScript/TypeScript to compose tool calls and return the information needed for your next decision.
+
+Batch independent calls with Promise.all; use Promise.allSettled when partial results are useful. Chain dependent calls with await, branch on their results, and filter or summarize large outputs before returning them. Stop when the next step needs your judgment.
+
+Calls: await tools.<namespace>.<name>(args). Use the catalog's exact paths and argument shapes; special names use bracket notation. Tools return their declared data or text. A failed call throws; structured error results remain data to inspect.
+
+Discovery: search({ query: "..." }) returns matching paths, descriptions and signatures. Call search without await; use each result's path as the complete tool expression. Tools omitted from the inline catalog remain searchable. Use an exact path query or detail: true to inspect full field details, for example search({ query: "tools.<namespace>.<name>", detail: true }).
+
+When grep and read are available, inspect context around up to eight TODO matches. This returns sampled excerpts, not a complete project scan:
+```js
+const found = await tools.$opencode.grep({ pattern: "TODO", path: "src", include: "*.ts" });
+const excerpts = await Promise.all(found.matches.slice(0, 8).map(async match => {
+  const page = await tools.$opencode.read({ filePath: match.path, offset: Math.max(1, match.line - 2), limit: 5 });
+  return page.type === "text-page" ? `${page.path}:${page.offset}\n${page.content}` : "";
+}));
+return excerpts.filter(Boolean).join("\n\n");
+```
+
+Globals: tools, search, console, sleep(ms), and host-supplied fetch. Standard data helpers include JSON, Math, Array, Object, String, Number, Boolean, Date, RegExp, Map, Set, URL, URLSearchParams and Promise. These are confined implementations, not a Node.js environment; use tools for files and external capabilities.
+
+Results: return the fields needed for your next decision. Return a string when combining multiline text excerpts so newlines stay unescaped. Without return, the last value-producing expression is used. Console output is also returned, so keep it brief. Await work whose completion matters; pending work ends with the script.
 @@ intro.empty
 No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.
 @@ intro.complete
 # Code Mode
 
-The tools listed below cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.
+Use these paths inside `execute`. Other tools shown in the conversation can be called directly.
 
-The catalog is complete. Do not guess tool names.
+The catalog is complete.
 
-## Code Mode tools (call only inside `execute`)
+## Code Mode tools
 @@ intro.partial
 # Code Mode
 
-The tools listed below, and `search`, cannot be called directly: they only work as JavaScript inside the `execute` tool. Every other tool you have is a normal tool call: call it directly, never inside `execute`.
+Use these paths inside `execute`. Other tools shown in the conversation can be called directly.
 
-The catalog is partial. Before calling a tool that is not listed below, find it with the global `search(...)` function. Do not guess tool names. Each result's `path` is the complete call expression: write it out as code, for example `await tools.ns.tool_name({ ... })`. Do not use it as a key such as `tools[path]`.
+The catalog is partial. Use `search(...)` for unlisted tools. Each result's `path` is the complete call expression.
 
 - {{searchSignature}}
 
-## Code Mode tools (call only inside `execute`)
+## Code Mode tools

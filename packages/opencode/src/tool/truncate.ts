@@ -23,6 +23,8 @@ export const GLOB = path.join(TRUNCATION_DIR, "*")
 export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
 
 export interface Options {
+  // 字符预算独立于旧字节和行限制，首尾各半；省略提示计入同一总额。
+  maxChars?: number
   maxLines?: number
   maxBytes?: number
   direction?: "head" | "tail"
@@ -83,6 +85,21 @@ const layer = Layer.effect(
 
     // #282：agent 不再参与提示分支，签名保留仅为调用方兼容
     const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, _agent?: Agent.Info) {
+      if (options.maxChars !== undefined) {
+        if (text.length <= options.maxChars) return { content: text, truncated: false } as const
+        const file = yield* write(text)
+        const notice = formatOutputTruncatedNotice({
+          source: "tool",
+          total: outputStats(text),
+          shown: { direction: "head+tail" },
+          path: file,
+        })
+        // 先扣完整恢复提示再对半分；边缘只回退半个代理对，不生成损坏的 Unicode。
+        const half = Math.floor((options.maxChars - notice.length - 4) / 2)
+        const head = text.slice(0, half).replace(/[\uD800-\uDBFF]$/, "")
+        const tail = text.slice(-half).replace(/^[\uDC00-\uDFFF]/, "")
+        return { content: `${head}\n\n${notice}\n\n${tail}`, truncated: true, outputPath: file } as const
+      }
       const resolved = yield* limits()
       const maxLines = options.maxLines ?? resolved.maxLines
       const maxBytes = options.maxBytes ?? resolved.maxBytes

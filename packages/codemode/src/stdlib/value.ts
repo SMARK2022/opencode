@@ -28,6 +28,9 @@ export const errorBrandName = (value: unknown): string | undefined =>
 export const boundedData = (value: unknown, label: string): unknown => copyIn(value, label, true)
 
 export const coerceToString = (value: unknown): string => {
+  // 显式投影保留源文本，包括空白；普通对象仍走既有字符串转换。
+  const source = rawText(value)
+  if (source !== undefined) return source
   if (value === null) return "null"
   if (value === undefined) return "undefined"
   if (value instanceof SandboxDate)
@@ -77,6 +80,7 @@ import { type AstNode, CoercionFunction, InterpreterRuntimeError } from "../inte
 import { copyIn, type SafeObject } from "../tool-runtime.js"
 import {
   isSandboxValue,
+  rawText, // 字符串转换读取登记原文，不重建业务对象文本。
   SandboxDate,
   SandboxMap,
   SandboxRegExp,

@@ -1,13 +1,86 @@
+import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Tool } from "./tool"
-import { Cause, Effect, Schema } from "effect"
+import { Truncate } from "./truncate"
+import { Cause, Config, Clock, Deferred, Effect, Schema } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { isRecord } from "@/util/record"
 import type { PermissionPrecheck } from "@/permission/precheck"
 import { MAX_RESPONSE_SIZE } from "./webfetch"
+import { ExecuteEnvironments } from "./execute-environments"
+
+// JSON 决定缺省值；显式环境变量仍通过宿主的 ConfigProvider 解码和覆盖。
+export const configuration = (config: ConfigV1.Info["codemode"]) =>
+  Config.all({
+    enabled: Config.boolean("OPENCODE_CODEMODE").pipe(
+      Config.withDefault(typeof config === "boolean" ? config : config?.enabled ?? true),
+    ),
+    keepTools: Config.boolean("OPENCODE_CODEMODE_KEEP_TOOLS").pipe(
+      Config.withDefault(typeof config === "object" ? config.keep_tools ?? true : true),
+    ),
+  }).pipe(Effect.orDie)
+
+// 单个预算只属于一次执行；并发人工等待合并成一段暂停时间。
+export const makeExecutionBudget = Effect.gen(function* () {
+  const clock = yield* Clock.Clock
+  let waiting = 0
+  let remaining = 0
+  let started = clock.currentTimeMillisUnsafe()
+  let changed = Deferred.makeUnsafe<void>()
+  // 每次唤醒后换一个Deferred，让恢复和下一次暂停不会读到旧信号。
+  const signal = () => {
+    Deferred.doneUnsafe(changed, Effect.void)
+    changed = Deferred.makeUnsafe<void>()
+  }
+  const wait = (milliseconds: number): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      // 在真实执行的竞争启动时才计时，创建预算及前置审查不消耗它。
+      remaining = milliseconds
+      started = clock.currentTimeMillisUnsafe()
+      const tick: Effect.Effect<void> = Effect.suspend(() => {
+        if (waiting) return Deferred.await(changed).pipe(Effect.andThen(tick))
+        const duration = Math.max(0, remaining - (clock.currentTimeMillisUnsafe() - started))
+        return Effect.raceFirst(
+          Effect.sleep(duration).pipe(Effect.as(true)),
+          Deferred.await(changed).pipe(Effect.as(false)),
+        ).pipe(Effect.flatMap((expired) => (expired ? Effect.void : tick)))
+      })
+      return tick
+    })
+  const pause = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        // 重叠等待只在第一个入口扣除已用时间，避免双重暂停。
+        if (waiting++ === 0) {
+          remaining -= clock.currentTimeMillisUnsafe() - started
+          signal()
+        }
+      }),
+      () => effect,
+      () =>
+        Effect.sync(() => {
+          // 最后一个等待离开才续跑；拒绝和取消也通过release归还计数。
+          if (--waiting === 0) {
+            started = clock.currentTimeMillisUnsafe()
+            signal()
+          }
+        }),
+    )
+  return { wait, pause }
+})
 
 export const CODE_MODE_TOOL = "execute"
 
 export const Parameters = Schema.Struct({
+  // 缺省创建新环境，显式 ID 只能恢复对应 owner 的现存环境，空字符串也不是缺省。
+  environmentID: Schema.optionalKey(Schema.String).annotate({
+    description: "Environment ID from a prior execute result; omit to create a fresh environment.",
+  }),
+  // 期限与库内 Effect 计时器的32位毫秒范围一致，避免超大值失去超时约束。
+  timeout: Schema.optionalKey(
+    Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(2_147_483_647)),
+  ).annotate({
+    description: "Maximum execution time in milliseconds (default: 600000).",
+  }),
   code: Schema.String.annotate({
     description: "Script body executed by the confined interpreter.",
   }),
@@ -16,8 +89,11 @@ export const Parameters = Schema.Struct({
 type CallEntry = { tool: string; status: "running" | "completed" | "error"; input?: Record<string, unknown> }
 
 type Metadata = {
+  // 进度回调替换整个 metadata；ID 必须随每次更新一起保留。
+  environmentID: string
   toolCalls: CallEntry[]
   error?: boolean
+  truncated?: boolean
   loaded?: string[]
   skills?: string[]
 }
@@ -25,16 +101,19 @@ type Metadata = {
 type Attachment = NonNullable<Tool.ExecuteResult["attachments"]>[number]
 
 export type CatalogEntry = {
-  // 目录只提供模型可见 schema 与路径，实际工具实现一直留在 SessionTools。
+  // 目录携带展示资料和原合同引用；执行能力仍由当前 SessionTools 提供。
   id: string
   path: readonly [string, string]
   description: string
   inputSchema: JSONSchema7
+  // 这是实际宿主 validator 的来源，不替换只负责展示的 JSON input。
+  runtimeParameters?: Schema.Decoder<unknown>
   outputSchema?: JSONSchema7 | Schema.Decoder<unknown>
 }
 
 export interface CodeModeHost {
   catalog: readonly CatalogEntry[]
+  waitForTimeout?: (milliseconds: number) => Effect.Effect<void>
   signal: AbortSignal
   begin(code: string, calls: readonly PermissionPrecheck.ExecuteCall[]): Effect.Effect<void>
   invoke(id: string, input: unknown): Effect.Effect<Tool.ExecuteResult, unknown>
@@ -84,67 +163,154 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
       description: entry.description,
       // 沿用 V1 原 JSON Schema 签名适配：对象原样透传，真实输入校验仍由工具拥有。
       input: entry.inputSchema as import("@opencode-ai/codemode").Tool.JsonSchema,
+      // 完整实际合同统一生成签名、字段索引与快捷形式，真实解码仍只由宿主执行。
+      inputContract: entry.runtimeParameters,
       output: entry.outputSchema as import("@opencode-ai/codemode").Tool.SchemaType | undefined,
-      run: (input) => run(entry, input).pipe(Effect.catchCause((cause) => {
-        // 权限终止和用户取消须穿透 interpreter；普通异常才进入脚本可捕获的错误域。
-        if (Cause.hasInterrupts(cause)) return Effect.interrupt
-        const error = Cause.squash(cause)
-        return Effect.fail(sandbox.toolError(error instanceof Error ? error.message : String(error), error))
-      })),
+      run: (input) =>
+        run(entry, input).pipe(
+          Effect.catchCause((cause) => {
+            // 权限终止和用户取消须穿透 interpreter；普通异常才进入脚本可捕获的错误域。
+            if (Cause.hasInterrupts(cause)) return Effect.interrupt
+            const error = Cause.squash(cause)
+            return Effect.fail(sandbox.toolError(error instanceof Error ? error.message : String(error), error))
+          }),
+        ),
     })
   }
   return tree
 })
 
-export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (catalog: readonly CatalogEntry[]) {
-  // 目录说明与执行共享同一树形入口，搜索结果不会广告另一套能力。
+export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (
+  catalog: readonly CatalogEntry[],
+  keepTools = true,
+) {
   const { CodeMode } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
   const tools = yield* toolTree(catalog, () => Effect.die("Catalog preview is not executable."))
-  return CodeMode.make({ tools }).instructions()
+  // 来自当前过滤目录的原 schema 才证明 native 来源；同名 MCP/自定义条目没有隐式优先权。
+  const priority = catalog
+    .filter(
+      (entry) =>
+        entry.runtimeParameters && entry.path[0] === "$opencode" &&
+        (keepTools
+          ? ["read", "grep", "glob", "edit"]
+          : ["read", "grep", "glob", "edit", "bash", "apply_patch", "write"]
+        ).includes(entry.id),
+    )
+    .map((entry) => entry.path.join("."))
+  return CodeMode.make({ tools, discovery: { priority } }).instructions()
 })
 
 export const CodeModeTool = Tool.define(
   CODE_MODE_TOOL,
   Effect.gen(function* () {
     const { CodeMode } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
-    const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
-      description: CodeMode.description,
-      parameters: Parameters,
-      execute: Effect.fn("CodeMode.execute")(function* (params, ctx) {
+    const environments = yield* ExecuteEnvironments.Service
+    const truncate = yield* Truncate.Service
+    // 环境租约与宿主取消包住完整操作；业务处理只接收已取得的环境和当前能力。
+    const withEnvironment = (
+      run: (
+        params: typeof Parameters.Type,
+        ctx: Tool.Context,
+        lease: ExecuteEnvironments.Lease,
+        host: CodeModeHost,
+      ) => Effect.fn.Return<Tool.ExecuteResult<Metadata>, unknown>,
+    ) =>
+      Effect.fn("CodeMode.execute")(function* (params: typeof Parameters.Type, ctx: Tool.Context) {
         const host = ctx.codeMode
         if (!host) return yield* Effect.die(new Error("execute requires the current Session tool host."))
         if (host.signal.aborted) return yield* Effect.interrupt
+        const abort = Effect.callback<never>((resume) => {
+          if (host.signal.aborted) return resume(Effect.interrupt)
+          const handler = () => resume(Effect.interrupt)
+          host.signal.addEventListener("abort", handler, { once: true })
+          return Effect.sync(() => host.signal.removeEventListener("abort", handler))
+        })
+        // 外层取消覆盖排队中的 lease；持有者根作用域完成清理后 registry 才释放同环境串行门。
+        return yield* Effect.raceFirst(
+          environments.use(ctx.sessionID, params.environmentID, (lease) =>
+            Effect.gen(() => run(params, ctx, lease, host)),
+          ),
+          abort,
+        )
+      }, Effect.orDie)
+    const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
+      // 宿主才拥有环境句柄；共享库说明仍适用于无 Session 的一次性执行。
+      description: `${CodeMode.description}
+State: reuse the returned environmentID to inspect or continue saved variables, functions and closures; omit it for a fresh environment. Schema-less MCP object/array JSON text becomes data; use String(value) for its original text.`,
+      parameters: Parameters,
+      execute: withEnvironment(function* (params, ctx, lease, host) {
+        // 只去除完整且唯一的 JS/TS 外层围栏；混合文本、内层围栏及其它标签仍交给原编译器。
+        const fenced = params.code
+          .trim()
+          .match(/^```(?:js|javascript|ts|typescript)?[^\S\r\n]*\r?\n([\s\S]*?)\r?\n```$/)
+        // 规范化只做一次，预跑、整段权限检查和真实执行必须看到完全相同的源码。
+        const code = fenced && !fenced[1].includes("```") ? fenced[1] : params.code
+        const outputLimits = yield* truncate.limits()
         const calls: CallEntry[] = []
-        // 这些数组属于一次调用，后续 execute 重新收集，避免媒体或规则跨调用残留。
         const attachments: Attachment[] = []
+        // 相同规则在多个子调用出现时只返回最新内容，去重不依赖脚本最终选择的字段。
         const context = new Map<string, NonNullable<Tool.ExecuteResult["context"]>[number]>()
-        const publish = () =>
-          ctx.metadata({ title: CODE_MODE_TOOL, metadata: { toolCalls: calls.map((c) => ({ ...c })) } })
-        const tools = yield* toolTree(host.catalog, (entry, input) => Effect.gen(function* () {
-          const result = yield* host.invoke(entry.id, input)
-          attachments.push(...(result.program?.attachments ?? result.attachments ?? []))
-          for (const item of result.context ?? []) context.set(`${item.kind}:${item.key}`, item)
-          // key 只用于去重实际收取的上下文，脚本的聚合 return 不控制这些规则的交付。
-          // 宿主已收取附件与指令；JS只消费业务值或原文本，临时真值和UI副本留在宿主。
-          // null/false/0均是合法程序值，选择通道时保留这些值自身的语义。
-          return result.program ? result.program.value : result.output
-        }))
-        const runtime = CodeMode.make({
+        let lastProgress = -Infinity
+        const publish = (delivery: "durable" | "ephemeral" = "ephemeral") =>
+          Effect.suspend(() => {
+            const now = performance.now()
+            // 先检查窗口再复制 calls，才能同时省掉发送与整份调用列表快照。
+            if (delivery === "ephemeral" && now - lastProgress < 100) return Effect.void
+            // durable 的环境回执不占进度窗口，第一条真实运行状态仍立即可见。
+            if (delivery === "ephemeral") lastProgress = now
+            return ctx.metadata({
+              delivery,
+              title: CODE_MODE_TOOL,
+              metadata: {
+                environmentID: lease.id,
+                output: `Environment: ${lease.id}`,
+                toolCalls: calls.map((c) => ({ ...c })),
+              },
+            })
+          })
+        // 在任何预跑/审查/调用进度之前同时交付结构化 ID 和错误正文证据，立即取消也可恢复。
+        yield* publish("durable")
+        const tools = yield* toolTree(host.catalog, (entry, input) =>
+          Effect.gen(function* () {
+            const result = yield* host.invoke(entry.id, input)
+            attachments.push(...(result.program?.attachments ?? result.attachments ?? []))
+            for (const item of result.context ?? []) context.set(`${item.kind}:${item.key}`, item)
+            // 附件与强制上下文由宿主收集，context 按 kind:key 去重，独立于脚本 return。
+            // 只有协议标记的 rawText 进入 JSON 投影；其他程序值原样交付，包括 null、false 和 0。
+            return result.program?.rawText !== undefined
+              ? CodeMode.fromJsonText(result.program.rawText)
+              : result.program
+                ? result.program.value
+                : result.output
+          }),
+        )
+        const execute = CodeMode.execute({
+          code,
           tools,
+          environment: lease.environment,
+          // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
+          limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
           fetch: host.fetch,
+          waitForTimeout: host.waitForTimeout,
           onToolCallStart: ({ index, name, input }) =>
             Effect.suspend(() => {
               const shown = (() => {
                 if (input === null || input === undefined) return
                 // 沿上游fetch display仅记录方法和URL，恢复清单无需复制凭据或请求体。
-                if (name === "$codemode.fetch" && Array.isArray(input)) return {
-                  method: isRecord(input[1]) && typeof input[1].method === "string" ? input[1].method.toUpperCase() : "GET",
-                  url: String(input[0]),
-                }
+                if (name === "$codemode.fetch" && Array.isArray(input))
+                  return {
+                    method:
+                      isRecord(input[1]) && typeof input[1].method === "string"
+                        ? input[1].method.toUpperCase()
+                        : "GET",
+                    url: String(input[0]),
+                  }
                 if (isRecord(input)) return Object.keys(input).length > 0 ? input : undefined
                 return { input }
               })()
+              // 用启动时分配的 index 更新原条目，完成顺序倒置也不会串到另一个调用。
               calls[index] = { tool: name, status: "running", ...(shown ? { input: shown } : {}) }
+              // 即使本次父进度被合并，调用事实已写入 calls，最终回执仍包含全部项。
               return publish()
             }),
           onToolCallEnd: ({ index, outcome }) =>
@@ -155,48 +321,90 @@ export const CodeModeTool = Tool.define(
             }),
         })
 
-        const abort = Effect.callback<never>((resume) => {
-          if (host.signal.aborted) return resume(Effect.interrupt)
-          const handler = () => resume(Effect.interrupt)
-          host.signal.addEventListener("abort", handler, { once: true })
-          return Effect.sync(() => host.signal.removeEventListener("abort", handler))
-        })
-        // 指令作为宿主上下文交付；即使脚本 return 1，也保留实际加载的规则正文。
         const contextText = () => [...context.values()].map((item) => item.text).join("\n\n")
-        const result = yield* Effect.raceFirst(Effect.gen(function* () {
+        // 所有终态正文使用同一环境前缀与段落规则，避免成功和失败的恢复线索漂移。
+        const formatOutput = (...parts: string[]) =>
+          [`Environment: ${lease.id}`, ...parts].filter(Boolean).join("\n\n")
+        const result = yield* Effect.gen(function* () {
           const observed: PermissionPrecheck.ExecuteCall[] = []
-          // 同一解释器与输入声明；预跑桩只记录参数，空返回专属于桩的输出契约。
-          const probe = yield* toolTree(host.catalog.map((entry) => ({ ...entry, outputSchema: Schema.Null })),
-            (entry, input) => Effect.sync(() => { observed.push({ tool: entry.id, input }); return null }))
-          // 空值可能使循环持续：原预算把预检限制在一秒/128次调用内，真实执行保持原预算。
-          yield* CodeMode.execute({ code: params.code, tools: probe, limits: { timeoutMs: 1000, maxToolCalls: 128 },
+          // 按工具和原始参数去重，保留首次顺序；严格比较区分缺省键和 undefined，忽略对象键顺序。
+          const record = (call: PermissionPrecheck.ExecuteCall) => {
+            if (!observed.some((entry) => entry.tool === call.tool && Bun.deepEquals(entry.input, call.input, true)))
+              observed.push(call)
+          }
+          // 在租约内复制一次环境；旧 helper 只修改副本，根作用域结束后释放。
+          const probe = yield* toolTree(
+            host.catalog.map((entry) => ({ ...entry, outputSchema: Schema.Null })),
+            (entry, input) =>
+              Effect.sync(() => {
+                record({ tool: entry.id, input })
+                return null
+              }),
+          )
+          // 总调用数和时间共同限制探针；去重只影响留存，未跑到的调用仍由真实权限入口处理。
+          yield* CodeMode.execute({
+            code,
+            tools: probe,
+            environment: lease.environment,
+            snapshotEnvironment: true,
+            // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
+            sleep: () => Effect.void,
+            limits: { timeoutMs: 500, maxToolCalls: 1024, maxLogBytes: outputLimits.maxBytes },
             // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
-            fetch: host.fetch ? (url, init) => Effect.sync(() => {
-              observed.push({ tool: "webfetch", input: { ...(isRecord(init) ? init : {}), url: String(url) } })
-              return { url: String(url), status: 200, statusText: "", ok: true, redirected: false, headers: {}, text: "null", bytes: [] }
-            }) : undefined,
+            fetch: host.fetch
+              ? (url, init) =>
+                  Effect.sync(() => {
+                    record({
+                      tool: "webfetch",
+                      input: { ...(isRecord(init) ? init : {}), url: String(url) },
+                    })
+                    return {
+                      url: String(url),
+                      status: 200,
+                      statusText: "",
+                      ok: true,
+                      redirected: false,
+                      headers: {},
+                      text: "null",
+                      bytes: [],
+                    }
+                  })
+              : undefined,
           })
           // 诊断前捕获的调用仍有分类价值；真实读结果依赖由后续原请求检查覆盖。
-          yield* host.begin(params.code, observed)
-          return yield* runtime.execute(params.code)
-        }), abort).pipe(Effect.onExit((exit) => {
-          if (exit._tag === "Success" && exit.value.ok) return Effect.void
-          // 错误父回执携带已完成事实，processor 保留 error 状态与原 child 记录。
-          return ctx.metadata({ metadata: {
-            toolCalls: calls, error: true,
-            output: [contextText(), host.signal.reason instanceof Error ? host.signal.reason.message : ""].filter(Boolean).join("\n\n"),
-          } })
-        }))
+          yield* host.begin(code, observed)
+          return yield* execute
+        }).pipe(
+          Effect.onExit((exit) => {
+            // 成功由返回的 ToolResult 持久化；这里再发布一次会重复完整终态写入。
+            if (exit._tag === "Success" && exit.value.ok) return Effect.void
+            // 错误父回执携带已完成事实，processor 保留 error 状态与原 child 记录。
+            return ctx.metadata({
+              metadata: {
+                environmentID: lease.id,
+                toolCalls: calls,
+                error: true,
+                output: formatOutput(
+                  contextText(),
+                  host.signal.reason instanceof Error ? host.signal.reason.message : "",
+                ),
+              },
+            })
+          }),
+        )
         const logs = result.logs ?? []
+        // 日志与业务结果分栏，纯日志脚本也保留输出；两者最后共同经过统一截断。
         const withLogs = (text: string) => {
           if (logs.length === 0) return text
           return text.length > 0 ? `${text}\n\nLogs:\n${logs.join("\n")}` : `Logs:\n${logs.join("\n")}`
         }
 
         if (!result.ok) {
-          // 保留失败类型的宿主出口，错误日志不会被转换成普通成功文本。
+          // namespace 恢复签名可直接随原错误交付，已在正文中的提示不重复占上下文。
           const hints = (result.error.suggestions ?? []).filter((hint) => !result.error.message.includes(hint))
-          return yield* Effect.fail(new Error(withLogs([result.error.message, ...hints].join("\n"))))
+          return yield* Effect.fail(
+            new Error(formatOutput(withLogs([result.error.message, ...hints].join("\n")))),
+          )
         }
 
         // The interpreter validates returned values as plain JSON, so stringify cannot throw;
@@ -206,18 +414,29 @@ export const CodeModeTool = Tool.define(
             ? result.value
             : (JSON.stringify(result.value, null, 2) ?? String(result.value))
 
+        // 只按未观察事实同时形成提醒与结果标签；完整回执含上下文、结果和日志，再由 Session 统一预算落盘。
+        const [receipt, label] = result.unobservedFailure
+          ? [
+              "Some asynchronous work failed or was interrupted without the script observing its outcome.",
+              "Script result:\n",
+            ]
+          : ["", ""]
         return {
           title: CODE_MODE_TOOL,
           metadata: {
+            environmentID: lease.id,
             toolCalls: calls,
+            // Session 在耗时与图片提示齐备后统一预算；wrapper 只清理可见文本。
+            truncated: false,
             // loaded/skills 只报告父回执实际包含的规则，后续截断仍由共享宿主清除声明。
             loaded: [...context.values()].filter((item) => item.kind === "instruction").map((item) => item.key),
             skills: [...context.values()].filter((item) => item.kind === "skill").map((item) => item.key),
           },
-          output: [contextText(), withLogs(output)].filter(Boolean).join("\n\n"),
+          output: formatOutput(receipt, contextText(), withLogs(`${label}${output}`)),
+          // 附件不经过正文截断，脚本筛选返回值也不会撤掉已收取的媒体。
           ...(attachments.length > 0 ? { attachments } : {}),
         } satisfies Tool.ExecuteResult<Metadata>
-      }, Effect.orDie),
+      }),
     }
     return init
   }),

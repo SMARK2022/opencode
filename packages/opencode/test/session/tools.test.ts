@@ -72,6 +72,8 @@ const layer = Layer.mergeAll(
   Layer.succeed(
     ToolRegistry.Service,
     ToolRegistry.Service.of({
+      // 直接工具计时沿用默认双入口模式。
+      codemode: () => Effect.succeed({ enabled: true, keepTools: true }),
       ids: () => Effect.succeed(["timing"]),
       all: () => Effect.succeed([]),
       named: () => Effect.die("unused"),

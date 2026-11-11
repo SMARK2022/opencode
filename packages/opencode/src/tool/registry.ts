@@ -59,6 +59,7 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 // #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
 import { Image } from "@/image/image"
+import { ExecuteEnvironments } from "./execute-environments" // 租约沿已有依赖图持有真实执行寿命。
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -80,6 +81,8 @@ type State = {
 }
 
 export interface Interface {
+  // 注册与会话工具面共用同一模式，配置依赖由注册表持有。
+  readonly codemode: () => Effect.Effect<{ enabled: boolean; keepTools: boolean }>
   readonly ids: () => Effect.Effect<string[]>
   readonly all: () => Effect.Effect<Tool.Def[]>
   readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
@@ -279,9 +282,15 @@ const layer = Layer.effect(
       }),
     )
 
+    const codemode: Interface["codemode"] = Effect.fn("ToolRegistry.codemode")(function* () {
+      return yield* codeMode.configuration((yield* config.get()).codemode)
+    })
+
     const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
       const s = yield* InstanceState.get(state)
-      return [...s.builtin, ...s.custom] as Tool.Def[]
+      // 在共同列表出口关闭 Execute，工具选择器、HTTP 和调试入口保持一致。
+      const mode = yield* codemode()
+      return ([...s.builtin, ...s.custom] as Tool.Def[]).filter((tool) => tool.id !== "execute" || mode.enabled)
     })
 
     const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
@@ -347,6 +356,8 @@ const layer = Layer.effect(
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,
+            // 展示 hook 的新 parameters 不会重编译原 execute 闭包，故不能拿它替代实际合同。
+            runtimeParameters: tool.runtimeParameters,
             jsonSchema,
             output: tool.output,
             // #557：plugin 只能改 Provider definition；server policy 始终取原 Tool.Def。
@@ -366,7 +377,7 @@ const layer = Layer.effect(
       return { task: s.task, read: s.read }
     })
 
-    return Service.of({ ids, all, named, tools })
+    return Service.of({ codemode, ids, all, named, tools }) // 向 Session 共享注册表已解码的模式，避免独立读取。
   }),
 )
 
@@ -466,6 +477,8 @@ export const node = LayerNode.make({
     Instruction.node,
     FSUtil.node,
     EventV2Bridge.node,
+    // 通过既有依赖图提供 SessionStore/事件 owner，不在 resolver 内另建状态缓存。
+    ExecuteEnvironments.node,
     httpClient,
     CrossSpawnSpawner.node,
     Format.node,
