@@ -177,6 +177,14 @@ test("prepared media handles SDK binary, base64 and native fields without inflat
     { type: "file", mediaType: "image/png", data: bytes.toString("base64") },
     { type: "input_image", image_url: `data:image/png;base64,${bytes.toString("base64")}` },
     { type: "image", source: { type: "base64", media_type: "image/png", data: bytes.toString("base64") } },
+    // MIME与载荷决定计量，SDK类型别名和协议包装共用同一个媒体预算。
+    { type: "image-data", mediaType: "image/png", data: bytes.toString("base64") },
+    { type: "file-data", mediaType: "image/png", data: bytes.toString("base64") },
+    // 新类型名不需要追加枚举，媒体身份来自协议内容中的MIME与载荷。
+    { type: "future-media", mime: "image/png", data: bytes.toString("base64") },
+    { inlineData: { mimeType: "image/png", data: bytes.toString("base64") } },
+    // Bedrock把格式与bytes分放在父子节点，预算需要保留这份格式关联。
+    { image: { format: "png", source: { bytes: bytes.toString("base64") } } },
   ]) {
     const body = { messages: [{ role: "user", content: [content] }] }
     const result = Token.estimateRequest(body, [], [])
@@ -185,5 +193,30 @@ test("prepared media handles SDK binary, base64 and native fields without inflat
     expect(result.inputBreakdown?.media?.count).toBe(1)
     // 文本估量只含包装与占位，不能把二进制展开或 base64 再除四计入。
     expect(result.input).toBeLessThan(250)
+  }
+})
+
+test("prepared media preserves PDF MIME and leaves tool JSON as text", () => {
+  const data = "A".repeat(7500)
+  for (const part of [
+    { type: "file-data", mediaType: "application/pdf", data },
+    { inlineData: { mimeType: "application/pdf", data } },
+    { document: { format: "pdf", source: { bytes: data } } },
+  ]) {
+    const result = Token.estimateRequest({ messages: [{ role: "user", content: [part] }] }, [], [])
+    // 7500字符的PDF预算为7；误用图片或普通文本策略会得到不同结果。
+    expect(result.inputBreakdown?.media?.tokens).toBe(7)
+  }
+  const value = { type: "image-data", mediaType: "image/png", data, path: "/media/file/data.png" }
+  for (const body of [
+    { messages: [{ role: "assistant", content: [{ type: "tool-call", input: value }] }] },
+    { messages: [{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value } }] }] },
+    { contents: [{ role: "user", parts: [{ functionResponse: { name: "read", response: value } }] }] },
+    { messages: [{ role: "user", content: [{ toolResult: { content: [{ json: value }] } }] }] },
+  ]) {
+    // 业务JSON即使具有同名字段仍是正文，避免泛化识别降低真实输入预算。
+    const result = Token.estimateRequest(body, [], [])
+    expect(result.inputBreakdown?.media).toBeUndefined()
+    expect(result.input).toBeGreaterThan(1800)
   }
 })

@@ -11,6 +11,8 @@ type Node = {
   role?: string
   entries: number
   media?: boolean
+  literal?: boolean
+  mime?: string
 }
 const CHARS_PER_TOKEN = 4
 // 使用最近20个助手确认点描述当前模型，窗口大小同时限定每次估算的学习工作量。
@@ -131,6 +133,10 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
     let section = parent?.section ?? "body"
     // 子片段继承父载荷，工具结果里的附件还能细分，不能把包装字段重归用户正文。
     let role = parent?.role
+    // 工具参数和JSON结果保留正文语义，其中的MIME、data或文件路径不能变成媒体预算。
+    const literal = parent?.literal || key === "providerOptions" || (parent?.bucket === "toolInput" && ["input", "args", "arguments"].includes(key))
+      || (parent?.bucket === "toolOutput" && ["json", "response"].includes(key))
+      || (key === "value" && "type" in this && (this.type === "json" || this.type === "error-json"))
     if (parent?.section === "body") {
       // 只在请求根识别广告与历史，工具参数里同名 messages/tools 字段不能跨桶。
       if (key === "tools") { section = "tools"; bucket = "tools" }
@@ -141,7 +147,7 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
     }
     // SDK 的 OAuth instructions 与 native 的 system 都来自已经准备完成的正文。
     if (section === "options" && (key === "instructions" || key === "system")) section = "system"
-    if (section === "messages") {
+    if (section === "messages" && !literal) {
       // Anthropic 的工具结果包在 user 消息中，角色只决定默认桶，片段身份随后覆盖它。
       if (value !== null && typeof value === "object" && "role" in value && typeof value.role === "string") {
         role = value.role
@@ -160,8 +166,8 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
         // 附件只记录实际 JSON 字符，不再次解码 base64 或套用客户端视觉 token 启发式。
         if (["image", "image_url", "input_image", "input_file", "file", "document", "media", "audio", "input_audio", "video"].includes(typeof type === "string" ? type : "") || key === "inlineData" || key === "fileData") bucket = "attachments"
         // Gemini 的调用/结果使用不同字段判别，不能因缺少共享 type 就退回正文桶。
-        if (key === "functionCall") bucket = "toolInput"
-        if (key === "functionResponse") bucket = "toolOutput"
+        if (key === "functionCall" || key === "toolUse") bucket = "toolInput"
+        if (key === "functionResponse" || key === "toolResult") bucket = "toolOutput"
       }
     }
     // 属性名、冒号和逗号归同一载荷；遗漏这些结构会让 JSON-heavy 输入的分类总和偏小。
@@ -175,15 +181,18 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
     const bytes = value instanceof Uint8Array ? value
       : value !== null && typeof value === "object" && "type" in value && value.type === "Buffer" && "data" in value && Array.isArray(value.data)
         ? Buffer.from(value.data) : undefined
-    const binary = bucket === "attachments" && bytes !== undefined && (key === "data" || key === "image")
     const source = this as Record<string, unknown>
+    const mime = [source.mediaType, source.mimeType, source.media_type, source.mime, parent?.mime].find((value): value is string => typeof value === "string")
+    // MIME和载荷确定媒体身份；内联base64直接计量，data URL与远程引用沿用原解析。
+    if (section === "messages" && !literal && mime && ["data", "image", "url", "image_url", "file_data", "bytes"].includes(key)) bucket = "attachments"
+    const binary = bucket === "attachments" && bytes !== undefined && ["data", "image", "bytes"].includes(key)
     const attachment = binary
       ? AttachmentToken.estimateAttachment({ type: "media", data: Buffer.from(bytes).toString("base64"),
-          mediaType: typeof source.mediaType === "string" ? source.mediaType : "image/png" })
-      : bucket === "attachments" && typeof scalar === "string" && ["data", "image", "url", "image_url", "file_data"].includes(key)
-        ? AttachmentToken.estimateAttachment({ type: "file", url: scalar, data: scalar,
+          mediaType: mime ?? "image/png" })
+      : bucket === "attachments" && typeof scalar === "string" && ["data", "image", "url", "image_url", "file_data", "bytes"].includes(key)
+        ? AttachmentToken.estimateAttachment({ type: scalar.includes(":") || scalar.startsWith("//") ? "file" : "media", url: scalar, data: scalar,
             // Anthropic 的已校验 source 使用 media_type，不能把图片预算退成 base64 文本预算。
-            mediaType: typeof source.mediaType === "string" ? source.mediaType : typeof source.media_type === "string" ? source.media_type : undefined }) : undefined
+            mediaType: mime }) : undefined
     if (attachment?.count) {
       for (const field of ["tokens", "textChars", "count", "imageTokens", "pdfTokens", "otherTokens"] as const)
         media[field] += attachment[field]
@@ -220,7 +229,9 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
       counts.messages[bucket] += prefix + chars
     }
     // 同一对象在请求内重复引用时每次重新开始计数，WeakMap 不能成为省略第二次载荷的缓存。
-    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0, media: binary || parent?.media })
+    if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0, media: binary || parent?.media, literal,
+      mime: key === "image" && "format" in value ? `image/${value.format}` : key === "document" && "format" in value ? value.format === "pdf" ? "application/pdf" : "application/octet-stream" : mime,
+    })
     return value
   }).length
   // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
