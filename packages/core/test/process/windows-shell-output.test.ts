@@ -71,7 +71,17 @@ win("windows shell output host", () => {
   }, 15000)
 
   test("output stays fallible after both byte streams end until host completion", async () => {
-    const session = await WindowsShellOutput.openRemote(marked("process.stdout.write('final-bytes')"), {})
+    // 显式关闭本命令的原生写句柄；根进程保持存活，阻止宿主提前完成。
+    const session = await WindowsShellOutput.openRemote(marked(`
+      const k = require("bun:ffi").dlopen("kernel32.dll", {
+        GetStdHandle: { args: ["i32"], returns: "ptr" },
+        CloseHandle: { args: ["ptr"], returns: "i32" },
+      }).symbols
+      require("fs").writeSync(1, "final-bytes")
+      for (const handle of [-11, -12])
+        if (!k.CloseHandle(k.GetStdHandle(handle))) throw new Error("CloseHandle failed")
+      setInterval(() => {}, 1000)
+    `), {})
     let ends = 0
     let completed = false
     // 注入点来自真实宿主报文，位于字节排空和native资源结算之间；只杀本测试持有的host。
