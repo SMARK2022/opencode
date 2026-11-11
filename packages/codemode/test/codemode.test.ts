@@ -619,6 +619,8 @@ describe("CodeMode public contract", () => {
     // 固定说明与动态目录分别交付，渐进发现不应复制一份运行时规则。
     expect(CodeMode.description).toContain("pending calls are interrupted when execution ends")
     expect(CodeMode.description).toContain("returning only the evidence needed for the next decision")
+    // fetch 权限来自宿主显式能力，静态说明不能承诺每个 runtime 都提供网络。
+    expect(CodeMode.description).toContain("When provided by the host, `fetch`")
     const complete = CodeMode.make({ tools }).instructions()
     expect(complete).toStartWith("# Code Mode\n\nThe tools listed below cannot be called directly:")
     expect(complete).toContain("The catalog is complete. Do not guess tool names.")
@@ -632,6 +634,10 @@ describe("CodeMode public contract", () => {
     expect(partial).toContain("- search({")
     // 目录同步结果没有Promise包装；调用语义须与模型看到的发现签名一致。
     expect(partial).toContain("}): {\n  items: Array<{")
+    // 维护注释不属于模型任务信息；四种公开出口都必须保持不泄露注释段。
+    for (const text of [CodeMode.description, complete, partial, CodeMode.make({}).instructions()]) {
+      expect(text).not.toMatch(/中文维护说明|@@ comment\./)
+    }
     expect(CodeMode.make({}).instructions()).toBe("No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.")
   })
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Schema } from "effect"
+// 用宿主控制原因与就绪门闩观察公开行为，不能用超时或私有状态冒充中断证据。
+import { Cause, Deferred, Effect, Schema } from "effect"
 import { CodeMode, Tool, toolError } from "../src/index.js"
 
 // Wave 5 acceptance suite: first-class promise values. Un-awaited tool calls start eagerly on
@@ -304,10 +305,48 @@ describe("Promise.allSettled", () => {
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.value).toBe(2)
   })
+
+  for (const wrap of [false, true])
+    test(`a later ${wrap ? "async" : "direct"} host interruption is not hidden by a pending first member`, async () => {
+      // 就绪信号保证前项确实已挂起；后项发出控制中断，不能等全局超时替它解围。
+      const started = Deferred.makeUnsafe<void>()
+      let cleaned = false
+      const exit = await Effect.runPromise(
+        CodeMode.execute({
+          tools: {
+            wait: Tool.make({
+              description: "Wait for cancellation",
+              input: Schema.Struct({}),
+              run: () =>
+                Deferred.succeed(started, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() =>
+                    Effect.sync(() => {
+                      cleaned = true
+                    }),
+                  ),
+                ),
+            }),
+            stop: Tool.make({
+              description: "Interrupt after first member starts",
+              input: Schema.Struct({}),
+              run: () => Deferred.await(started).pipe(Effect.andThen(Effect.interrupt)),
+            }),
+          },
+          limits: { timeoutMs: 100 },
+          code: `return await Promise.allSettled([tools.wait({}), ${wrap ? "(async () => await tools.stop({}))()" : "tools.stop({})"}])`,
+        }).pipe(Effect.exit),
+      )
+      // Exit 失败且原因只有中断，排除 TimeoutExceeded 诊断或伪造 rejected 数据。
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(cleaned).toBe(true)
+    })
 })
 
 describe("Promise.race", () => {
-  test("first settlement wins and losers are interrupted", async () => {
+  test("execute exit interrupts pending race members", async () => {
+    // 此断言在整个 Execute 返回后检查清理，与上文败方可继续等待的合同分开。
     const trace = makeTrace()
     const result = await value(
       `
@@ -322,23 +361,51 @@ describe("Promise.race", () => {
     expect(trace.completed).toBe(1)
   })
 
-  test("awaiting an interrupted loser afterwards is a catchable program failure", async () => {
+  for (const wrap of [false, true])
+    test(`a losing ${wrap ? "async function" : "tool"} remains awaitable`, async () => {
+      // race 只竞争结算；保留原 Promise 再等待，才能区分选出赢家与结束整段执行。
+      const trace = makeTrace()
+      expect(
+        await value(
+          `
+      const slow = ${wrap ? "(async () => await tools.host.sleepy({ id: 2, ms: 10 }))()" : "tools.host.sleepy({ id: 2, ms: 10 })"}
+      const winner = await Promise.race([slow, "first"])
+      return [winner, await slow]
+    `,
+          { trace },
+        ),
+      ).toEqual(["first", 2])
+      expect(trace.completed).toBe(1)
+      expect(trace.interrupted).toBe(0)
+    })
+
+  test("a losing rejection retains its original reason", async () => {
+    // 被另一项抢先结算不应把后续业务失败改写为执行器制造的取消错误。
     expect(
       await value(`
-      const fast = tools.host.sleepy({ id: 1, ms: 10 })
-      const slow = tools.host.sleepy({ id: 2, ms: 5000 })
-      const winner = await Promise.race([fast, slow])
-      try {
-        await slow
-        return "no"
-      } catch (e) {
-        return { winner, caught: e.message }
-      }
+      const slow = (async () => { await tools.host.sleepy({ id: 1 }); throw "original" })()
+      const winner = await Promise.race([slow, "first"])
+      return [winner, await Promise.allSettled([slow])]
     `),
-    ).toEqual({
-      winner: 1,
-      caught: "This tool call was interrupted because another value settled a Promise.race first.",
-    })
+    ).toEqual(["first", [{ status: "rejected", reason: "original" }]])
+  })
+
+  test("shared and duplicate members keep one producer across races", async () => {
+    // 两个组合器共享同一 Promise；第一个的完成不得使第二个失去仍需要的结果。
+    const trace = makeTrace()
+    expect(
+      await value(
+        `
+      const shared = tools.host.sleepy({ id: 7 })
+      const first = Promise.race([shared, "first"])
+      const second = Promise.race([shared, shared])
+      return [await first, await second, await shared]
+    `,
+        { trace },
+      ),
+    ).toEqual(["first", 7, 7])
+    expect(trace.completed).toBe(1)
+    expect(trace.interrupted).toBe(0)
   })
 
   test("a rejection can win the race", async () => {
@@ -362,9 +429,18 @@ describe("Promise.race", () => {
     expect(trace.interrupted).toBe(1)
   })
 
-  test("an empty race is a clear error instead of hanging", async () => {
-    const diagnostic = await error(`return await Promise.race([])`)
-    expect(diagnostic.message).toContain("never settle")
+  test("an empty race stays pending until the execution timeout", async () => {
+    // 空集合没有赢家，沿既有执行超时退出，而不是额外生成脚本可捕获的错误。
+    expect(await error("return await Promise.race([])", { limits: { timeoutMs: 30 } })).toMatchObject({
+      kind: "TimeoutExceeded",
+    })
+  })
+
+  test("a pending empty race can lose to an outer value", async () => {
+    // 只检查空 race 超时会漏掉“已拒绝但未观察”的实现，嵌套组合锁定 pending 身份。
+    expect(
+      await value('const pending = Promise.race([]); return [typeof pending, await Promise.race([pending, "done"])]'),
+    ).toEqual(["object", "done"])
   })
 })
 

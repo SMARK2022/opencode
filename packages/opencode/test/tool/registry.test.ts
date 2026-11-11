@@ -1,3 +1,4 @@
+// 注册出口也必须对照同一公开说明，避免只修工具实现而遗漏模型工具清单。
 import { CodeMode } from "@opencode-ai/codemode"
 import { afterEach, describe, expect, spyOn } from "bun:test"
 import path from "path"
