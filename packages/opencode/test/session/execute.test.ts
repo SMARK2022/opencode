@@ -5,6 +5,7 @@ import { ConfigProvider, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, S
 import path from "node:path"
 import { mkdir } from "node:fs/promises"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Agent } from "@/agent/agent"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
@@ -52,10 +53,11 @@ const provider = ProviderTest.fake()
 // 使用本机真实方言，避免测试命令与 Shell 分类器观察到两种不同语言。
 const shell = process.platform === "win32" ? Bun.which("pwsh") ?? Bun.which("powershell") : Bun.which("bash")
 // 空 MCP 是产品入口的原始缺口，测试必须通过正常目录找到 execute。
-const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpClient, codemode?: ConfigV1.Info["codemode"], env: Record<string, string | undefined> = {}) =>
+const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpClient, codemode?: ConfigV1.Info["codemode"], env: Record<string, string | undefined> = {}, permission: ConfigV1.Info["permission"] = { "*": "allow" }) =>
   LayerNode.compile(
     LayerNode.group([
       ToolRegistry.node,
+      FSUtil.node,
       Agent.node,
       Session.node,
       SessionProcessor.node,
@@ -76,7 +78,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
         Config.node,
         TestConfig.layer({
           // 普通工具配置 allow，组合路径仍要独立预检；动态升阶用例因此也验证 allow 无法越级。
-          get: () => Effect.succeed({ codemode, permission: { "*": "allow" as const }, shell: shell ?? undefined }),
+          get: () => Effect.succeed({ codemode, permission, shell: shell ?? undefined }),
           directories: () =>
             InstanceState.directory.pipe(Effect.map((directory) => [path.join(directory, ".opencode")])),
         }),
@@ -104,26 +106,66 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
                   )
                   // 事件负责建立父 Part，工具结果仍经真实 processor 结算，测试不自行写入成功状态。
                   const code = input.system[0]
-                  const execute = input.tools.execute?.execute
+                  // 声明未调用与普通 Bash 共用这个外部模型边界，实际工具仍走原宿主。
+                  const name = input.system[3] ?? "execute"
+                  const execute = input.tools[name]?.execute
                   if (code === undefined || !execute) return yield* Effect.die("Missing execute model fixture")
                   // 超时用例通过真实模型参数进入宿主，父 Part 与执行器须看到同一份输入。
                   // 保留模型显式选择的环境；省略时仍通过生产入口分配新状态，不由夹具猜测上一个 ID。
-                  const args = {
+                  const args = name !== "execute" ? { command: code, description: "ordinary cancellation" } : {
                     code,
                     ...(input.system[1] ? { timeout: Number(input.system[1]) } : {}),
                     ...(input.system[2] !== undefined ? { environmentID: input.system[2] } : {}),
+                  }
+                  // 同一模型轮次并发发出两个真实调用，不在夹具中模拟取消、结算或持久化。
+                  if (input.system[4] === "mixed") {
+                    const bash = input.tools.bash?.execute
+                    if (!bash) return yield* Effect.die("Missing mixed Bash fixture")
+                    const combined = { code }
+                    const ordinary = { command: "echo mixed ordinary", description: "mixed cancellation" }
+                    return Stream.concat(
+                      Stream.make(
+                        LLMEvent.stepStart({ index: 0 }),
+                        LLMEvent.toolInputStart({ id: "execute-stream", name }),
+                        LLMEvent.toolInputEnd({ id: "execute-stream", name }),
+                        LLMEvent.toolCall({ id: "execute-stream", name, input: combined }),
+                        LLMEvent.toolInputStart({ id: "ordinary-stream", name: "bash" }),
+                        LLMEvent.toolInputEnd({ id: "ordinary-stream", name: "bash" }),
+                        LLMEvent.toolCall({ id: "ordinary-stream", name: "bash", input: ordinary }),
+                      ),
+                      Stream.fromEffect(
+                        Effect.promise(() =>
+                          Promise.allSettled([
+                            Promise.resolve(
+                              execute(combined, {
+                                toolCallId: "execute-stream",
+                                abortSignal: controller.signal,
+                                messages: input.messages,
+                              }),
+                            ),
+                            Promise.resolve(
+                              bash(ordinary, {
+                                toolCallId: "ordinary-stream",
+                                abortSignal: controller.signal,
+                                messages: input.messages,
+                              }),
+                            ),
+                          ]),
+                        ).pipe(Effect.as(LLMEvent.finish({ reason: "stop" }))),
+                      ),
+                    )
                   }
                   return Stream.concat(
                     Stream.concat(
                       // 注册事件先进入 processor，保证失败回执能通过同一个真实父身份持久化。
                       Stream.make(
                         LLMEvent.stepStart({ index: 0 }),
-                        LLMEvent.toolInputStart({ id: "execute-stream", name: "execute" }),
-                        LLMEvent.toolInputEnd({ id: "execute-stream", name: "execute" }),
-                        LLMEvent.toolCall({ id: "execute-stream", name: "execute", input: args }),
+                        LLMEvent.toolInputStart({ id: "execute-stream", name }),
+                        LLMEvent.toolInputEnd({ id: "execute-stream", name }),
+                        LLMEvent.toolCall({ id: "execute-stream", name, input: args }),
                       ),
                       Stream.fromEffect(
-                        Effect.tryPromise({
+                        input.system[4] === "declared" ? Effect.never : Effect.tryPromise({
                           try: () =>
                             Promise.resolve(
                               execute(args, {
@@ -138,14 +180,14 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
                             onSuccess: (value) =>
                               LLMEvent.toolResult({
                                 id: "execute-stream",
-                                name: "execute",
+                                name,
                                 result: { type: "json", value },
                               }),
                             // 失败仍由 toolResult 事件进入 processor，父 Part 的 error 状态不能由夹具直接写入数据库。
                             onFailure: (error) =>
                               LLMEvent.toolResult({
                                 id: "execute-stream",
-                                name: "execute",
+                                name,
                                 result: {
                                   type: "error",
                                   value: error instanceof Error ? error.message : String(error),
@@ -354,7 +396,7 @@ it.instance("execute catalog reaches final system and OAuth instructions with up
               .join("\n")
         expect(system).toContain("Project instruction.")
         expect(system).toContain("User-provided instruction.")
-        expect(system.includes("Prefer execute for independent batches")).toBe(enabled)
+        expect(system.includes("Prefer execute when you can chain dependent tool calls")).toBe(enabled)
         expect(prepared.messages.filter((message) => message.role === "system")).toHaveLength(oauth ? 0 : 1)
         expect(system.match(/^# Code Mode$/gm) ?? []).toHaveLength(enabled ? 1 : 0)
         if (!enabled) {
@@ -973,11 +1015,17 @@ it.instance("truncated parent context retains a recovery path and clears deliver
   yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), instructions))
   yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "data"))
   const fixture = yield* resolveTools()
-  const execute = fixture.tools.execute?.execute
-  if (!execute) throw new Error("execute is missing")
-  const result = yield* Effect.promise(() => Promise.resolve(execute({ code: 'await tools.$opencode.read({filePath:"nested/note.txt"}); return 1;' },
-    { toolCallId: "execute-truncated", abortSignal: new AbortController().signal, messages: [] })))
-  if (!isRecord(result) || !isRecord(result.metadata) || typeof result.metadata.outputPath !== "string") throw new Error("Expected recoverable truncated output")
+  // 模型只消费 process 结算后的历史回执；直接调试返回是未交付模型的中间值。
+  yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+    agent: fixture.agent, system: ['await tools.$opencode.read({filePath:"nested/note.txt"}); return 1;'],
+    messages: [], tools: fixture.tools })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parent = messages.flatMap((message) => message.parts)
+    .find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "completed" || typeof parent.state.metadata.outputPath !== "string")
+    throw new Error("Expected recoverable truncated output")
+  const result = parent.state
+  expect((yield* finalModelReceipt(messages)).value).toBe(result.output)
   const outputPath = result.metadata.outputPath
   // 原 Truncate 服务保存完整正文；父回执的 loaded/skills 只表示已完整送入模型的规则。
   expect(result.metadata.truncated).toBe(true)
@@ -985,6 +1033,69 @@ it.instance("truncated parent context retains a recovery path and clears deliver
   expect(result.metadata.skills).toEqual([])
   expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toContain(instructions)
 }))
+
+// 失败回执必须穿过真实 Registry → SessionTools → processor，不能只测试成功包装闭包。
+for (const size of [24_000, 60_000]) {
+  it.instance(`failed execute partial context uses the declared budget at ${size} characters`, () =>
+    Effect.gen(function* () {
+      const instance = yield* TestInstance
+      const nested = path.join(instance.directory, "partial")
+      yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+      const instructions = "PARTIAL_CONTEXT_HEAD\n" + "Required context.\n".repeat(Math.ceil(size / 18)) + "PARTIAL_CONTEXT_TAIL"
+      yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), instructions))
+      yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "completed child"))
+      const fixture = yield* resolveTools()
+      yield* fixture.processor.process({
+        user: fixture.user,
+        sessionID: fixture.session.id,
+        model: provider.model,
+        agent: fixture.agent,
+        system: ['await tools.$opencode.read("partial/note.txt"); throw new Error("partial budget failure");'],
+        messages: [],
+        tools: fixture.tools,
+      })
+      const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+      const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
+      const parent = parts.find((part) => part.tool === "execute")
+      if (!parent || parent.state.status !== "error") throw new Error("Expected failed Execute receipt")
+      expect(parts.find((part) => part.tool === "read")).toMatchObject({ state: { status: "completed" } })
+      const metadata = parent.state.metadata
+      if (typeof metadata?.output !== "string") throw new Error("Expected captured partial context")
+      expect(metadata).toMatchObject({ error: true, loaded: [], skills: [], truncated: size > 36_000 })
+      expect(metadata.output.length).toBeLessThanOrEqual(36_000)
+      expect(metadata.output).toContain("PARTIAL_CONTEXT_HEAD")
+      expect(metadata.output).toContain("PARTIAL_CONTEXT_TAIL")
+      expect(metadata.output).toContain("Partial execution:")
+      // 持久化状态与下一轮模型错误回执同时可见，不能只保留数据库里的标志。
+      const receipt = (yield* finalModelReceipt(messages)).value
+      expect(receipt.length).toBeLessThanOrEqual(36_000)
+      expect(receipt).toBe(metadata.output)
+      expect(receipt).toContain("PARTIAL_CONTEXT_HEAD")
+      expect(receipt).toContain("PARTIAL_CONTEXT_TAIL")
+      expect(receipt).toContain("partial budget failure")
+      if (size < 36_000) {
+        expect(metadata.output.length).toBeGreaterThan(16_384)
+        expect(metadata.output).toContain(instructions)
+        expect(metadata.outputPath).toBeUndefined()
+        return
+      }
+      if (typeof metadata.outputPath !== "string") throw new Error("Expected complete partial recovery file")
+      const outputPath = metadata.outputPath
+      const complete = yield* Effect.promise(() => Bun.file(outputPath).text())
+      expect(complete.length).toBeGreaterThan(36_000)
+      expect(complete).toContain(instructions)
+      expect(complete).toContain("Partial execution:")
+      expect(receipt).toContain(metadata.outputPath)
+      // 直接对照保存的完整正文，证明两端等额保留而不是旧的仅头部预览。
+      const [head, tail] = metadata.output.split(/\n\n<opencode_notice[^>]*\/>\n\n/)
+      expect(head.length).toBe(tail.length)
+      expect(complete.startsWith(head)).toBe(true)
+      expect(complete.endsWith(tail)).toBe(true)
+      expect(metadata.output).toContain(complete.slice(0, 17_000))
+      expect(metadata.output).toContain(complete.slice(-17_000))
+    }),
+  )
+}
 
 it.instance("disabling execute keeps MCP directly callable and removes disabled native tools", () => Effect.gen(function* () {
   // 用户关闭编排入口后，远端能力仍从既有直接工具入口提供，调用不会触发另一套执行器。
@@ -1903,7 +2014,7 @@ for (const tool of ["apply_patch", "edit"]) {
   }), { git: true })
 }
 
-// 直接运行模型所见示例，验证真实 glob/read 数据形态和采样输出。
+// 直接运行模型所见示例，验证真实 grep/read 数据形态和采样输出。
 it.instance("published composition example samples actual files", () =>
   Effect.gen(function* () {
     const code = CodeMode.description.match(/```js\n([\s\S]*?)\n```/)?.[1]
@@ -1911,7 +2022,7 @@ it.instance("published composition example samples actual files", () =>
     const instance = yield* TestInstance
     yield* Effect.promise(() => mkdir(path.join(instance.directory, "src"), { recursive: true }))
     for (const lines of [20, 250])
-      yield* Effect.promise(() => Bun.write(path.join(instance.directory, `src/${lines}.ts`), Array.from({ length: lines }, () => "// fixture").join("\n")))
+      yield* Effect.promise(() => Bun.write(path.join(instance.directory, `src/${lines}.ts`), Array.from({ length: lines }, (_, i) => i === 9 ? "// TODO inspect this" : "// fixture").join("\n")))
     const fixture = yield* resolveTools()
     yield* fixture.processor.process({
       user: fixture.user, sessionID: fixture.session.id, model: provider.model,
@@ -1921,13 +2032,14 @@ it.instance("published composition example samples actual files", () =>
       .flatMap((message) => message.parts).filter((part) => part.type === "tool")
     const parent = parts.find((part) => part.tool === "execute")
     if (!parent || parent.state.status !== "completed") throw new Error("Published example failed")
-    const result = JSON.parse(scriptResult(parent.state).output)
+    const result = scriptResult(parent.state).output
     const reads = parts.filter((part) => part.tool === "read")
     expect(reads).toHaveLength(2)
-    expect(reads.every((part) => part.state.status === "completed" && part.state.input.limit === 1)).toBe(true)
-    expect(result).toMatchObject({ inspected: 2, truncated: false, partial: false })
-    expect(result.files).toHaveLength(1)
-    expect(result.files[0]).toMatchObject({ lines: 250, exact: true })
+    expect(reads.every((part) => part.state.status === "completed" && part.state.input.limit === 5 && part.state.input.offset === 8)).toBe(true)
+    expect(result).toContain("20.ts:8\n")
+    expect(result).toContain("250.ts:8\n")
+    expect(result.match(/TODO inspect this/g)).toHaveLength(2)
+    expect(result).not.toContain("\\n")
   }),
 )
 
@@ -2038,4 +2150,644 @@ it.effect("codemode JSON and environment overrides share one resolution", () =>
         Schema.decodeUnknownSync(ConfigV1.Info, { onExcessProperty: "error" })({ codemode: value }),
       ).toThrow()
   }),
+)
+
+// 仅观察真实终态入口；裁剪、恢复写入和 Session 持久化继续使用生产实现。
+const observeFinalReceipt = Effect.fn("TestExecute.observeFinalReceipt")(function* () {
+  const truncate = yield* Truncate.Service
+  const fs = yield* FSUtil.Service
+  yield* fs.ensureDir(Truncate.DIR)
+  const before = yield* fs.readDirectory(Truncate.DIR)
+  const calls: string[] = []
+  const output = truncate.output
+  yield* Effect.acquireRelease(
+    Effect.sync(() => spyOn(truncate, "output").mockImplementation((text, options, agent) => {
+      if (options?.maxChars === 36_000) calls.push(text)
+      return output(text, options, agent)
+    })),
+    (spy) => Effect.sync(() => spy.mockRestore()),
+  )
+  return { calls, fs, before }
+})
+
+// 从生产模型消息投影取得工具回执，数据库 metadata 不能代替最终交付正文。
+const finalModelReceipt = Effect.fn("TestExecute.finalModelReceipt")(function* (messages: MessageV2.WithParts[]) {
+  const modelMessages = yield* MessageV2.toModelMessagesEffect(messages, provider.model)
+  const receipt = modelMessages.flatMap((message) => message.role === "tool" ? message.content : [])
+    .find((part) => part.type === "tool-result" && part.toolName === "execute")
+  if (!receipt || receipt.type !== "tool-result" ||
+    (receipt.output.type !== "text" && receipt.output.type !== "error-text"))
+    throw new Error("Expected provider-visible Execute text receipt")
+  return receipt.output
+})
+
+// 最终回执只裁剪一次，notice 也占 36K 预算；短文不落盘，长文只存一份完整原文并对照首尾。
+const assertFinalReceipt = Effect.fn("TestExecute.assertFinalReceipt")(function* (
+  observed: Effect.Success<ReturnType<typeof observeFinalReceipt>>,
+  output: string,
+  metadata: Record<string, unknown>,
+) {
+  expect(observed.calls).toHaveLength(1)
+  const full = observed.calls[0]
+  expect(output.length).toBeLessThanOrEqual(36_000)
+  const files = (yield* observed.fs.readDirectory(Truncate.DIR)).filter((file) => !observed.before.includes(file))
+  if (full.length <= 36_000) {
+    expect(output).toBe(full)
+    expect(metadata.truncated).toBe(false)
+    expect(metadata.outputPath).toBeUndefined()
+    expect(files).toHaveLength(0)
+    return full
+  }
+  expect(metadata).toMatchObject({ truncated: true, loaded: [], skills: [] })
+  if (typeof metadata.outputPath !== "string") throw new Error("Expected full receipt recovery path")
+  expect(files).toEqual([path.basename(metadata.outputPath)])
+  expect(yield* observed.fs.readFileString(metadata.outputPath)).toBe(full)
+  const chunks = output.split(/\n\n<opencode_notice type="output_truncated"[^>]*\/>\n\n/)
+  expect(chunks).toHaveLength(2)
+  const [head, tail] = chunks
+  expect(Math.abs(head.length - tail.length)).toBeLessThanOrEqual(1)
+  expect(full.startsWith(head)).toBe(true)
+  expect(full.endsWith(tail)).toBe(true)
+  expect(output.isWellFormed()).toBe(true)
+  expect(output.match(/type="output_truncated"/g)).toHaveLength(1)
+  return full
+})
+
+for (const size of [35_999, 36_000, 36_001, 60_000]) {
+  it.instance(`final Execute model receipt applies one complete budget at ${size}`, () => Effect.gen(function* () {
+    const observed = yield* observeFinalReceipt()
+    const plugin = yield* Plugin.Service
+    const body = "FINAL_HEAD" + "x".repeat(size - 20) + "FINAL_TAIL"
+    // 正常 after hook 可以替换展示文本；预算必须作用于它产出的最终正文。
+    const fixture = yield* resolveTools().pipe(Effect.provideService(Plugin.Service, { ...plugin,
+      trigger: (name, input, output) => Effect.gen(function* () {
+        const result = yield* plugin.trigger(name, input, output)
+        if (name === "tool.execute.after" && isRecord(input) && input.tool === "execute" && isRecord(output))
+          Object.assign(output, { output: body })
+        return result
+      }),
+    }))
+    yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+      agent: fixture.agent, system: ['return "done";'], messages: [], tools: fixture.tools })
+    const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+    const parent = messages.flatMap((message) => message.parts)
+      .find((part) => part.type === "tool" && part.tool === "execute")
+    if (parent?.type !== "tool" || parent.state.status !== "completed") throw new Error("Expected completed model receipt")
+    expect((yield* finalModelReceipt(messages)).value).toBe(parent.state.output)
+    expect(yield* assertFinalReceipt(observed, parent.state.output, parent.state.metadata)).toBe(body)
+  }))
+}
+
+it.instance("final Execute receipt budgets actual image omission before clipping", () => Effect.gen(function* () {
+  const observed = yield* observeFinalReceipt()
+  const plugin = yield* Plugin.Service
+  // 正文单独未超预算，真实坏图的省略提示会越界；须先完成图片处理，再裁剪并保存整份回执。
+  const body = "IMAGE_HEAD" + "x".repeat(35_980) + "IMAGE_TAIL"
+  const fixture = yield* resolveTools().pipe(Effect.provideService(Plugin.Service, { ...plugin,
+    trigger: (name, input, output) => Effect.gen(function* () {
+      const result = yield* plugin.trigger(name, input, output)
+      if (name === "tool.execute.after" && isRecord(input) && input.tool === "execute" && isRecord(output)) {
+        Object.assign(output, { output: body, attachments: [{ id: PartID.ascending(), sessionID: input.sessionID,
+          messageID: MessageID.ascending(), type: "file", mime: "image/png", url: "data:image/png;base64,YmFk" }] })
+      }
+      return result
+    }),
+  }))
+  yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+    agent: fixture.agent, system: ['return "image";'], messages: [], tools: fixture.tools })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parent = messages.flatMap((message) => message.parts)
+    .find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "completed") throw new Error("Expected completed parent")
+  const full = yield* assertFinalReceipt(observed, parent.state.output, parent.state.metadata)
+  expect(full).toBe(body + "\n\n[1 image omitted: could not be decoded or resized within the image size limit.]")
+  expect(parent.state.attachments ?? []).toHaveLength(0)
+  expect((yield* finalModelReceipt(messages)).value).toBe(parent.state.output)
+}))
+
+it.instance("final Execute failure bounds original diagnostics and provider error text", () => Effect.gen(function* () {
+  const observed = yield* observeFinalReceipt()
+  const fixture = yield* resolveTools()
+  yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+    agent: fixture.agent, system: ['console.log("CAPTURED_LOG"); throw new Error("ERROR_HEAD" + "x".repeat(60_000) + "ERROR_TAIL");'],
+    messages: [], tools: fixture.tools })
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parent = messages.flatMap((message) => message.parts)
+    .find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "error" || typeof parent.state.metadata?.output !== "string")
+    throw new Error("Expected finalized failed parent")
+  const receipt = yield* finalModelReceipt(messages)
+  expect(receipt.type).toBe("error-text")
+  expect(receipt.value).toBe(parent.state.metadata.output)
+  const full = yield* assertFinalReceipt(observed, receipt.value, parent.state.metadata)
+  expect(full).toContain("ERROR_HEAD")
+  expect(full).toContain("ERROR_TAIL")
+  expect(full).toContain("CAPTURED_LOG")
+}))
+
+it.instance("final Execute long success includes real elapsed notice in one saved receipt", () => Effect.gen(function* () {
+  const observed = yield* observeFinalReceipt()
+  const fixture = yield* resolveTools()
+  const command = process.platform === "win32" ? "Start-Sleep -Seconds 121" : "sleep 121"
+  const started = Date.now()
+  // 真实子进程运行 121 秒；不替换时钟或伪造已耗时字段。
+  yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+    agent: fixture.agent,
+    system: [`await tools.$opencode.bash({command:${JSON.stringify(command)},timeout:150000}); return "LONG_HEAD" + "x".repeat(36_000) + "LONG_TAIL";`, "150000"],
+    messages: [], tools: fixture.tools })
+  expect(Date.now() - started).toBeGreaterThanOrEqual(120_000)
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parts = messages.flatMap((message) => message.parts)
+  const parent = parts.find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "completed") throw new Error("Expected completed long parent")
+  const full = yield* assertFinalReceipt(observed, parent.state.output, parent.state.metadata)
+  expect(full).toContain("LONG_HEAD" + "x".repeat(36_000) + "LONG_TAIL")
+  expect(full).toMatch(/reason="completed" elapsed_ms="12[0-9]{4,}"/)
+  expect(full.match(/reason="completed"/g)).toHaveLength(1)
+  expect((yield* finalModelReceipt(messages)).value).toBe(parent.state.output)
+  expect(parts.find((part) => part.type === "tool" && part.tool === "bash")).toMatchObject({ state: { status: "completed" } })
+}), 170_000)
+
+it.instance("final Execute interruption includes its abort notice in the same budget", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const nested = path.join(instance.directory, "interrupted")
+  yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+  const instructions = "INTERRUPTED_HEAD\n" + "Required context.\n".repeat(4000) + "INTERRUPTED_TAIL"
+  yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), instructions))
+  yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "finished read"))
+  const observed = yield* observeFinalReceipt()
+  const fixture = yield* resolveTools()
+  const command = process.platform === "win32" ? 'Write-Output FINAL_ABORT_READY; Start-Sleep -Seconds 30' : 'echo FINAL_ABORT_READY; sleep 30'
+  const pending = yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
+    agent: fixture.agent,
+    system: [`await tools.$opencode.read("interrupted/note.txt"); await tools.$opencode.bash({command:${JSON.stringify(command)}}); return "unreachable";`],
+    messages: [], tools: fixture.tools }).pipe(Effect.forkScoped)
+  // 等真实 shell 就绪再取消，恢复正文须合并已读规则与一次 abort 提示，且不能留下运行中的 child。
+  yield* pollWithTimeout(fixture.sessions.messages({ sessionID: fixture.session.id }).pipe(Effect.map((messages) =>
+    messages.flatMap((message) => message.parts).find((part) => part.type === "tool" && part.tool === "bash" &&
+      part.state.status === "running" && String(part.state.metadata?.output).includes("FINAL_ABORT_READY")),
+  )), "real abort child never reached its readiness marker", "10 seconds")
+  yield* Fiber.interrupt(pending)
+  const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+  const parts = messages.flatMap((message) => message.parts)
+  const parent = parts.find((part) => part.type === "tool" && part.tool === "execute")
+  if (parent?.type !== "tool" || parent.state.status !== "error" || typeof parent.state.metadata?.output !== "string")
+    throw new Error("Expected finalized interrupted parent")
+  const receipt = yield* finalModelReceipt(messages)
+  expect(receipt.type).toBe("error-text")
+  expect(receipt.value).toBe(parent.state.metadata.output)
+  const full = yield* assertFinalReceipt(observed, receipt.value, parent.state.metadata)
+  expect(full).toContain(instructions)
+  expect(full).toContain("Partial execution:")
+  expect(full.match(/reason="user_abort"/g)).toHaveLength(1)
+  expect(parent.state.metadata.interrupted).toBe(true)
+  expect(parts.find((part) => part.type === "tool" && part.tool === "read")).toMatchObject({ state: { status: "completed" } })
+  expect(parts.filter((part) => part.type === "tool").every((part) => part.state.status !== "running")).toBe(true)
+}))
+
+// 真实 Read 已捕获完整规则后，阻塞下一 native 调用；用同一 slow finalizer 覆盖三种退出来源。
+for (const cleanupMs of [200, 3000]) {
+  // 200ms 与 3000ms 分别落在旧两秒宽限两侧，同一断言必须区分快清理与越界慢清理。
+  for (const ending of ["cancel", "error", "timeout"]) {
+    it.instance(
+      `Execute settlement owns ${cleanupMs}ms cleanup on ${ending}`,
+      () =>
+        Effect.gen(function* () {
+          const instance = yield* TestInstance
+          const nested = path.join(instance.directory, "audit-slow")
+          yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+          // 超预算规则由真实 Read 引入，恢复全文必须保留其完整内容，不能只保存错误摘要。
+          const context = "AUDIT_CONTEXT_HEAD\n" + "Required context.\n".repeat(4000) + "AUDIT_CONTEXT_TAIL"
+          yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), context))
+          yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "ready"))
+          // 观察真实截断服务调用，独立验证只裁剪一次及恢复文件内容，不能仅比较两个相同的输出字段。
+          const observed = yield* observeFinalReceipt()
+          const plugin = yield* Plugin.Service
+          const entered = yield* Deferred.make<void>()
+          const cleaned = yield* Deferred.make<void>()
+          // 只阻塞真实 glob 的 before hook，Read、权限检查和 child 登记仍走产品路径，不能由测试伪造完成结果。
+          const fixture = yield* resolveTools().pipe(
+            Effect.provideService(Plugin.Service, {
+              ...plugin,
+              trigger: (name, input, output) =>
+                name === "tool.execute.before" && isRecord(input) && input.tool === "glob"
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Effect.never),
+                      Effect.ensuring(
+                        Effect.sleep(cleanupMs).pipe(Effect.andThen(Deferred.succeed(cleaned, undefined))),
+                      ),
+                    )
+                  : plugin.trigger(name, input, output),
+            }),
+          )
+          // 主动 throw 分支先启动未 await 的叶调用，验证根失败也会收齐生产者的慢清理。
+          const code =
+            'await tools.$opencode.read({filePath:"audit-slow/note.txt"}); ' +
+            (ending === "error"
+              ? 'tools.$opencode.glob({pattern:"**/*.txt"}); await sleep(50); throw new Error("ROOT_FAILURE");'
+              : 'await tools.$opencode.glob({pattern:"**/*.txt"}); return "unreachable";')
+          const pending = yield* fixture.processor
+            .process({
+              user: fixture.user,
+              sessionID: fixture.session.id,
+              model: provider.model,
+              agent: fixture.agent,
+              // 300ms 限制脚本根预算而不是清理时长；超时之后仍必须等三秒 finalizer 完成。
+              system: [code, ending === "timeout" ? "300" : ""],
+              messages: [],
+              tools: fixture.tools,
+            })
+            .pipe(Effect.forkScoped)
+          // 等叶调用确实进入后再退出，排除取消发生在登记前而误测成空任务成功清理。
+          yield* awaitWithTimeout(Deferred.await(entered), "leaf never entered")
+          if (ending === "cancel") yield* Fiber.interrupt(pending)
+          else yield* Fiber.join(pending)
+          // 返回即证明清理已完成；不额外等待 cleaned 或 sleep，避免把抢先终态化藏起来。
+          expect(yield* Deferred.isDone(cleaned)).toBe(true)
+          const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+          const parts = messages.flatMap((message) => message.parts)
+          const parent = parts.find((part) => part.type === "tool" && part.tool === "execute")
+          if (parent?.type !== "tool" || parent.state.status !== "error") throw new Error("Expected failed Execute")
+          // 从下一轮真实模型消息投影取回执，再与持久 Part 对照，避免只验证内部返回值。
+          const receipt = yield* finalModelReceipt(messages)
+          expect(receipt.value).toBe(parent.state.metadata?.output)
+          const full = yield* assertFinalReceipt(observed, receipt.value, parent.state.metadata ?? {})
+          expect(full).toContain(context)
+          expect(full).toContain("Partial execution:")
+          // 模型可见片段也必须保住规则首尾；完整恢复文件正确不能掩盖当轮交付缺失。
+          expect(receipt.value).toContain("AUDIT_CONTEXT_HEAD")
+          expect(receipt.value).toContain("AUDIT_CONTEXT_TAIL")
+          // 完整错误回执带终结标志，模型回放才不会再追加第二份错误原因和取消提示。
+          expect(parent.state.metadata?.finalizedError).toBe(true)
+          // 根退出不回滚已完成 Read，也不能让尚在清理的子调用永久遗留 running。
+          expect(parts.find((part) => part.type === "tool" && part.tool === "read")).toMatchObject({
+            state: { status: "completed" },
+          })
+          expect(parts.filter((part) => part.type === "tool").every((part) => part.state.status !== "running")).toBe(
+            true,
+          )
+          console.log(
+            "R30_SETTLEMENT",
+            JSON.stringify({ cleanupMs, ending, cleaned: true, length: receipt.value.length, full: full.length }),
+          )
+        }),
+      15_000,
+    )
+  }
+}
+
+// 只有实际登记的 Execute 才能延长清理；模型声明而未调用的 Part 仍走原通用收尾。
+it.instance("Execute declaration without invocation does not become a cleanup owner", () =>
+  Effect.gen(function* () {
+    const fixture = yield* resolveTools()
+    const pending = yield* fixture.processor
+      .process({
+        user: fixture.user,
+        sessionID: fixture.session.id,
+        model: provider.model,
+        agent: fixture.agent,
+        system: ['return "never invoked";', "", "", "execute", "declared"],
+        messages: [],
+        tools: fixture.tools,
+      })
+      .pipe(Effect.forkScoped)
+    // 先证明声明已落成 running Part，再取消，避免把尚未收到工具事件误当成声明-only边界。
+    yield* pollWithTimeout(
+      fixture.sessions
+        .messages({ sessionID: fixture.session.id })
+        .pipe(
+          Effect.map((messages) =>
+            messages
+              .flatMap((message) => message.parts)
+              .find((part) => part.type === "tool" && part.state.status === "running"),
+          ),
+        ),
+      "declared Part never became running",
+    )
+    // 这里允许既有孤儿宽限，但必须在四秒内返回，证明没有把未调用的 Part 加入无限清理屏障。
+    yield* awaitWithTimeout(Fiber.interrupt(pending), "declared-only tool blocked cancellation", "4 seconds")
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap(
+      (message) => message.parts,
+    )
+    expect(parts.filter((part) => part.type === "tool")).toMatchObject([
+      { tool: "execute", state: { status: "error" } },
+    ])
+  }),
+)
+
+// 真实普通 Bash 的 before hook 可不响应 signal；保留 2 秒孤儿宽限，不能等待所有登记 job。
+it.instance("ordinary Bash keeps bounded cleanup when its real before hook ignores cancellation", () =>
+  Effect.gen(function* () {
+    const plugin = yield* Plugin.Service
+    const entered = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const cleaned = yield* Deferred.make<void>()
+    // 即使断言失败也释放不响应取消的测试 hook，避免本用例污染后续 Scope 收尾。
+    yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined))
+    const fixture = yield* resolveTools().pipe(
+      Effect.provideService(Plugin.Service, {
+        ...plugin,
+        trigger: (name, input, output) =>
+          name === "tool.execute.before" && isRecord(input) && input.tool === "bash"
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.ensuring(Deferred.succeed(cleaned, undefined)),
+              )
+            : plugin.trigger(name, input, output),
+      }),
+    )
+    // 普通 Bash 由同一个 processor 包装器调用，才能发现把 Execute 专属等待错误扩散到全部工具的回归。
+    const pending = yield* fixture.processor
+      .process({
+        user: fixture.user,
+        sessionID: fixture.session.id,
+        model: provider.model,
+        agent: fixture.agent,
+        system: ["echo ordinary", "", "", "bash"],
+        messages: [],
+        tools: fixture.tools,
+      })
+      .pipe(Effect.forkScoped)
+    yield* awaitWithTimeout(Deferred.await(entered), "Bash hook never entered")
+    yield* awaitWithTimeout(Fiber.interrupt(pending), "ordinary tool lost bounded cleanup", "4 seconds")
+    // 取消返回时 hook 必须尚未完成，才能排除普通工具偶然先退出而让无限等待实现也通过。
+    expect(yield* Deferred.isDone(cleaned)).toBe(false)
+    const parts = (yield* fixture.sessions.messages({ sessionID: fixture.session.id })).flatMap(
+      (message) => message.parts,
+    )
+    expect(parts.find((part) => part.type === "tool" && part.tool === "bash")).toMatchObject({
+      state: { status: "error" },
+    })
+    // 检查有界返回后才释放普通 hook；释放在前会失去对错误无限等待实现的区分能力。
+    yield* Deferred.succeed(release, undefined)
+    yield* awaitWithTimeout(Deferred.await(cleaned), "ordinary fixture cleanup never released")
+  }),
+)
+
+const approval = testEffect(layer({}, undefined, undefined, {}, { "*": "allow", doom_loop: "ask" }))
+// 三次真实错误触发真实 Permission Deferred；取消不能把已结算回执误当成仍需人工完成的清理。
+approval.instance("Execute cancellation interrupts an already pending doom-loop question", () =>
+  Effect.gen(function* () {
+    const permission = yield* Permission.Service
+    let sessionID: SessionID | undefined
+    for (let turn = 0; turn < 3; turn++) {
+      const fixture = yield* resolveTools(provider.model, undefined, undefined, sessionID)
+      // 复用真实 Session ID 使三轮错误属于同一计数域；新建三个独立会话不会触发应测的询问。
+      sessionID = fixture.session.id
+      const pending = yield* fixture.processor
+        .process({
+          user: fixture.user,
+          sessionID,
+          model: provider.model,
+          agent: fixture.agent,
+          system: ['throw new Error("same failure");'],
+          messages: [],
+          tools: fixture.tools,
+        })
+        .pipe(Effect.forkScoped)
+      // 前两轮完整结束，第三轮才共享同一会话触发真实重复失败阈值，而非直接伪造权限请求。
+      if (turn < 2) {
+        yield* Fiber.join(pending)
+        continue
+      }
+      yield* pollWithTimeout(
+        permission
+          .list()
+          .pipe(Effect.map((requests) => requests.find((request) => request.permission === "doom_loop"))),
+        "third real failure did not ask doom_loop",
+      )
+      // 已观察到真实待答权限后才取消，验证的是现存询问的中断而非抢在询问前返回。
+      yield* awaitWithTimeout(Fiber.interrupt(pending), "doom_loop held cancellation open")
+      // 取消后权限列表也须清空，只有 processor 返回不能证明人工询问的 Deferred 已释放。
+      expect(yield* permission.list()).toEqual([])
+      const messages = yield* fixture.sessions.messages({ sessionID })
+      // 同时检查全部三轮的最终失败回执，防止中断询问时改坏已完成的持久终态。
+      const parents = messages
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === "tool" && part.tool === "execute")
+      expect(parents).toHaveLength(3)
+      expect(
+        parents.every(
+          (part) => part.type === "tool" && part.state.status === "error" && part.state.metadata?.finalizedError,
+        ),
+      ).toBe(true)
+    }
+  }),
+)
+
+// 在真实终态提交后、进入询问前取消；门只延迟原存储返回，不伪造 Part 或替换 Permission。
+approval.instance("Execute cancellation after final receipt skips a not-yet-started doom-loop question", () =>
+  Effect.gen(function* () {
+    const permission = yield* Permission.Service
+    const sessions = yield* Session.Service
+    let sessionID: SessionID | undefined
+    for (let turn = 0; turn < 3; turn++) {
+      const fixture = yield* resolveTools(provider.model, undefined, undefined, sessionID)
+      sessionID = fixture.session.id
+      // 每轮独立的提交门防止前两轮已完成信号提前放行第三轮，取消位置才是真实待测的那个提交。
+      const persisted = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      // 只给第三轮加提交后门，前两轮保留真实阈值积累，避免改变 doom-loop 的触发来源。
+      if (turn === 2) {
+        const update = sessions.updatePart
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            spyOn(sessions, "updatePart").mockImplementation((part) =>
+              update(part).pipe(
+                Effect.tap(() =>
+                  part.type === "tool" && part.tool === "execute" && part.state.status === "error"
+                    ? Deferred.succeed(persisted, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                    : Effect.void,
+                ),
+              ),
+            ),
+          ),
+          (spy) => Effect.sync(() => spy.mockRestore()),
+        )
+      }
+      const pending = yield* fixture.processor
+        .process({
+          user: fixture.user,
+          sessionID,
+          model: provider.model,
+          agent: fixture.agent,
+          system: ['throw new Error("same failure");'],
+          messages: [],
+          tools: fixture.tools,
+        })
+        .pipe(Effect.forkScoped)
+      if (turn < 2) {
+        yield* Fiber.join(pending)
+        continue
+      }
+      // persisted 只在原 updatePart 成功后释放；取消点因而位于终态提交与询问开始之间。
+      yield* awaitWithTimeout(Deferred.await(persisted), "third receipt was not persisted")
+      // 先证明询问尚未出现，才能与上一用例已经 pending 的 Permission 情况独立区分。
+      expect(yield* permission.list()).toEqual([])
+      // 立即启动取消，等其卡在真实落库返回后才释放；不依赖睡眠猜测先后。
+      const cancelling = yield* Fiber.interrupt(pending).pipe(Effect.forkScoped({ startImmediately: true }))
+      yield* Deferred.succeed(release, undefined)
+      // 释放持久化门后取消仍须完成，防止 pending 中断丢失后又进入新的人工等待。
+      yield* awaitWithTimeout(Fiber.join(cancelling), "cancellation entered a late doom_loop wait")
+      expect(yield* permission.list()).toEqual([])
+      const messages = yield* sessions.messages({ sessionID })
+      const parents = messages
+        .flatMap((message) => message.parts)
+        .filter((part) => part.type === "tool" && part.tool === "execute")
+      expect(parents).toHaveLength(3)
+      expect(
+        parents.every(
+          (part) => part.type === "tool" && part.state.status === "error" && part.state.metadata?.finalizedError,
+        ),
+      ).toBe(true)
+    }
+  }),
+)
+
+// 同轮 Execute 与普通 Bash 的生命周期必须分开：等真实慢清理，不等未响应取消的普通 hook。
+it.instance(
+  "mixed cancellation waits Execute cleanup but bounds ordinary Bash and preserves its receipt",
+  () =>
+    Effect.gen(function* () {
+      const instance = yield* TestInstance
+      const nested = path.join(instance.directory, "mixed-slow")
+      yield* Effect.promise(() => mkdir(nested, { recursive: true }))
+      // 混合轮同样使用真实超预算规则，确认普通工具的有界退出不能截断 Execute 的完整恢复材料。
+      const context = "MIXED_CONTEXT_HEAD\n" + "Required context.\n".repeat(4000) + "MIXED_CONTEXT_TAIL"
+      yield* Effect.promise(() => Bun.write(path.join(nested, "AGENTS.md"), context))
+      yield* Effect.promise(() => Bun.write(path.join(nested, "note.txt"), "mixed read evidence"))
+      const observed = yield* observeFinalReceipt()
+      const plugin = yield* Plugin.Service
+      const entered = yield* Deferred.make<void>()
+      const cleaned = yield* Deferred.make<void>()
+      // 两个独立就绪门分别证明 Execute 子调用与普通 Bash 都已启动，不能用一个工具的就绪代替另一项。
+      const ordinaryEntered = yield* Deferred.make<void>()
+      const ordinaryRelease = yield* Deferred.make<void>()
+      // 单独记录普通 hook 清理完成，不能把 Execute 的 cleaned 信号误作两个工具都已退出。
+      const ordinaryCleaned = yield* Deferred.make<void>()
+      // 普通 hook 特意活过取消返回；独立 finalizer 保证失败断言也不会把这个测试阻塞留在作用域中。
+      yield* Effect.addFinalizer(() => Deferred.succeed(ordinaryRelease, undefined))
+      const fixture = yield* resolveTools().pipe(
+        Effect.provideService(Plugin.Service, {
+          ...plugin,
+          trigger: (name, input, output) => {
+            if (name === "tool.execute.before" && isRecord(input) && input.tool === "glob")
+              return Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(Effect.sleep(3000).pipe(Effect.andThen(Deferred.succeed(cleaned, undefined)))),
+              )
+            if (name === "tool.execute.before" && isRecord(input) && input.tool === "bash")
+              return Deferred.succeed(ordinaryEntered, undefined).pipe(
+                Effect.andThen(Deferred.await(ordinaryRelease)),
+                Effect.ensuring(Deferred.succeed(ordinaryCleaned, undefined)),
+              )
+            return plugin.trigger(name, input, output)
+          },
+        }),
+      )
+      // hook 释放不等于宿主 Promise 已返回，额外观测真实 Promise 终态以定位可能的迟到写回。
+      const ordinary = { settled: false }
+      const execute = fixture.tools.bash.execute
+      if (!execute) throw new Error("Expected ordinary Bash executor")
+      // 仅观察原执行 Promise 的最终返回；释放普通 hook 后再次核对，捕获迟到写回而非只看取消瞬间。
+      yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          spyOn(fixture.tools.bash, "execute").mockImplementation(async (...args) => {
+            try {
+              return await execute(...args)
+            } finally {
+              ordinary.settled = true
+            }
+          }),
+        ),
+        (spy) => Effect.sync(() => spy.mockRestore()),
+      )
+      const pending = yield* fixture.processor
+        .process({
+          user: fixture.user,
+          sessionID: fixture.session.id,
+          model: provider.model,
+          agent: fixture.agent,
+          system: [
+            'await tools.$opencode.read({filePath:"mixed-slow/note.txt"}); await tools.$opencode.glob({pattern:"**/*.txt"});',
+            "",
+            "",
+            "execute",
+            "mixed",
+          ],
+          messages: [],
+          tools: fixture.tools,
+        })
+        .pipe(Effect.forkScoped)
+      yield* awaitWithTimeout(Deferred.await(entered), "mixed Execute never reached slow hook")
+      yield* awaitWithTimeout(Deferred.await(ordinaryEntered), "mixed ordinary Bash never reached hook")
+      const started = Date.now()
+      yield* awaitWithTimeout(
+        Fiber.interrupt(pending),
+        "mixed cancellation waited indefinitely for ordinary Bash",
+        "8 seconds",
+      )
+      const elapsed = Date.now() - started
+      expect(yield* Deferred.isDone(cleaned)).toBe(true)
+      expect(yield* Deferred.isDone(ordinaryCleaned)).toBe(false)
+      expect(ordinary.settled).toBe(false)
+      // 最短耗时与 cleaned 共同证明真的等待三秒叶清理；八秒超时则排除等待普通 hook 无界退出。
+      expect(elapsed).toBeGreaterThanOrEqual(3000)
+      const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+      const parts = messages.flatMap((message) => message.parts)
+      const parent = parts.find((part) => part.type === "tool" && part.tool === "execute")
+      if (parent?.type !== "tool" || parent.state.status !== "error") throw new Error("Expected mixed failed Execute")
+      const receipt = yield* finalModelReceipt(messages)
+      expect(receipt.value).toBe(parent.state.metadata?.output)
+      const full = yield* assertFinalReceipt(observed, receipt.value, parent.state.metadata ?? {})
+      expect(full).toContain(context)
+      expect(full).toContain("Partial execution:")
+      // 解析恢复正文中的实际子调用身份和状态，不能仅凭出现 Partial execution 标题就判完整。
+      const partial = full.match(/Partial execution:\n(\[[^\n]+\])/)
+      expect(partial).not.toBeNull()
+      if (!partial || typeof partial[1] !== "string") throw new Error("Expected real mixed partial evidence")
+      expect(JSON.parse(partial[1])).toMatchObject([
+        { callID: "execute-stream/1", tool: "read", status: "completed" },
+        { callID: "execute-stream/2", tool: "glob", status: "error" },
+      ])
+      expect(parent.state.metadata?.finalizedError).toBe(true)
+      expect(parts.find((part) => part.type === "tool" && part.tool === "read")).toMatchObject({
+        state: { status: "completed" },
+      })
+      expect(parts.find((part) => part.type === "tool" && part.tool === "bash")).toMatchObject({
+        state: { status: "error" },
+      })
+      expect(
+        parts
+          .filter((part) => part.type === "tool")
+          .every((part) => part.state.status !== "running" && part.state.status !== "pending"),
+      ).toBe(true)
+      // 冻结整个 Execute Part 而非只记 output，迟到普通工具也不得改写其状态、元数据或恢复路径。
+      const snapshot = JSON.stringify(parent)
+      yield* Deferred.succeed(ordinaryRelease, undefined)
+      yield* pollWithTimeout(
+        Effect.sync(() => (ordinary.settled ? true : undefined)),
+        "ordinary invocation did not settle after release",
+      )
+      // 跨过真实普通 Promise 的返回，再观察持久化内容及恢复文件；不靠睡眠掩盖所有权缺口。
+      const later = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
+      expect(JSON.stringify(later.flatMap((message) => message.parts).find((part) => part.id === parent.id))).toBe(
+        snapshot,
+      )
+      expect((yield* finalModelReceipt(later)).value).toBe(receipt.value)
+      expect(yield* assertFinalReceipt(observed, receipt.value, parent.state.metadata ?? {})).toBe(full)
+      console.log(
+        "R30_MIXED_CANCELLATION",
+        JSON.stringify({
+          elapsed,
+          executeCleaned: true,
+          ordinaryPendingAtCancel: true,
+          ordinarySettledAfterRelease: ordinary.settled,
+          receiptLength: receipt.value.length,
+          fullLength: full.length,
+          unchanged: true,
+        }),
+      )
+    }),
+  15_000,
 )

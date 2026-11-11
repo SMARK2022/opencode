@@ -93,6 +93,7 @@ type Metadata = {
   environmentID: string
   toolCalls: CallEntry[]
   error?: boolean
+  truncated?: boolean
   loaded?: string[]
   skills?: string[]
 }
@@ -112,7 +113,6 @@ export type CatalogEntry = {
 
 export interface CodeModeHost {
   catalog: readonly CatalogEntry[]
-  keepTools?: boolean
   waitForTimeout?: (milliseconds: number) => Effect.Effect<void>
   signal: AbortSignal
   begin(code: string, calls: readonly PermissionPrecheck.ExecuteCall[]): Effect.Effect<void>
@@ -180,9 +180,14 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
   return tree
 })
 
-// 来自当前过滤目录的原 schema 才证明 native 来源；同名 MCP/自定义条目没有隐式优先权。
-const discovery = (catalog: readonly CatalogEntry[], keepTools = true) => ({
-  priority: catalog
+export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (
+  catalog: readonly CatalogEntry[],
+  keepTools = true,
+) {
+  const { CodeMode } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
+  const tools = yield* toolTree(catalog, () => Effect.die("Catalog preview is not executable."))
+  // 来自当前过滤目录的原 schema 才证明 native 来源；同名 MCP/自定义条目没有隐式优先权。
+  const priority = catalog
     .filter(
       (entry) =>
         entry.runtimeParameters && entry.path[0] === "$opencode" &&
@@ -191,16 +196,8 @@ const discovery = (catalog: readonly CatalogEntry[], keepTools = true) => ({
           : ["read", "grep", "glob", "edit", "bash", "apply_patch", "write"]
         ).includes(entry.id),
     )
-    .map((entry) => entry.path.join(".")),
-})
-
-export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (
-  catalog: readonly CatalogEntry[],
-  keepTools = true,
-) {
-  const { CodeMode } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
-  const tools = yield* toolTree(catalog, () => Effect.die("Catalog preview is not executable."))
-  return CodeMode.make({ tools, discovery: discovery(catalog, keepTools) }).instructions()
+    .map((entry) => entry.path.join("."))
+  return CodeMode.make({ tools, discovery: { priority } }).instructions()
 })
 
 export const CodeModeTool = Tool.define(
@@ -287,10 +284,10 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
                 : result.output
           }),
         )
-        const runtime = CodeMode.make({
+        const execute = CodeMode.execute({
+          code,
           tools,
           environment: lease.environment,
-          discovery: discovery(host.catalog, host.keepTools),
           // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
           limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
           fetch: host.fetch,
@@ -325,6 +322,9 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
         })
 
         const contextText = () => [...context.values()].map((item) => item.text).join("\n\n")
+        // 所有终态正文使用同一环境前缀与段落规则，避免成功和失败的恢复线索漂移。
+        const formatOutput = (...parts: string[]) =>
+          [`Environment: ${lease.id}`, ...parts].filter(Boolean).join("\n\n")
         const result = yield* Effect.gen(function* () {
           const observed: PermissionPrecheck.ExecuteCall[] = []
           // 按工具和原始参数去重，保留首次顺序；严格比较区分缺省键和 undefined，忽略对象键顺序。
@@ -373,7 +373,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           })
           // 诊断前捕获的调用仍有分类价值；真实读结果依赖由后续原请求检查覆盖。
           yield* host.begin(code, observed)
-          return yield* runtime.execute(code)
+          return yield* execute
         }).pipe(
           Effect.onExit((exit) => {
             // 成功由返回的 ToolResult 持久化；这里再发布一次会重复完整终态写入。
@@ -384,13 +384,10 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
                 environmentID: lease.id,
                 toolCalls: calls,
                 error: true,
-                output: [
-                  `Environment: ${lease.id}`,
+                output: formatOutput(
                   contextText(),
                   host.signal.reason instanceof Error ? host.signal.reason.message : "",
-                ]
-                  .filter(Boolean)
-                  .join("\n\n"),
+                ),
               },
             })
           }),
@@ -406,7 +403,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           // namespace 恢复签名可直接随原错误交付，已在正文中的提示不重复占上下文。
           const hints = (result.error.suggestions ?? []).filter((hint) => !result.error.message.includes(hint))
           return yield* Effect.fail(
-            new Error(`Environment: ${lease.id}\n\n${withLogs([result.error.message, ...hints].join("\n"))}`),
+            new Error(formatOutput(withLogs([result.error.message, ...hints].join("\n")))),
           )
         }
 
@@ -417,29 +414,25 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             ? result.value
             : (JSON.stringify(result.value, null, 2) ?? String(result.value))
 
-        // 调用审计也包含已 catch 的失败；提醒只依据解释器确认的未观察事实。
-        const receipt = result.unobservedFailure
-          ? "Some asynchronous work failed or was interrupted without the script observing its outcome."
-          : ""
+        // 只按未观察事实同时形成提醒与结果标签；完整回执含上下文、结果和日志，再由 Session 统一预算落盘。
+        const [receipt, label] = result.unobservedFailure
+          ? [
+              "Some asynchronous work failed or was interrupted without the script observing its outcome.",
+              "Script result:\n",
+            ]
+          : ["", ""]
         return {
           title: CODE_MODE_TOOL,
           metadata: {
             environmentID: lease.id,
             toolCalls: calls,
+            // Session 在耗时与图片提示齐备后统一预算；wrapper 只清理可见文本。
+            truncated: false,
             // loaded/skills 只报告父回执实际包含的规则，后续截断仍由共享宿主清除声明。
             loaded: [...context.values()].filter((item) => item.kind === "instruction").map((item) => item.key),
             skills: [...context.values()].filter((item) => item.kind === "skill").map((item) => item.key),
           },
-          // 恢复文件必须包含环境、上下文、结果和已捕获日志，不能先在这里裁短正文。
-          // 统一 wrapper 负责可见文本清理、截断和落盘；这里交付完整回执，不改变业务值。
-          output: [
-            `Environment: ${lease.id}`,
-            receipt,
-            contextText(),
-            withLogs(receipt ? `Script result:\n${output}` : output),
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
+          output: formatOutput(receipt, contextText(), withLogs(`${label}${output}`)),
           // 附件不经过正文截断，脚本筛选返回值也不会撤掉已收取的媒体。
           ...(attachments.length > 0 ? { attachments } : {}),
         } satisfies Tool.ExecuteResult<Metadata>

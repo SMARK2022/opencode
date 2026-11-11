@@ -45,13 +45,17 @@ export class SandboxSet {
 }
 
 export class SandboxURLSearchParams {
-  constructor(readonly params: URLSearchParams) {}
+  // 绑定视图保留原 URL 的归属，使反序遍历的快照仍能重建同一内部槽。
+  constructor(
+    readonly params: URLSearchParams,
+    readonly owner?: URL,
+  ) {}
 }
 
 export class SandboxURL {
   readonly searchParams: SandboxURLSearchParams
   constructor(readonly url: URL) {
-    this.searchParams = new SandboxURLSearchParams(url.searchParams)
+    this.searchParams = new SandboxURLSearchParams(url.searchParams, url)
   }
 }
 

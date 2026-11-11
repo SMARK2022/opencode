@@ -1,6 +1,5 @@
 import { parse } from "acorn"
-// Scope 让全部 Promise 共用一次执行寿命，不能把清理责任放回单个观察者。
-import { Cause, Effect, Exit, Fiber, Scope } from "effect"
+import { Cause, Effect, Exit, Fiber, Scope } from "effect" // 根 Scope 统一拥有 Promise 生产者；许可移交真实工具入口。
 import { DiagnosticCategory, ModuleKind, ScriptTarget, flattenDiagnosticMessageText, transpileModule } from "typescript"
 import {
   copyIn,
@@ -26,8 +25,7 @@ import {
   type AstNode,
   asNode,
   type Binding,
-  // 词法根与函数共享解释器模型，不引入宿主 Session 或权限状态。
-  Environment,
+  Environment, // 只复用词法根，当前执行能力仍由解释器重新绑定。
   CodeModeFunction,
   CoercionFunction,
   ComputedValue,
@@ -70,8 +68,7 @@ import {
   numberStatics,
 } from "../stdlib/number.js"
 import { invokeObjectMethod } from "../stdlib/object.js"
-// 并发槽位由统一宿主调用边界持有，解释器只负责 Promise 的语义与寿命。
-import { promiseStatics } from "../stdlib/promise.js"
+import { promiseStatics } from "../stdlib/promise.js" // 组合器只观察结果；八槽许可由工具入口统一持有。
 import {
   escapeRegexHint,
   invokeRegExpMethod,
@@ -109,8 +106,7 @@ import {
   isSandboxValue,
   SandboxDate,
   SandboxMap,
-  // 副本与字符串转换共用值的原文来源，不在解释器另建字典。
-  rawText,
+  rawText, // 快照同时保留原文元数据，避免预跑改变参数文本。
   withRawText,
   SandboxPromise,
   SandboxRegExp,
@@ -119,7 +115,11 @@ import {
   SandboxURLSearchParams,
 } from "../values.js"
 
+// 仅缓存纯语法树，不携带环境或能力；八项同时容纳用户源码与 fetch 的常量工厂。
+const programs = new Map<string, ProgramNode>()
 const parseProgram = (code: string): ProgramNode => {
+  const cached = programs.get(code)
+  if (cached) return cached
   // 保存真实包装长度，解析诊断才能区分用户源码与解释器添加的内容。
   const prefix = "async function __codemode__() {\n"
   const transpiled = transpileModule(`${prefix}${code}\n}`, {
@@ -163,6 +163,10 @@ const parseProgram = (code: string): ProgramNode => {
     throw new InterpreterRuntimeError("Failed to parse script as a Program node.")
   }
 
+  // 解析失败不入缓存；淘汰只影响重复计算，不影响闭包持有的只读节点。
+  const oldest = programs.keys().next().value
+  if (programs.size >= 8 && oldest !== undefined) programs.delete(oldest)
+  programs.set(code, parsed as ProgramNode)
   return parsed as ProgramNode
 }
 
@@ -237,7 +241,7 @@ const normalizeError = (error: unknown): Diagnostic => {
   }
 }
 
-// catch 与 allSettled 共享普通失败归一化；宿主中断不转换为脚本数据。
+// Shared by catch bindings, Promise.allSettled rejection reasons, and Promise.race losers.
 const caughtErrorValue = (thrown: unknown): unknown => {
   if (thrown instanceof ProgramThrow) return thrown.value
   if (thrown instanceof InterpreterRuntimeError) return createErrorValue(thrown.errorName, thrown.message)
@@ -264,12 +268,25 @@ const snapshotEnvironment = (source: Environment): Environment => {
   // 同一个对象在闭包与容器中出现时必须指向同一个副本，才能保留别名写入关系。
   const memo = new Map<object, unknown>()
   const copy = (value: unknown): unknown => {
-    // 宿主函数与 URL 内部槽无法按自身字段复制，直接结束探针，不补恢复路径。
-    // 沙箱函数本身是含 AST 和作用域的对象；这里拒绝的是不可重建的原生函数。
-    if (typeof value === "function" || value instanceof URL || value instanceof URLSearchParams)
+    // 沙箱函数可复制 AST 与作用域；原生函数无法重建词法状态，必须结束探针。
+    if (typeof value === "function")
       throw new InterpreterRuntimeError("Environment cannot be copied for preview.")
     if (value === null || typeof value !== "object") return value
     if (memo.has(value)) return memo.get(value)
+    // 参数视图可能先于 URL 出现；先复制 owner，所有别名才会复用同一参数槽。
+    if (value instanceof SandboxURLSearchParams && value.owner) copy(value.owner)
+    if (value instanceof URL) {
+      const url = new URL(value.href)
+      memo.set(value, url)
+      memo.set(value.searchParams, url.searchParams)
+      return url
+    }
+    // 独立参数没有 owner，沿同一身份 memo 复制，不与任何 URL 隐式关联。
+    if (value instanceof URLSearchParams) {
+      const params = new URLSearchParams(value)
+      memo.set(value, params)
+      return params
+    }
     // 保留解释器值的原型身份；新容器先入 memo，递归闭包才能指回同一副本。
     // 原型复制不会创建 RegExp 内部槽；先重建匹配器，再保留自身的 lastIndex。
     const target: object =
@@ -291,7 +308,6 @@ const snapshotEnvironment = (source: Environment): Environment => {
     } else {
       // 描述符保留非枚举错误品牌与原文别名，Object.entries 会丢掉这些解释器语义。
       for (const key of Reflect.ownKeys(value)) {
-        // 自身键与描述符一一对应；读取描述符不会像直接取属性那样调用 getter。
         const descriptor = Object.getOwnPropertyDescriptor(value, key)!
         // 读取 getter 可能触发副作用，复制探针不能执行访问器来取得字段值。
         if (!("value" in descriptor)) throw new InterpreterRuntimeError("Environment cannot be copied for preview.")
@@ -302,7 +318,6 @@ const snapshotEnvironment = (source: Environment): Environment => {
     // 原文存在 WeakMap，统一复制这个元数据，避免 String/模板改变待审工具参数。
     return withRawText(target, rawText(value))
   }
-  // 从整个环境根开始复制，根变量、闭包 Binding 和容器才能共用同一张身份映射。
   return copy(source) as Environment
 }
 
@@ -354,6 +369,18 @@ const typeofValue = (value: unknown): string => {
     return value.name === "Math" || value.name === "JSON" || value.name === "console" ? "object" : "function"
   }
   return typeof value
+}
+
+// 形状诊断只给出类型或有界键名，不读取业务值，也不暴露运行时引用的内部属性。
+const describeValueShape = (value: unknown): string => {
+  if (value === null) return "null"
+  if (Array.isArray(value)) return "Array"
+  if (!isRecord(value) || isRuntimeReference(value)) return typeofValue(value)
+  return `Object; first keys: ${JSON.stringify(
+    Object.keys(value)
+      .slice(0, 8)
+      .map((key) => (key.length > 64 ? `${key.slice(0, 64)}…` : key)),
+  )}`
 }
 
 // `x instanceof C` against the constructors CodeMode knows. Like `typeof`, it observes any
@@ -688,28 +715,14 @@ class Interpreter<R> {
   ) {}
 
   static make<R>(
-    invokeTool: Execution<R>["invokeTool"],
-    toolKeys: Execution<R>["toolKeys"],
-    log: Execution<R>["log"],
-    scope: Scope.Scope,
+    execution: Execution<R>,
     hasFetch: boolean,
-    promises: Array<SandboxPromise>,
     environment = new Environment(),
-    sleep: (milliseconds: number) => Effect.Effect<void> = Effect.sleep,
   ) {
-    // 闭包继续引用同一组根 Map；刷新内建名称，不能把上一轮的 fetch 可见性带过来。
     const roots = Environment.scopes(environment)
     const globalScope = roots.globals
     // 必须原地刷新：旧闭包已捕获这个 Map，换一个 Map 会让它继续看到旧能力。
     globalScope.clear()
-    const execution: Execution<R> = {
-      invokeTool,
-      toolKeys,
-      log,
-      scope,
-      promises,
-      sleep,
-    }
     globalScope.set("tools", { mutable: false, value: new ToolReference([]) })
     // 全局search与既有内部入口共用当前目录，调用处分辨同步发现与异步操作。
     globalScope.set("search", { mutable: false, value: new ToolReference(["$codemode", "search"]) })
@@ -750,14 +763,11 @@ class Interpreter<R> {
     if (hasFetch) {
       globalScope.set("fetch", { mutable: false, value: new ToolReference(["$codemode", "fetch"]) })
       // 工厂只解析受信常量，用户脚本文本不能改变响应方法的定义。
-      const factory = asNode(
-        parseProgram(`function response(data) {
+      const factory = asNode(parseProgram(`function response(data) {
       return { url: data.url, status: data.status, statusText: data.statusText, ok: data.ok, redirected: data.redirected,
         headers: { get: name => data.headers[name.toLowerCase()] ?? null, has: name => Object.keys(data.headers).includes(name.toLowerCase()), entries: () => Object.entries(data.headers) },
         text: async () => data.text, json: async () => JSON.parse(data.text), bytes: async () => data.bytes };
-      }`).body[0],
-        "fetch response",
-      )
+      }`).body[0], "fetch response")
       // 响应闭包与普通函数共用全局能力，异步读方法不创建第二套宿主状态。
       execution.fetchResponse = new CodeModeFunction(
         getArray(factory, "params").map((param) => asNode(param, "params")),
@@ -839,7 +849,8 @@ class Interpreter<R> {
 
   // await Fiber 只读取生产者的 Exit；观察者取消后，生产者仍由根 Scope 持有。
   // 失败也先作为 Exit 返回，race 才能选中最先发生的拒绝。
-  private observePromise(promise: SandboxPromise): Effect.Effect<Exit.Exit<unknown, unknown>> {
+  private observePromise(promise: unknown): Effect.Effect<Exit.Exit<unknown, unknown>> {
+    if (!(promise instanceof SandboxPromise)) return Effect.succeed(Exit.succeed(promise))
     return Effect.map(
       "fiber" in promise.state ? Fiber.await(promise.state.fiber) : Effect.succeed(promise.state.exit),
       (exit) => {
@@ -853,7 +864,7 @@ class Interpreter<R> {
   // `await promise`: succeed with the fulfilled value or re-raise the failure so try/catch
   // observes it exactly like a synchronous throw at the await site.
   private settlePromise(promise: unknown): Effect.Effect<unknown, unknown> {
-    return promise instanceof SandboxPromise ? Effect.flatten(this.observePromise(promise)) : Effect.succeed(promise)
+    return Effect.flatten(this.observePromise(promise))
   }
 
   private evaluateStatement(node: AstNode): Effect.Effect<StatementResult, unknown, R> {
@@ -2007,7 +2018,7 @@ class Interpreter<R> {
 
       if (callable instanceof ToolReference) {
         if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)
-        // 发现仍经共享执行器的校验、预算和观察 hooks；读取内存目录直接交付同步值。
+        // 发现只读取内存目录，直接交付值；仍经过原工具校验、预算和观察hooks。
         if (callable.path.length === 2 && callable.path[0] === "$codemode" && callable.path[1] === "search")
           return yield* self.execution.invokeTool(callable.path, args)
         // An un-awaited tool call is a first-class promise value; the call itself starts now.
@@ -2042,18 +2053,10 @@ class Interpreter<R> {
         return createErrorValue(callable.name, args[0] === undefined ? "" : coerceToString(args[0]))
       }
       // 保留首次求值的 receiver；诊断只显示有限键名，不读取值或重复执行表达式。
-      const receiver = isRecord(reference) && "target" in reference ? reference : undefined
-      const value = receiver ? receiver.target : callable
-      const type = value === null ? "null" : Array.isArray(value) ? "Array" : typeofValue(value)
-      const keys =
-        isRecord(value) && !Array.isArray(value) && !isRuntimeReference(value)
-          ? Object.keys(value)
-              .slice(0, 8)
-              .map((key) => (key.length > 64 ? `${key.slice(0, 64)}…` : key))
-          : undefined
-      const shape = keys ? `Object; first keys: ${JSON.stringify(keys)}` : type
+      const [value, label] =
+        isRecord(reference) && "target" in reference ? [reference.target, "receiver"] : [callable, "value"]
       throw new InterpreterRuntimeError(
-        `Value is not callable in CodeMode. Actual ${receiver ? "receiver" : "value"}: ${shape}.`,
+        `Value is not callable in CodeMode. Actual ${label}: ${describeValueShape(value)}.`,
         callee,
       )
     })
@@ -2237,8 +2240,7 @@ class Interpreter<R> {
     node: AstNode,
   ): Effect.Effect<unknown, unknown, R> {
     const self = this
-    const name = ref.name
-    if (name === "resolve") {
+    if (ref.name === "resolve") {
       // Promise.resolve of a promise is that promise (JS flattens); anything else is a
       // promise already fulfilled with the value.
       const value = args[0]
@@ -2248,10 +2250,11 @@ class Interpreter<R> {
       )
     }
     // 即时拒绝没有 Fiber，也必须登记；否则无人 await 的 reject 会从最终回执中消失。
-    if (name === "reject") {
+    if (ref.name === "reject") {
       return Effect.sync(() => this.trackPromise({ exit: Exit.fail(new ProgramThrow(args[0])) }))
     }
 
+    const name = ref.name
     return this.createPromise(
       Effect.suspend(() => {
         const items = Array.isArray(args[0]) ? args[0] : spreadItems(args[0])
@@ -2262,47 +2265,31 @@ class Interpreter<R> {
           )
         }
 
-        switch (name) {
-          case "all": {
-            // 同时观察才能及时暴露后项失败；结果仍按输入保序，取消观察不取消成员。
-            const settles = items.map((item) => this.settlePromise(item))
-            // 无界的是结果观察；实际宿主调用仍在唯一的八许可入口排队。
-            return Effect.all(settles, { concurrency: "unbounded" })
-          }
-          case "allSettled": {
-            // 并发观察使后项控制中断不被前项挂起遮蔽；结果仍按输入顺序收集。
-            return Effect.forEach(
-              items,
-              (item) =>
-                Effect.gen(function* () {
-                  const exit = yield* item instanceof SandboxPromise
-                    ? self.observePromise(item)
-                    : Effect.succeed(Exit.succeed(item))
-                  if (Exit.isSuccess(exit))
-                    return Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value })
-                  // 只有普通失败成为 rejected 数据；宿主终止必须穿透组合器并关闭根作用域。
-                  if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
-                  return Object.assign(Object.create(null) as SafeObject, {
-                    status: "rejected",
-                    reason: caughtErrorValue(Cause.squash(exit.cause)),
-                  })
-                }),
-              { concurrency: "unbounded" },
-            )
-          }
-          case "race": {
-            // 空 race 没有结算来源，继续归根执行的超时与取消管理。
-            if (items.length === 0) return Effect.never
-            // 竞争的是观察，不是生产者寿命；败方仍能被其它 race 或 await 消费。
-            return Effect.flatten(
-              Effect.raceAll(
-                items.map((item) =>
-                  item instanceof SandboxPromise ? this.observePromise(item) : Effect.succeed(Exit.succeed(item)),
-                ),
-              ),
-            )
-          }
+        if (name === "race") {
+          // 空 race 没有结算来源，继续归根执行的超时与取消管理。
+          if (items.length === 0) return Effect.never
+          // 竞争的是观察，不是生产者寿命；败方仍能被其它 race 或 await 消费。
+          return Effect.flatten(Effect.raceAll(items.map((item) => this.observePromise(item))))
         }
+        // 两种聚合共用并发观察及输入顺序；实际宿主调用仍在唯一的八许可入口排队。
+        return Effect.forEach(
+          items,
+          (item) => {
+            if (name === "all") return this.settlePromise(item)
+            return Effect.gen(function* () {
+              const exit = yield* self.observePromise(item)
+              if (Exit.isSuccess(exit))
+                return Object.assign(Object.create(null) as SafeObject, { status: "fulfilled", value: exit.value })
+              // 只有普通失败成为 rejected 数据；宿主终止必须穿透组合器并关闭根作用域。
+              if (Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause)
+              return Object.assign(Object.create(null) as SafeObject, {
+                status: "rejected",
+                reason: caughtErrorValue(Cause.squash(exit.cause)),
+              })
+            })
+          },
+          { concurrency: "unbounded" },
+        )
       }),
     )
   }
@@ -2312,15 +2299,13 @@ class Interpreter<R> {
       // 仅复制作用域栈，闭包 Binding 保持同一引用；局部隔离不能变成闭包快照。
       const self = new Interpreter(this.execution, [...fn.capturedScopes, new Map<string, Binding>()])
       const run = Effect.gen(function* () {
-        // 所有参数先占位；默认值引用后面的同名参数时应触发 TDZ，不能误读外层变量。
+        // Seed every parameter name into the scope as a TDZ slot first, so a default that
+        // references another parameter resolves to that (uninitialized) param rather than
+        // silently falling through to an outer binding of the same name - matching JS.
         const paramScope = self.currentScope()
         for (const parameter of fn.parameters) {
           for (const name of collectPatternNames(parameter)) {
-            paramScope.set(name, {
-              mutable: true,
-              value: undefined,
-              initialized: false,
-            })
+            paramScope.set(name, { mutable: true, value: undefined, initialized: false })
           }
         }
         for (const [index, parameter] of fn.parameters.entries()) {
@@ -3470,7 +3455,6 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
   const logs: Array<string> = []
   let logBytes = 0
   let droppedLogs = 0
-  // 所有帧共用留存预算，防止并发回调各自获得一份额度。
   // 首次省略后只计数，即使后面的行更短也不恢复留存，保证保留内容是日志前缀。
   const log = (message: string) => {
     // 中文等多字节字符按 UTF-8 计费，换行也占字节；字符串 length 不是正文大小。
@@ -3508,35 +3492,40 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     const program = parseProgram(options.code)
     const promises: Array<SandboxPromise> = []
     let unobservedFailure = false
-    // 作用域在成功、失败和中断时都先收尾，再把结果交给宿主继续执行。
     // 正常 return 也关闭仍在运行的生产者；已完成的宿主副作用保持原样。
     const value = yield* Effect.scopedWith((scope) =>
       Interpreter.make(
-        tools.invoke, tools.keys, log, scope, options.fetch !== undefined, promises, environment, options.sleep,
+        {
+          invokeTool: tools.invoke,
+          toolKeys: tools.keys,
+          log,
+          scope,
+          promises,
+          sleep: options.sleep ?? Effect.sleep,
+        },
+        options.fetch !== undefined,
+        environment,
       ).run(program),
     ).pipe(
       Effect.ensuring(
         Effect.forEach(promises, (promise) =>
           Effect.gen(function* () {
-            // 根 Scope 已等待全部生产者；此处只读取终态，不能另建任务或重试宿主调用。
-            const exit = "fiber" in promise.state ? yield* Fiber.await(promise.state.fiber) : promise.state.exit
-            // 先等清理再判断，才能计入根关闭时发生的失败或中断。
-            if (!promise.observed && Exit.isFailure(exit)) unobservedFailure = true
-            // 即时 Exit 没有旧宿主上下文；只有在途状态需要转换成可跨格保存的结果。
-            if (!("fiber" in promise.state)) return
-            promise.state = {
-              exit: Exit.isSuccess(exit)
-                ? exit
-                : Exit.fail(
-                    new ProgramThrow(
-                      // 当前单元内中断仍直达宿主；只有已结束单元的 Promise 才变成可捕获的失败。
-                      // 普通拒绝保留沙箱抛值，但丢弃 ToolError 的私有 cause 与旧 Fiber 上下文。
-                      Cause.hasInterruptsOnly(exit.cause)
-                        ? createErrorValue("Error", "Promise interrupted when its originating Execute ended.")
-                        : caughtErrorValue(Cause.squash(exit.cause)),
+            // 根 Scope 收尾后，只将 Fiber 归档为不含私有上下文的可捕获终态；诊断读取同一 Exit。
+            if ("fiber" in promise.state) {
+              const exit = yield* Fiber.await(promise.state.fiber)
+              promise.state = {
+                exit: Exit.isSuccess(exit)
+                  ? exit
+                  : Exit.fail(
+                      new ProgramThrow(
+                        Cause.hasInterruptsOnly(exit.cause)
+                          ? createErrorValue("Error", "Promise interrupted when its originating Execute ended.")
+                          : caughtErrorValue(Cause.squash(exit.cause)),
+                      ),
                     ),
-                  ),
+              }
             }
+            if (!promise.observed && Exit.isFailure(promise.state.exit)) unobservedFailure = true
           }),
         ),
       ),
@@ -3552,7 +3541,6 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     } satisfies Result
   }).pipe((program) => {
     const timeoutMs = limits.timeoutMs
-    // 无显式期限的库调用仍走同一个根 Scope，只有外层时间竞争可以省略。
     if (timeoutMs === undefined) return program
     return Effect.raceFirst(
       program,

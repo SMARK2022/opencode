@@ -34,6 +34,8 @@ import type { EventV2 } from "@opencode-ai/core/event"
 import { Usage, LLMError, LLMEvent, ToolResultValue } from "@opencode-ai/llm"
 import { Token } from "@opencode-ai/core/util/token"
 import type { Tool } from "@/tool/tool"
+import { Truncate } from "@/tool/truncate" // 终态准备组成完整回执，再交原截断与提示 owner。
+import { formatExecutionNotice } from "@/util/output-notice"
 
 // #149：取消时给 bash 等工具完成截断/complete 的宽限
 // 500ms升级窗口后给并行工具2秒结算宽限；输出消费及finalizer仍由原owner收尾。
@@ -221,6 +223,7 @@ const layer = Layer.effect(
     const scope = yield* Scope.Scope
     const status = yield* SessionStatus.Service
     const image = yield* Image.Service
+    const truncate = yield* Truncate.Service // 完整回执只使用现有截断服务，不另建预算算法。
 
     const events = yield* EventV2Bridge.Service
     const database = yield* Database.Service
@@ -394,7 +397,8 @@ const layer = Layer.effect(
         metadata: Record<string, unknown>
         output: string
         attachments?: SessionV1.FilePart[]
-      }, options?: { readonly tokenBudget?: number }) {
+      }, tool?: string) {
+        // 真实工具身份同时选择 Read 图片预算与 Execute 最终预算。
         const normalized = yield* Effect.forEach(output.attachments ?? [], (candidate) => {
           const proof = Image.consumeNormalized(candidate)
           // #534：ReadTool 的匹配 proof 证明同一 MIME/URL 已 decode；缺失或被插件改写时必须回到唯一 Image owner。
@@ -403,11 +407,11 @@ const layer = Layer.effect(
           if (proof.valid) return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
           if (!proof.attachment.mime.startsWith("image/"))
             return Effect.succeed(Exit.succeed<SessionV1.FilePart>(proof.attachment))
-          return image.normalize(proof.attachment, options).pipe(Effect.exit)
+          return image.normalize(proof.attachment, tool === "read" ? { tokenBudget: 1600 } : undefined).pipe(Effect.exit)
         })
         const omitted = normalized.filter(Exit.isFailure).length
         const attachments = normalized.filter(Exit.isSuccess).map((item) => item.value)
-        return {
+        const result = {
           ...output,
           // #534：provider 不支持的坏图片降级为文本事实；不保留原 bytes，也不把一次附件失败升级为整个 tool-error。
           // omission 计数来自同一 normalized 数组，避免事件分支和数据库分支各自过滤后计数漂移。
@@ -417,6 +421,19 @@ const layer = Layer.effect(
               ? output.output
               : `${output.output}\n\n[${omitted} image${omitted === 1 ? "" : "s"} omitted: could not be decoded or resized within the image size limit.]`,
           attachments: attachments.length ? attachments : undefined,
+        }
+        if (tool !== "execute") return result
+        // 最终预算覆盖耗时、取消及图片提示；恢复文件保存裁剪前完整回执。
+        const truncated = yield* truncate.output(result.output, { maxChars: 36_000 })
+        return {
+          ...result,
+          output: truncated.content,
+          metadata: {
+            ...result.metadata,
+            truncated: truncated.truncated,
+            // 部分可见正文不能证明完整规则已交付，下一轮允许按原加载机制补齐。
+            ...(truncated.truncated && { outputPath: truncated.outputPath, loaded: [], skills: [] }),
+          },
         }
       })
 
@@ -438,7 +455,7 @@ const layer = Layer.effect(
           return
         }
         // direct completion也在既有permit内准备；普通事件复用已准备snapshot及Read预算。
-        const result = prepared ? output : yield* prepareToolOutput(output, match.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+        const result = prepared ? output : yield* prepareToolOutput(output, match.part.tool)
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -480,17 +497,41 @@ const layer = Layer.effect(
         // [local-smark] abort 时写入 server-owned elapsedMs marker，使下一轮模型
         // 回放能追加 user_abort + elapsed_ms Notice；非 abort 保持既有 metadata 行为
         const failStart = match.part.state.time?.start ?? Date.now()
+        const failure = toolAborted ? TOOL_ABORTED_ERROR : reason
+        const elapsedMs = Date.now() - failStart
+        const metadata = toolAborted
+          ? interruptedToolMetadata(match.part.state.metadata, elapsedMs)
+          : match.part.state.metadata
+        // 错误与完整进度先合成一份终态回执；新记录回放不再追加第二份原因或取消提示。
+        const receipt = match.part.tool === "execute"
+          ? yield* prepareToolOutput({
+              title: "execute",
+              metadata: { ...metadata, finalizedError: true },
+              output: [
+                failure,
+                typeof metadata?.output === "string" ? metadata.output : "",
+                toolAborted
+                  ? formatExecutionNotice({
+                      source: "tool",
+                      severity: "warning",
+                      reason: "user_abort",
+                      elapsed_ms: elapsedMs,
+                    })
+                  : "",
+              ].filter(Boolean).join("\n\n"),
+            }, "execute")
+          : undefined
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "error",
             input: match.part.state.input,
             // #216：中止路径统一用 TOOL_ABORTED_ERROR 文案——非中止路径保留原始错误原因
-            error: toolAborted ? TOOL_ABORTED_ERROR : reason,
+            error: failure,
             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
             // #209：denied/failed auto-review 终态化为 error——UI 仍需 review 结果行和 reviewer 子会话链接
             // 中止时只更新审查终态，其他运行进度和普通错误metadata均保持完整。
-            metadata: toolAborted ? interruptedToolMetadata(match.part.state.metadata, Date.now() - failStart) : match.part.state.metadata,
+            metadata: receipt ? { ...receipt.metadata, output: receipt.output } : metadata,
             time: { start: failStart, end: Date.now() },
           },
         })
@@ -793,7 +834,7 @@ const layer = Layer.effect(
               return
             }
             const rawOutput = toolResultOutput(value)
-            const output = yield* prepareToolOutput(rawOutput, toolCall?.part.tool === "read" ? { tokenBudget: 1600 } : undefined)
+            const output = yield* prepareToolOutput(rawOutput, value.name)
             yield* completeToolCall(value.id, output, true)
             return
           }
@@ -1136,6 +1177,8 @@ const layer = Layer.effect(
         // 网络断流只结束消费；这个 controller 只属于用户取消，不能误杀在途工具。
         const toolAbort = new AbortController()
         const executions: Promise<Exit.Exit<void, unknown>>[] = []
+        // 取消只等待 Execute 的真实清理；普通工具仍沿通用有界宽限退出。
+        const executeJobs: Promise<unknown>[] = []
         const tools = Object.fromEntries(Object.entries(streamInput.tools).map(([name, item]) => {
           const execute = item.execute
           if (!execute) return [name, item]
@@ -1144,6 +1187,7 @@ const layer = Layer.effect(
             // 登记必须先于首个 await；流断开只释放连接，不取消已经开始的工具。
             ctx.hasToolCall = true
             const job = bridge.promise(Effect.gen(function* () {
+              // 实际调用与终态写入归同一 owner；取消仅中断其后的人工询问。
               yield* startToolCall({ type: "tool-call", id: options.toolCallId, name, input: args })
               const exit = yield* Effect.tryPromise({
                 try: () => Promise.resolve(execute(args, { ...options, abortSignal: toolAbort.signal })),
@@ -1156,12 +1200,15 @@ const layer = Layer.effect(
                 return exit
               }
               if (yield* failToolCall(options.toolCallId, Cause.squash(exit.cause))) {
-                yield* askDoomLoopIfTripleFailure(name, isRecord(args) ? args : { value: args })
+                yield* askDoomLoopIfTripleFailure(name, isRecord(args) ? args : { value: args }).pipe(
+                  Effect.interruptible,
+                )
               }
               return exit
-            }))
+            }).pipe(Effect.uninterruptible), { signal: toolAbort.signal })
             // 普通工具失败已作为结果保存；登记/落库失败才使收尾本身失败。
             executions.push(job.then(() => Exit.succeed(undefined), error => Exit.fail(error)))
+            if (name === "execute") executeJobs.push(job)
             return job.then(exit => {
               if (Exit.isSuccess(exit)) return exit.value
               throw Cause.squash(exit.cause)
@@ -1173,6 +1220,7 @@ const layer = Layer.effect(
           yield* Effect.gen(function* () {
             // 每次网络重试只跟踪本 attempt 的工具，已完成 Promise 不能重复等待。
             executions.length = 0
+            executeJobs.length = 0
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             ctx.attemptTextChars = 0
@@ -1262,6 +1310,8 @@ const layer = Layer.effect(
             Effect.onInterrupt(() => Effect.gen(function* () {
               aborted = true
               toolAbort.abort()
+              // Execute 自己收齐 child 清理及完整回执，再由通用 cleanup 收尾其余工具。
+              yield* Effect.promise(() => Promise.allSettled(executeJobs))
               if (!ctx.assistantMessage.error) yield* halt(new DOMException("Aborted", "AbortError"))
             })),
             // 末端分别记录普通错误和收尾 defect，纯中断仍原样传播。
@@ -1314,6 +1364,7 @@ export const node = LayerNode.make({
     SessionSummary.node,
     SessionStatus.node,
     Image.node,
+    Truncate.node, // 终态准备沿同一依赖图使用现有截断 owner。
     EventV2Bridge.node,
     Database.node,
   ],

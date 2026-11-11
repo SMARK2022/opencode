@@ -154,9 +154,8 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init()) } : { ...init }
       // 在 init 时捕获实际合同，后续展示换掉 parameters 不影响真实解析来源。
-      const runtimeParameters = toolInfo.parameters
       // 每次 init 只编译一次解码器，避免每次工具调用重新创建同一个解析闭包。
-      const decode = Schema.decodeUnknownEffect(runtimeParameters)
+      const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
         // #155：streaming metadata 先消毒再转发，避免终端转义序列先落 UI
@@ -207,7 +206,7 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
       // initializer 即使提供同名字段也不能覆盖真实 parser 的来源。
-      return { ...toolInfo, runtimeParameters }
+      return { ...toolInfo, runtimeParameters: toolInfo.parameters }
     })
 }
 

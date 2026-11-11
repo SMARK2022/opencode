@@ -888,10 +888,12 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             })
           }
           if (part.state.status === "error") {
+            // 新 Execute 错误已包含原因、进度及取消提示；旧记录保留原有拼接合同。
+            const finalized = part.tool === "execute" && part.state.metadata?.finalizedError === true
             const interrupted = part.state.metadata?.interrupted === true
             // [local-smark] 只有新记录携带 server 写入的 executionElapsedMs 才追加
             // abort Notice；旧记录无此字段，保持原样不追溯伪造 elapsed
-            const rawElapsed = interrupted ? part.state.metadata?.executionElapsedMs : undefined
+            const rawElapsed = interrupted && !finalized ? part.state.metadata?.executionElapsedMs : undefined
             const abortNotice = typeof rawElapsed === "number" && Number.isFinite(rawElapsed) && rawElapsed >= 0
               ? formatExecutionNotice({ source: "tool", severity: "warning", reason: "user_abort", elapsed_ms: Math.floor(rawElapsed) })
               : undefined
@@ -918,7 +920,8 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               })
             } else {
               // #528：无 partial 时仍走 output-error，不把 abort 伪装成 completed（INV-04）
-              const errorBody = taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId)
+              const errorBody = finalized && executeOutput !== undefined ? executeOutput
+                : taskSessionId ? ensureTaskResumeVisible(part.state.error, taskSessionId)
                 : executeOutput ? `${part.state.error}\n\n${executeOutput}` : part.state.error
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,

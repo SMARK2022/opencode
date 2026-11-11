@@ -80,8 +80,7 @@ import { type AstNode, CoercionFunction, InterpreterRuntimeError } from "../inte
 import { copyIn, type SafeObject } from "../tool-runtime.js"
 import {
   isSandboxValue,
-  // 来源只在内部转换读取，不向工具参数或最终返回值增加可见字段。
-  rawText,
+  rawText, // 字符串转换读取登记原文，不重建业务对象文本。
   SandboxDate,
   SandboxMap,
   SandboxRegExp,

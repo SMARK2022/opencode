@@ -1,5 +1,4 @@
-// 描述符只来自实际编码域；展示 JSON schema 不能授予额外调用形式。
-import { JsonPointer, Schema, SchemaAST } from "effect"
+import { JsonPointer, Schema, SchemaAST } from "effect" // 只静态读取编码结构，不执行 decoder 猜测参数形式。
 import type { Definition, JsonSchema, SchemaType } from "./tool.js"
 
 const isEffectSchema = (schema: SchemaType): schema is Schema.Decoder<unknown> & Schema.Top => Schema.isSchema(schema)
@@ -35,7 +34,7 @@ const intersection = (members: ReadonlyArray<string>): string => {
  */
 const MAX_RENDER_DEPTH = 8
 
-// 各出口用同一份引用定义展开类型，避免目录和搜索对同一个 $ref 给出不同形状。
+// 字段说明由 search 的完整 schema 交付，渲染状态不再区分第二种格式。
 type RenderContext = {
   readonly definitions: Readonly<Record<string, JsonSchema>>
 }
@@ -220,7 +219,6 @@ export const inputTypeScript = <R>(definition: Definition<R>): string =>
     ? toTypeScript(definition.inputContract, false)
     : jsonSchemaToTypeScript(definition.inputContract)
 
-/** 无输出 schema 时保留 unknown，不从样例推断结果。 */
 // 输出按解码后的域展示，例如 NumberFromString 的返回值为 number，而输入仍是 string。
 export const outputTypeScript = <R>(definition: Definition<R>): string =>
   definition.output === undefined
@@ -250,10 +248,7 @@ export type InputForms = { readonly key: string; readonly types: ReadonlyArray<s
 
 // Undefined 保留原 decoder/default 语义，但绝不参与包装或拆包。
 const scalarTypes = (node: SchemaAST.AST): ReadonlyArray<string> | undefined => {
-  if (node._tag === "String") return ["string"]
-  if (node._tag === "Number") return ["number"]
-  if (node._tag === "Boolean") return ["boolean"]
-  if (node._tag === "Null") return ["null"]
+  if (["String", "Number", "Boolean", "Null"].includes(node._tag)) return [node._tag.toLowerCase()]
   if (node._tag === "Undefined") return []
   if (node._tag === "Literal")
     return ["string", "number", "boolean"].includes(typeof node.literal) ? [typeof node.literal] : undefined
@@ -274,14 +269,13 @@ export const inputForms = (schema: Schema.Top): InputForms | undefined => {
   if (ast.propertySignatures.some((property) => typeof property.name !== "string")) return undefined
   const required = ast.propertySignatures.filter((property) => !SchemaAST.isOptional(property.type))
   // 唯一必填项可与可选配置并存；全可选对象只有一个声明字段时才无歧义。
-  const property =
-    required.length === 1
-      ? required[0]
-      : required.length === 0 && ast.propertySignatures.length === 1
-        ? ast.propertySignatures[0]
-        : undefined
-  const types = property ? scalarTypes(property.type) : undefined
-  if (!property || typeof property.name !== "string" || !types?.length) return undefined
+  const candidates = required.length ? required : ast.propertySignatures
+  if (candidates.length !== 1) return undefined
+  const property = candidates[0]
+  const types = scalarTypes(property.type)
+  if (typeof property.name !== "string" || !types?.length) return undefined
+  // 简写只生成普通字段，避免在已校验参数之外重新引入危险键。
+  if (["constructor", "__proto__", "prototype"].includes(property.name)) return undefined
   // 保留字段自己的编码类型；例如数字字符串按 string 匹配，不先执行转换猜测参数。
   return { key: property.name, types }
 }

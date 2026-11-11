@@ -1,5 +1,4 @@
-// 参数形式、来源快照与宿主限流各守自己的边界，不向解释器引入宿主策略。
-import { TOOL_CALL_CONCURRENCY } from "./stdlib/promise.js"
+import { TOOL_CALL_CONCURRENCY } from "./stdlib/promise.js" // 所有宿主工具与 fetch 共用同一许可池。
 import { Cause, Effect, Schema, Semaphore } from "effect"
 import DESCRIPTION from "./code-mode.txt" with { type: "text" }
 import { ToolError, toolError } from "./tool-error.js"
@@ -9,13 +8,11 @@ import {
   identifierSegment,
   inputProperties,
   inputTypeScript,
-  normalizeInput,
+  normalizeInput, // 简写只读合同，原文只随副本传递；两者不取得校验权。
   outputTypeScript,
 } from "./tool-schema.js"
 import { isDefinition as isToolDefinition, type Definition } from "./tool.js"
 import {
-  // 内部复制复用同一值品牌集合，避免新增支持类型时遗漏另一份枚举。
-  isSandboxValue,
   rawText,
   withRawText,
   SandboxDate,
@@ -235,8 +232,19 @@ const copyBounded = (
   }
 
   if (preserveSandboxValues) {
-    // 内部检查点保留已有沙箱对象身份；成员在修改处校验，真正的跨界仍走下方序列化。
-    if (isSandboxValue(value)) return value
+    // Intra-sandbox checkpoints keep sandbox value instances alive as leaves; their contents
+    // are never walked here (Map/Set members are validated where mutation happens, and the
+    // real boundary still serializes them below).
+    if (
+      value instanceof SandboxDate ||
+      value instanceof SandboxRegExp ||
+      value instanceof SandboxMap ||
+      value instanceof SandboxSet ||
+      value instanceof SandboxURL ||
+      value instanceof SandboxURLSearchParams
+    ) {
+      return value
+    }
     // Host instances cannot normally reach an intra-sandbox checkpoint (tool results cross
     // the boundary first), but wrap them defensively rather than degrading to JSON forms.
     if (value instanceof Date) return new SandboxDate(value.getTime())
@@ -430,10 +438,9 @@ const rank = (entries: ReadonlyArray<SearchEntry>, query: string): Array<SearchE
 const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => ({
   _tag: "CodeModeTool",
   description: "Search available tools",
-  inputContract: SearchInput,
+  inputContract: SearchInput, // 搜索展示与解码共用同一合同，避免两个入口分叉。
   input: SearchInput,
   output: SearchOutput,
-  // 搜索只读取冻结的当前索引，不调用真实工具，也不占宿主并发槽位。
   run: (input) =>
     Effect.sync(() => {
       const request = input as typeof SearchInput.Type
@@ -493,6 +500,7 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
         items.push({
           ...description,
           path: toolExpression(description.path),
+          description: detail ? description.description : summary(description.description),
           ...(detail ? { inputSchema: describeSchema(inputContract, "input") } : {}),
           // 未声明输出时省略字段；声明存在但发射失败时才返回 null，两种状态不能合并。
           ...(!detail || outputContract === undefined ? {} : { outputSchema: describeSchema(outputContract, "output") }),
@@ -509,16 +517,19 @@ const makeSearchTool = (searchIndex: ReadonlyArray<SearchEntry>): Definition => 
 // search只查询当前内存目录，签名和实际返回均为同步对象；真实工具仍返回Promise。
 const searchSignature = `search(input: ${inputTypeScript(makeSearchTool([]))}): ${outputTypeScript(makeSearchTool([]))}`
 
+// 简略搜索和内联目录共享首行摘要；详情仍保留完整工具手册。
+const summary = (text: string) => {
+  const line = text.split("\n", 1)[0]!.trim()
+  return line.length > 120 ? line.slice(0, 117) + "..." : line
+}
+
 const catalogLine = (tool: ToolDescription) => {
-  // 目录按用途与签名计费；search 保留完整用途、同源签名及可发射的输入/输出 Schema。
-  const line = tool.description.split("\n", 1)[0]!.trim()
-  const description = line.length > 120 ? line.slice(0, 117) + "..." : line
+  const description = summary(tool.description)
   return description === "" ? `  - ${tool.signature}` : `  - ${tool.signature} // ${description}`
 }
 
 const toSearchEntry = <R>(path: string, definition: Definition<R>, description: ToolDescription): SearchEntry => ({
   description,
-  // 搜索直接保留真实合同，不从紧凑签名反推默认值和字段限制。
   inputContract: definition.inputContract,
   outputContract: definition.output,
   pathWords: tokenize(path),
@@ -553,13 +564,11 @@ export const prepare = <R>(
     throw new RangeError("discovery.catalogBudget must be a non-negative safe integer")
   }
   const visible = visibleDefinitions(tools)
-  const index = visible.map(({ path, definition, description }) => toSearchEntry(path, definition, description))
-  const described = index.map((entry) => entry.description)
+  const described = visible.map(({ description }) => description)
 
   const namespaces = new Map<string, Array<ToolDescription>>()
   // namespace 标题始终存在；零预算也能说明未展示工具数量。
-  for (const entry of index) {
-    const tool = entry.description
+  for (const tool of described) {
     const [namespace = tool.path] = tool.path.split(".")
     const group = namespaces.get(namespace) ?? []
     group.push(tool)
@@ -586,7 +595,6 @@ export const prepare = <R>(
     picked.add(tool)
     used += cost
   }
-  // 选择集合只控制提示展示；完整 catalog 与搜索索引不随预算删除工具。
   const totalShown = picked.size
   const complete = totalShown === described.length
 
@@ -618,7 +626,7 @@ export const prepare = <R>(
     catalog: described,
     instructions: lines.join("\n"),
     // 返回未裁剪索引，目录放不下的工具仍可被同一 search 精确发现。
-    searchIndex: index,
+    searchIndex: visible.map(({ path, definition, description }) => toSearchEntry(path, definition, description)),
   }
 }
 
@@ -774,17 +782,9 @@ export const make = <R>(
             throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`)
           // 零参沿上游按{}进入原decoder，必填字段仍在执行前拒绝；显式undefined不替换。
           describedInput = yield* Effect.try({
-            // 新构造的键仍须过同一数据边界，禁止危险字段绕过入口检查。
+            // 输入已隔离；简写只添加静态验证过的安全键，不再遍历整棵参数图。
             try: () =>
-              decodeToolInput(
-                tool,
-                copyOut(
-                  copyIn(
-                    normalizeInput(tool.inputForms, externalArgs.length === 0 ? {} : externalArgs[0]),
-                    `Arguments for tool '${name}'`,
-                  ),
-                ),
-              ),
+              decodeToolInput(tool, normalizeInput(tool.inputForms, externalArgs.length === 0 ? {} : externalArgs[0])),
             catch: (cause) =>
               new ToolRuntimeError("InvalidToolInput", `Invalid input for tool '${name}': ${String(cause)}`),
           })

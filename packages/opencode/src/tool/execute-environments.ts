@@ -1,5 +1,5 @@
 import { CodeMode } from "@opencode-ai/codemode"
-import { Context, Deferred, Effect, Layer, Schema, Semaphore } from "effect"
+import { Context, Effect, Fiber, Layer, Schema, Semaphore } from "effect"
 import { Identifier } from "@/id/id"
 import { InstanceState } from "@/effect/instance-state"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -26,12 +26,8 @@ type Entry = Lease & {
   owner: Owner
   // 每个环境独占一个许可，互相独立的 Notebook 不共用执行锁。
   gate: Semaphore.Semaphore
-  // 退休信号终止本环境全部租约；取消单个排队者不触发它。
-  cancel: Deferred.Deferred<void>
-  // drain 表示本轮租约及其清理均已退出，与发出取消通知不是同一时点。
-  drained: Deferred.Deferred<void>
-  // 计入排队租约，避免当前持有者结束时把仍等待使用的环境误判为闲置。
-  users: number
+  // 每个租约的真实 Fiber 同时拥有取消和清理；排队者也计入活动集合。
+  fibers: Set<Fiber.Fiber<unknown, unknown>>
   closed: boolean
 }
 
@@ -46,87 +42,64 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
   const retire = (entry: Entry) => {
     // 先关闭准入再发出取消；尚未进入许可区的租约也会看见同一个退休事实。
     entry.closed = true
-    Deferred.doneUnsafe(entry.cancel, Effect.void)
+    for (const fiber of entry.fibers) fiber.interruptUnsafe()
     // 活动条目暂留到最后一个租约退出，close 才能等待真实清理而非丢失引用。
-    if (entry.users === 0) entries.delete(entry.id)
+    if (!entry.fibers.size) entries.delete(entry.id)
   }
-  // 状态变动延迟到 Effect 真正执行，单纯构造一个 use 请求不会占用目录容量。
-  const acquire = (owner: Owner, id: string | undefined) =>
-    Effect.suspend(() => {
-      if (closing) return Effect.fail(new EnvironmentUnavailable({ message: "Execute environments are disposed." }))
-      // 空字符串仍是显式句柄，不能用真值判断把无效复用请求悄悄变成新环境。
-      let entry = id !== undefined ? entries.get(id) : undefined
-      if (id !== undefined && (!entry || entry.closed || !sameOwner(owner, entry.owner)))
-        return Effect.fail(
-          new EnvironmentUnavailable({
-            message: "Execute environment is unavailable. Omit environmentID to start a new one.",
-          }),
-        )
-      if (!entry) {
-        let fresh = nextID()
-        // 已存在的句柄绝不覆盖；沿用仓库生成器，仅在当前集合真实冲突时重新生成。
-        while (entries.has(fresh)) fresh = nextID()
-        entry = {
-          id: fresh,
-          owner: { ...owner },
-          environment: CodeMode.createEnvironment(),
-          gate: Semaphore.makeUnsafe(1),
-          cancel: Deferred.makeUnsafe(),
-          drained: Deferred.makeUnsafe(),
-          users: 0,
-          closed: false,
-        }
-        entries.set(fresh, entry)
-      }
-      // 闲置后的新一轮租约需要新的 drain 信号，不能复用上一轮已完成的 Deferred。
-      if (entry.users === 0) entry.drained = Deferred.makeUnsafe()
-      // 等许可之前先计入使用者，才能让淘汰和关闭逻辑看见仍在队列里的请求。
-      entries.delete(entry.id)
-      entries.set(entry.id, entry)
-      entry.users++
-      return Effect.succeed(entry)
-    })
   return {
     use<A, E, R>(
       owner: Owner,
       id: string | undefined,
       run: (lease: Lease) => Effect.Effect<A, E, R>,
     ): Effect.Effect<A, E | EnvironmentUnavailable, R> {
-      // 增加 users 与安装释放逻辑之间不能被取消，否则失去回收者的租约会永久占用容量。
-      return Effect.uninterruptibleMask((restore) =>
+      // 登记真实租约和安装退出逻辑不可被取消拆开；用户回调保持可中断。
+      const work = Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const entry = yield* acquire(owner, id)
-          const work = entry.gate.withPermits(1)(
-            Effect.suspend(() => {
-              // 排队期间发生删除/移动后，拿到许可也不能开始旧 owner 的代码。
-              if (entry.closed) return Effect.interrupt
-              // 许可覆盖 callback 的 finalizer；自发删除后即便 callback 返回，也不能报告成功。
-              return run(entry).pipe(
-                Effect.flatMap((value) => (entry.closed ? Effect.interrupt : Effect.succeed(value))),
-              )
-            }),
-          )
-          // 释放先于恢复可中断性安装；取消排队者只释放其租约，不触碰 holder 的取消信号。
-          return yield* restore(
-            Effect.raceFirst(work, Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt))),
-          ).pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                entry.users--
-                if (entry.users === 0) {
-                  Deferred.doneUnsafe(entry.drained, Effect.void)
-                  // 完成顺序不能覆盖调用顺序；关闭项在最后一个租约退出后删除。
-                  if (entry.closed) entries.delete(entry.id)
-                }
-                // 最近八个唯一调用之外只回收闲置项；忙项由自己的最后一个租约退出后再检查。
-                const owned = [...entries.values()].filter(
-                  (candidate) => sameOwner(entry.owner, candidate.owner) && !candidate.closed,
-                )
-                for (const candidate of owned.slice(0, -ownerCapacity)) if (candidate.users === 0) retire(candidate)
-              }),
-            ),
-          )
+          // 先取得当前 Fiber，再同步完成准入与退出登记，避免可见条目没有租约所有者。
+          const fiber = yield* Effect.fiber
+          if (closing) return yield* new EnvironmentUnavailable({ message: "Execute environments are disposed." })
+          // 空字符串仍是显式句柄，不能用真值判断把无效复用请求悄悄变成新环境。
+          let entry = id !== undefined ? entries.get(id) : undefined
+          if (id !== undefined && (!entry || entry.closed || !sameOwner(owner, entry.owner)))
+            return yield* new EnvironmentUnavailable({
+              message: "Execute environment is unavailable. Omit environmentID to start a new one.",
+            })
+          if (!entry) {
+            let fresh = nextID()
+            // 已存在的句柄绝不覆盖；沿用仓库生成器，仅在当前集合真实冲突时重新生成。
+            while (entries.has(fresh)) fresh = nextID()
+            entry = {
+              id: fresh,
+              owner: { ...owner },
+              environment: CodeMode.createEnvironment(),
+              gate: Semaphore.makeUnsafe(1),
+              fibers: new Set(),
+              closed: false,
+            }
+          }
+          // 等许可之前先计入使用者，才能让淘汰和关闭逻辑看见仍在队列里的请求。
+          entries.delete(entry.id)
+          entries.set(entry.id, entry)
+          entry.fibers.add(fiber)
+          // 只在 Fiber 的子任务和 finalizer 全部结束后回收，不能把 callback 返回当成租约终态。
+          fiber.addObserver(() => {
+            entry.fibers.delete(fiber)
+            // 完成顺序不能覆盖调用顺序；关闭项在最后一个租约退出后删除。
+            if (entry.closed && !entry.fibers.size) entries.delete(entry.id)
+            // 最近八个唯一调用之外只回收闲置项；忙项由自己的最后一个租约退出后再检查。
+            const owned = [...entries.values()].filter(
+              (candidate) => sameOwner(entry.owner, candidate.owner) && !candidate.closed,
+            )
+            for (const candidate of owned.slice(0, -ownerCapacity)) if (!candidate.fibers.size) retire(candidate)
+          })
+          // 退休直接中断租约本身；排队和同步自退休也不能绕过中断返回成功。
+          return yield* restore(entry.gate.withPermits(1)(Effect.suspend(() => run(entry))))
         }),
+      )
+      // 独立租约 Fiber 的寿命精确到 use；不能等待调用者在 use 之后的其它工作。
+      // 先 await Exit 再展开，避免中断出口的 join 观察者清理影响其它等待者。
+      return Effect.scopedWith((scope) =>
+        Effect.forkIn(work, scope, { startImmediately: true }).pipe(Effect.flatMap(Fiber.await), Effect.flatten),
       )
     },
     // 移动只退休旧位置的状态；目的位置匹配的环境可继续保留，删除则不传目的地。
@@ -146,84 +119,73 @@ export function makeRegistry(options: { nextID?: () => string } = {}) {
           // 先通知全部条目，再等待各自清理，避免一个慢 finalizer 延迟其他执行收到取消。
           for (const entry of pending) retire(entry)
           // 不设置虚假的回收成功超时：原工具 finalizer 未退出时，目录实例必须继续等待。
-          yield* Effect.forEach(pending, (entry) => (entry.users === 0 ? Effect.void : Deferred.await(entry.drained)), {
-            discard: true,
-            concurrency: "unbounded",
-          })
+          yield* Fiber.awaitAll(pending.flatMap((entry) => [...entry.fibers]))
         }),
       )
     },
   }
 }
 
-export interface Interface {
-  use<A, E, R>(
-    sessionID: SessionID,
-    id: string | undefined,
-    run: (lease: Lease) => Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E | EnvironmentUnavailable, R>
-}
-export class Service extends Context.Service<Service, Interface>()("@opencode/ExecuteEnvironments") {}
-
-const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const events = yield* EventV2Bridge.Service
-    const sessions = yield* SessionStore.Service
-    // 目录实例负责回收；workspace 仍属于条目的 owner，不能假定缓存本身按 workspace 分隔。
-    const state = yield* InstanceState.make(() =>
+const make = Effect.gen(function* () {
+  const events = yield* EventV2Bridge.Service
+  const sessions = yield* SessionStore.Service
+  // 目录实例负责回收；workspace 仍属于条目的 owner，不能假定缓存本身按 workspace 分隔。
+  const state = yield* InstanceState.make(() =>
+    Effect.gen(function* () {
+      const registry = makeRegistry()
+      const off = yield* events.listen(
+        (event) => {
+          // EventV2 发布和重放已交付解码值；按真实事件定义恢复被监听接口擦除的类型。
+          const change = event as
+            | typeof SessionV1.Event.Deleted.Type
+            | typeof SessionEvent.Moved.Type
+            | typeof SessionV1.Event.Updated.Type
+          switch (change.type) {
+            // 删除不依赖事件外壳的位置；移动和 legacy 更新仅退休不再匹配的位置。
+            case SessionV1.Event.Deleted.type:
+              return registry.retireSession(change.data.sessionID)
+            case SessionEvent.Moved.type:
+              return registry.retireSession(change.data.sessionID, change.data.location)
+            case SessionV1.Event.Updated.type:
+              return registry.retireSession(change.data.sessionID, change.data.info)
+          }
+          return Effect.void
+        },
+        { finalizerSafe: true },
+      )
+      // 内联通知只发取消信号，实例关闭才等待 drain，避免发布删除事件的单元等待自己。
+      // 清理期间继续接收 Session 变化；全部租约结束后才解除监听。
+      yield* Effect.addFinalizer(() => registry.close().pipe(Effect.ensuring(off)))
+      return registry
+    }),
+  )
+  return {
+    use: <A, E, R>(sessionID: SessionID, id: string | undefined, run: (lease: Lease) => Effect.Effect<A, E, R>) =>
       Effect.gen(function* () {
-        const registry = makeRegistry()
-        const off = yield* events.listen(
-          (event) => {
-            // 删除可在无 Location 的上下文发布；以会话数据而非事件外壳决定回收范围。
-            // 发布的 data 已是解码值；再次执行传输 codec 会误拒绝缺省字段或 DateTime。
-            if (event.type === SessionV1.Event.Deleted.type)
-              return registry.retireSession(
-                Schema.decodeUnknownSync(Schema.toType(SessionV1.Event.Deleted.data))(event.data).sessionID,
-              )
-            if (event.type === SessionEvent.Moved.type) {
-              const data = Schema.decodeUnknownSync(Schema.toType(SessionEvent.Moved.data))(event.data)
-              return registry.retireSession(data.sessionID, data.location)
+        const ctx = yield* InstanceState.context
+        const owner = { sessionID, directory: ctx.directory, workspaceID: yield* InstanceState.workspaceID }
+        const registry = yield* InstanceState.get(state)
+        return yield* registry.use(owner, id, (lease) =>
+          Effect.gen(function* () {
+            // 先注册租约再读权威位置：已发生的移动由此读取覆盖，稍后的移动由监听器覆盖。
+            const current = yield* sessions.get(sessionID)
+            if (!current || !sameLocation(owner, current.location)) {
+              yield* registry.retireSession(sessionID, current?.location)
+              return yield* new EnvironmentUnavailable({
+                message: "Execute environment Session or Location is no longer available.",
+              })
             }
-            // legacy workspace 更新使用 Updated；标题或权限变化不清掉同位置的解释器状态。
-            if (event.type === SessionV1.Event.Updated.type) {
-              const data = Schema.decodeUnknownSync(Schema.toType(SessionV1.Event.Updated.data))(event.data)
-              return registry.retireSession(data.sessionID, data.info)
-            }
-            return Effect.void
-          },
-          { finalizerSafe: true },
+            return yield* run(lease)
+          }),
         )
-        // 内联通知只发取消信号，实例关闭才等待 drain，避免发布删除事件的单元等待自己。
-        // 清理期间继续接收 Session 变化；全部租约结束后才解除监听。
-        yield* Effect.addFinalizer(() => registry.close().pipe(Effect.ensuring(off)))
-        return registry
       }),
-    )
-    return Service.of({
-      use: <A, E, R>(sessionID: SessionID, id: string | undefined, run: (lease: Lease) => Effect.Effect<A, E, R>) =>
-        Effect.gen(function* () {
-          const ctx = yield* InstanceState.context
-          const owner = { sessionID, directory: ctx.directory, workspaceID: yield* InstanceState.workspaceID }
-          const registry = yield* InstanceState.get(state)
-          return yield* registry.use(owner, id, (lease) =>
-            Effect.gen(function* () {
-              // 先注册租约再读权威位置：已发生的移动由此读取覆盖，稍后的移动由监听器覆盖。
-              const current = yield* sessions.get(sessionID)
-              if (!current || !sameLocation(owner, current.location)) {
-                yield* registry.retireSession(sessionID, current?.location)
-                return yield* new EnvironmentUnavailable({
-                  message: "Execute environment Session or Location is no longer available.",
-                })
-              }
-              return yield* run(lease)
-            }),
-          )
-        }),
-    })
-  }),
-)
+  }
+})
+
+// 服务合同直接来自实现，泛型租约与错误环境不维护第二份声明。
+export type Interface = Effect.Success<typeof make>
+export class Service extends Context.Service<Service, Interface>()("@opencode/ExecuteEnvironments") {}
+const layer = Layer.effect(Service, make)
 
 // 复用已有全局事件与存储服务，避免反向依赖 Session.Service 或 ToolRegistry 形成初始化环。
 export const node = LayerNode.make({ service: Service, layer, deps: [EventV2Bridge.node, SessionStore.node] })

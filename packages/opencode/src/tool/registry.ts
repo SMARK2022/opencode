@@ -59,8 +59,7 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 // #277：read 工具的图片附件处理收敛到 Image.Service，registry 需要装配该依赖
 import { Image } from "@/image/image"
-// 工具初始化取得环境 owner，下一次 SessionTools.resolve 仍复用同一 Location 生命周期。
-import { ExecuteEnvironments } from "./execute-environments"
+import { ExecuteEnvironments } from "./execute-environments" // 租约沿已有依赖图持有真实执行寿命。
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -357,7 +356,6 @@ const layer = Layer.effect(
               .filter(Boolean)
               .join("\n"),
             parameters: output.parameters,
-            // definition hook 仅改展示；shortcut 仍由原闭包实际使用的 decoder 决定。
             // 展示 hook 的新 parameters 不会重编译原 execute 闭包，故不能拿它替代实际合同。
             runtimeParameters: tool.runtimeParameters,
             jsonSchema,
@@ -379,8 +377,7 @@ const layer = Layer.effect(
       return { task: s.task, read: s.read }
     })
 
-    // 工具枚举与 Session 显示共用同一模式读取，避免两处分别解释 JSON/env。
-    return Service.of({ codemode, ids, all, named, tools })
+    return Service.of({ codemode, ids, all, named, tools }) // 向 Session 共享注册表已解码的模式，避免独立读取。
   }),
 )
 

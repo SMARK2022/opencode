@@ -89,9 +89,9 @@ Public tool types are grouped under the same namespace: `Tool.Definition`, `Tool
 
 <!-- 签名只展示原始合同；简写仍由实际编码 schema 推导并在原校验器前转换，不从展示文档猜主键。 -->
 
-Effect Schema tools infer deterministic scalar-to-object input forms. For an object with one required scalar property, or a single optional scalar property, `tool(value)` is accepted alongside `tool({ key: value })`. Scalar-only tools keep their original scalar contract; arbitrary single-field objects are not unwrapped. The signature shows the original input contract; these shorthand forms remain accepted at runtime. `undefined`, arrays, ambiguous objects and unsupported schema structures retain their original contract; names such as `path` or `query` are never guessed.
+Effect Schema tools infer deterministic scalar-to-object input forms. For an object with one required scalar property, or a single optional scalar property, `tool(value)` is accepted alongside `tool({ key: value })`. Scalar-only tools keep their original scalar contract; arbitrary single-field objects are not unwrapped. The signature shows the original input contract; these shorthand forms remain accepted at runtime. `undefined`, arrays, ambiguous objects and unsupported schema structures retain their original contract. Blocked property names (`constructor`, `__proto__`, `prototype`) never receive shorthand forms; names such as `path` or `query` are never guessed.
 
-For render-only JSON inputs, an adapter that retains its actual validator may provide `inputContract: actualDecoder`. This one contract supplies the signature, searchable fields and deterministic input forms; it does not add a second decoding step. Without it, JSON schemas remain display-only. Inference reads encoded structure without running transformations or defaults, and normalization precedes the original validator. Authorization still belongs to the tool.
+For render-only JSON inputs, an adapter that retains its actual validator may provide `inputContract: actualDecoder`. This one contract supplies the signature, searchable fields and deterministic input forms; it does not add a second decoding step. Without it, JSON schemas remain display-only. Inference reads encoded structure without running transformations or defaults. Arguments cross the existing isolation boundary once; normalization only adds the statically validated safe field before the original decoder, without copying the whole input graph again. Authorization still belongs to the tool.
 
 ### JSON-text projection
 
@@ -184,6 +184,8 @@ interface Failure {
 }
 ```
 
+<!-- 日志捕获已经丢弃内容时也必须标记 truncated，不能只看最终业务值是否被裁剪。 -->
+
 `toolCalls` contains the names of calls admitted by the runtime in call order. It is retained on failure so hosts can audit partial execution without exposing inputs or host failures. `truncated` is present when capture reached `maxLogBytes` or the value/logs were cut to fit `maxOutputBytes` (see Execution Limits).
 
 ### Tool-call hooks
@@ -251,7 +253,7 @@ const matches = search({
 })
 ```
 
-`search` performs deterministic, additive field-weighted matching. The query is tokenized (camelCase boundaries split; every non-alphanumeric character is a separator; empties and `*` are dropped), and each term scores every tool: exact path or path-segment match (20), path substring (8), description substring (4), and searchable-text substring (2). Each term also carries naive singular variants (trailing `s`/`es` stripped), and a field check passes when the term or any variant matches - so a plural query term (`issues`) still finds a tool whose text only says `issue`, without changing the weights. The searchable text also includes the input schema's property names and their description strings, so a query naming a parameter finds its tool, and substring matching means partial words match. Scores sum across terms; matches are sorted by score (ties broken alphabetically by path), then sliced from the zero-based `offset` (default 0) to the configured `limit` (default 10). Default results include the tool description and compact signature, without full schemas. Set `detail: true` for full field contracts; detailed pages contain at most three tools, even if a larger limit is requested. Exact-path lookups automatically return one tool with full field contracts, even when `detail` is omitted. Pages also use a 16,384-character soft budget measured on the complete serialized response. The first whole entry that reaches or crosses the budget is included, so a single oversized tool stays accessible; `limit` remains a count ceiling. `remaining` counts matches after the current page. `next` is `{ offset }` when another page exists and `null` on the final page; spread it into the original request to preserve its query, namespace, and limit.
+`search` performs deterministic, additive field-weighted matching. The query is tokenized (camelCase boundaries split; every non-alphanumeric character is a separator; empties and `*` are dropped), and each term scores every tool: exact path or path-segment match (20), path substring (8), description substring (4), and searchable-text substring (2). Each term also carries naive singular variants (trailing `s`/`es` stripped), and a field check passes when the term or any variant matches - so a plural query term (`issues`) still finds a tool whose text only says `issue`, without changing the weights. The searchable text also includes the input schema's property names and their description strings, so a query naming a parameter finds its tool, and substring matching means partial words match. Scores sum across terms; matches are sorted by score (ties broken alphabetically by path), then sliced from the zero-based `offset` (default 0) to the configured `limit` (default 10). Default results include the first description line, trimmed and shortened to at most 120 UTF-16 code units, and the full compact signature, without full schemas. Set `detail: true` for the original complete description and full field contracts; detailed pages contain at most three tools, even if a larger limit is requested. Exact-path lookups automatically return one tool with full field contracts, even when `detail` is omitted. Pages also use a 16,384-character soft budget measured on the complete serialized response. The first whole entry that reaches or crosses the budget is included, so a single oversized tool stays accessible; `limit` remains a count ceiling. `remaining` counts matches after the current page. `next` is `{ offset }` when another page exists and `null` on the final page; spread it into the original request to preserve its query, namespace, and limit.
 
 ```ts
 // 翻页复用搜索条件；同步目录查询无需人为加入异步工具调度。
@@ -272,7 +274,7 @@ Result paths are rendered as JavaScript expressions rooted at `tools` (`tools.or
 
 <!-- 固定说明承载调用原则，动态目录只承载当下工具签名，避免重复注入工作流。 -->
 
-The shared `CodeMode.description` carries a short composition workflow and an example that searches only when a needed tool is not shown. `runtime.instructions()` carries the current complete, partial, or empty catalog separately. Search by the task when a needed tool is not shown, use the exact returned path and signature, compose deterministic steps in code, and return only useful evidence. Independent calls can use `Promise.all`; use `Promise.allSettled` when partial results matter without hiding failures. Dependent calls and conflicting writes stay sequential. No blanket per-call `try`/`catch` scaffolding is required.
+The shared `CodeMode.description` carries a short composition workflow and a grep-to-read example: take at most eight TODO matches, read five nearby lines for each, and join the excerpts into a string. It labels this as a sample, uses the actual text-page return shape, and recommends search only when a needed tool is not shown. `runtime.instructions()` carries the current complete, partial, or empty catalog separately. Search by the task when a needed tool is not shown, use the exact returned path and signature, compose deterministic steps in code, and return only useful evidence. Independent calls can use `Promise.all`; use `Promise.allSettled` when partial results matter without hiding failures. Dependent calls and conflicting writes stay sequential. No blanket per-call `try`/`catch` scaffolding is required. Return a string when combining multiline text excerpts so newlines stay unescaped; ordinary object return values keep their existing JSON serialization.
 
 A host cannot define its own `$codemode` top-level namespace.
 
@@ -311,7 +313,7 @@ Calling a namespace instead of a function remains an `UnknownTool` error. The di
 
 <!-- 显示选择与执行权限分开；隐藏直接工具不能删除Execute内部可用定义。 -->
 
-OpenCode enables Code Mode and keeps direct tools by default. Set `"codemode": false` in opencode.json to disable it, or `"codemode": { "enabled": true, "keep_tools": false }` to expose only Execute for script-callable tools. Omitted object fields default to true. Explicit `OPENCODE_CODEMODE` and `OPENCODE_CODEMODE_KEEP_TOOLS` environment variables override the corresponding JSON settings; restart after changing them. These replace the former OPENCODE_EXECUTE names. Permissions still apply to both paths, and control tools keep their existing role.
+OpenCode enables Code Mode and keeps direct tools by default. Set `"codemode": false` in opencode.json to disable it, or `"codemode": { "enabled": true, "keep_tools": false }` to expose only Execute for script-callable tools. Omitted object fields default to true. Explicit `OPENCODE_CODEMODE` and `OPENCODE_CODEMODE_KEEP_TOOLS` environment variables override the corresponding JSON settings; restart after changing them. These replace the former OPENCODE_EXECUTE names. Permissions still apply to both paths, and control tools keep their existing role. With direct tools retained, the instructions recommend direct calls for simple standalone actions and Execute for dependent calls, batches and filtering. In Execute-only mode they direct all catalog calls through Execute, including simple actions. An empty catalog injects no Execute usage advice.
 
 <!-- 宿主识别自身工具和 MCP 传输事实，通用库不猜测来源或剥离任意业务信封。 -->
 
@@ -329,30 +331,30 @@ Each OpenCode call starts a new environment unless `environmentID` is supplied. 
 
 <!-- 每次结束只回收最近八项窗口外的闲置环境，活动及排队租约继续持有状态。 -->
 
-Environments are process-local, with the eight most recently used unique IDs retained per Session and Location. Reusing an ID refreshes its position at admission; completion order does not. Each call releases its lease and then retires idle environments outside that owner’s latest-eight window. Active or queued leases remain protected, so more than eight environments can run at once without a capacity wait. A later completion repeats the same collection. There is no time-based expiry, and the retained-window size does not bound retained bytes or peak heap. Session deletion/movement and instance disposal retire affected environments; compaction does not. Same-environment cells wait for prior cleanup; different environments can run concurrently, and canceling a waiter does not cancel its holder.
+Environments are process-local, with the eight most recently used unique IDs retained per Session and Location. Reusing an ID refreshes its position at admission; completion order does not. Each call releases its lease and then retires idle environments outside that owner’s latest-eight window. Active or queued leases remain protected, so more than eight environments can run at once without a capacity wait. A later completion repeats the same collection. There is no time-based expiry, and the retained-window size does not bound retained bytes or peak heap. Session deletion/movement and instance disposal retire affected environments; compaction does not. Same-environment cells wait for prior cleanup; different environments can run concurrently, and canceling a waiter does not cancel its holder. The registry owns a dedicated Fiber for every active or queued lease, and removes it only at actual Fiber termination, after child finalizers. Closure notifies all leases before awaiting them. The callback keeps its original Scope service, and the lease does not include unrelated work its caller performs afterward.
 
 <!-- 展示包装只规范一次，审批与真实执行必须观察同一份代码。 -->
 
-The host accepts either raw source or one complete JS/TS code fence with no surrounding prose or other fences. It removes that presentation envelope once before preflight, permission review and execution; the library itself continues to receive plain source. TypeScript annotations use the existing transpilation path, without a separate execution mode.
+The host accepts either raw source or one complete JS/TS code fence with no surrounding prose or other fences. It removes that presentation envelope once before preflight, permission review and execution; the library itself continues to receive plain source. TypeScript annotations use the existing transpilation path, without a separate execution mode. A private eight-entry FIFO caches successful parses by exact normalized source, including the constant fetch-response factory. Failed parses are not cached. Tools, permissions and execution state are rebuilt each time, and stateful regular expressions remain fresh instances.
 
 <!-- 预跑只修改环境副本；无法复制或探测不完整时，真实调用仍经过权限入口。 -->
 
-Before review, the host deep-copies the leased environment for a best-effort probe with a 500ms execution budget and at most 1,024 tool calls. Probe sleep completes immediately. Old variables and helpers are visible in the copy. The review archive keeps each tool-and-input pair once, in first-seen order; repeated calls still consume the total-call budget. Unsupported copy state stops the probe; calls collected before an ordinary probe failure are retained. Current runtime permissions still apply to every real call. The copy is released after its execution scope closes. As with execution itself, a cooperative timeout cannot preempt synchronous cloning or compilation.
+Before review, the host deep-copies the leased environment for a best-effort probe with a 500ms execution budget and at most 1,024 tool calls. Probe sleep completes immediately. Old variables and helpers are visible in the copy. URL and URLSearchParams are copied with their shared ownership intact, even when a parameter view is encountered first; independent parameter objects remain independent. A single identity map also preserves aliases through containers and closures without modifying the retained environment. The review archive keeps each tool-and-input pair once, in first-seen order; repeated calls still consume the total-call budget. Unsupported copy state stops the probe; calls collected before an ordinary probe failure are retained. Current runtime permissions still apply to every real call. The copy is released after its execution scope closes. As with execution itself, a cooperative timeout cannot preempt synchronous cloning or compilation.
 
 <!-- 父进度合并不影响子调用审计和最终持久化；全文交给既有截断服务。 -->
 
-Parent progress uses a 100ms opportunity window without a background timer. Initial metadata and final settlement are durable; intermediate progress is ephemeral. Final metadata includes every admitted call. The complete textual result uses the shared output truncation service and its recoverable file path, without changing the program value.
+Parent progress uses a 100ms opportunity window without a background timer. Initial metadata and final settlement are durable; intermediate progress is ephemeral. Final metadata includes every admitted call. CodeModeTool returns the complete intermediate text without changing the program value. SessionProcessor waits for ordinary hooks, elapsed/cancellation notices and image-omission text, then uses the shared truncation service once for the final model-visible receipt. Success and failure receipts have a 36,000 UTF-16-code-unit limit, including the recovery notice and its separators. The remaining space is split equally between head and tail, clipping surrogate pairs inward at boundaries. Short text creates no recovery file; oversized text creates one file containing the complete captured and composed receipt before clipping. Captured logs still have their separate 16KiB UTF-8 limit, so uncaptured bytes cannot be recovered. Attachments and child-call facts remain separate. New finalized failures replay the saved error receipt without appending the original error or abort notice again; old unmarked records retain their previous replay behavior. Debug CLI output is an intermediate result, not a model receipt, and is not promised this 36K limit.
 
 ## Execution Limits
 
 The limits are optional host-selected bounds:
 
-| Limit            |              Default | Bounds                                                               |
-| ---------------- | -------------------: | -------------------------------------------------------------------- |
-| `timeoutMs`      |    none - no timeout | Wall-clock execution time.                                           |
-| `maxToolCalls`   |     none - unlimited | Tool calls admitted during the execution.                            |
-| `maxOutputBytes` | none - no truncation | Model-facing output: the serialized result value plus captured logs. |
-| `maxLogBytes` | none - unlimited | UTF-8 bytes retained while appending logs; later lines are counted but not stored. |
+| Limit            |              Default | Bounds                                                                             |
+| ---------------- | -------------------: | ---------------------------------------------------------------------------------- |
+| `timeoutMs`      |    none - no timeout | Wall-clock execution time.                                                         |
+| `maxToolCalls`   |     none - unlimited | Tool calls admitted during the execution.                                          |
+| `maxOutputBytes` | none - no truncation | Model-facing output: the serialized result value plus captured logs.               |
+| `maxLogBytes`    |     none - unlimited | UTF-8 bytes retained while appending logs; later lines are counted but not stored. |
 
 <!-- 库默认值与应用策略分离：十分钟只由 OpenCode 宿主选定，不能改变独立库调用者的合同。 -->
 
@@ -369,6 +371,8 @@ const runtime = CodeMode.make({
   },
 })
 ```
+
+<!-- 超时上限沿用 Effect 计时器的有符号32位范围，避免过大的毫秒值变成错误的等待期限。 -->
 
 Limits are safe integers. `timeoutMs` must be between `1` and `2,147,483,647`; the others may be `0`. Invalid configuration throws a `RangeError` when `CodeMode.make` or `CodeMode.execute` is called. An explicitly `undefined` value is the same as leaving the limit unset.
 

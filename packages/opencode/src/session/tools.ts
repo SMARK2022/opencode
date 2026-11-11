@@ -28,8 +28,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
-// 执行预算与宿主能力共用入口，子调用显式继承同一个暂停闭包。
-import { describeCatalog, fetchHTTP, makeExecutionBudget, type CatalogEntry } from "@/tool/code-mode"
+import { describeCatalog, fetchHTTP, makeExecutionBudget, type CatalogEntry } from "@/tool/code-mode" // 人工等待只暂停父执行预算。
 
 type ToolTimingInput = {
   source: "local" | "mcp"
@@ -211,7 +210,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               let review: Permission.ExecuteReview | undefined
               let sequence = 0
               ctx.codeMode = {
-                catalog, signal, keepTools: mode.keepTools,
+                catalog, signal,
                 // 只有真实执行消费这个期限，预跑继续使用自己的短预算。
                 waitForTimeout: budget.wait,
                 fetch: (url, init) => Effect.gen(function* () {
@@ -277,14 +276,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                         // 根作用域或宿主中断时先通知该次 child，再等待原清理；race 选出赢家本身不取消败方。
                         Effect.onInterrupt(() => Effect.sync(() => cancel.abort())),
                         // abort 只发通知；等原 Promise 结束后，同环境下一格才能接管真实资源。
-                        Effect.ensuring(
-                          Effect.promise(() =>
-                            pending.then(
-                              () => undefined,
-                              () => undefined,
-                            ),
-                          ),
-                        ),
+                        Effect.ensuring(Effect.promise(() => pending.then(() => undefined, () => undefined))),
                       )
                     }),
                   ).pipe(Effect.onExit(() => Effect.gen(function* () {
@@ -352,11 +344,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               const notice = formatLongExecutionNotice("tool", adapterElapsedMs)
               if (notice) output.output += "\n\n" + notice
             }
-            if (item.id === "execute" && output.metadata.truncated === true) {
-              // 部分可见正文不能证明整份规则已交付，下一轮允许按原加载机制补齐。
-              output.metadata.loaded = []
-              output.metadata.skills = []
-            }
+            // 交付声明留到完整终态裁剪后再清理，此处尚有后续正文装饰。
             return output
             }).pipe(Effect.onExit((exit) => Effect.gen(function* () {
               if (item.id !== "execute" || Exit.isSuccess(exit) || !parent) return
@@ -368,11 +356,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               const text = [typeof metadata.output === "string" ? metadata.output : "",
                 `Partial execution:\n${JSON.stringify([...evidence(settled), ...requests])}`].filter(Boolean).join("\n\n")
               // 包住 hooks 和结果投影：这些步骤失败时，已完成副作用同样需要可恢复回执。
-              const partial = yield* truncate.output(text, {}, input.agent)
-              yield* ctx.metadata({ metadata: { ...metadata, error: true, output: partial.content,
-                loaded: [], skills: [], truncated: partial.truncated,
-                ...(partial.truncated && { outputPath: partial.outputPath }),
-              } })
+              yield* ctx.metadata({ metadata: { ...metadata, error: true, output: text, loaded: [], skills: [] } })
             })))
           }),
           // Bash自己等待kill/drain并保留partial，不能被runtime抢先中断。
@@ -672,9 +656,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // 上游将稳定说明放工具定义，动态目录放当轮指令；V1保持原provider-turn边界。
   return {
     tools,
-    instructions: eligible.execute
+    instructions: eligible.execute && catalog.length > 0
       ? [
-          "Prefer execute for independent batches, dependent tool calls, or filtering large results. Use a direct tool for a simple standalone action.",
+          // 直接入口是否存在由本轮模式决定，不能向 Execute-only 推荐隐藏的工具。
+          mode.keepTools
+            ? "Prefer execute when you can chain dependent tool calls, or batch queries and filter or summarize their outputs in code before returning them. Use a direct tool for a simple standalone action."
+            : "Use execute for the tools in its catalog, including simple standalone actions. Chain dependent calls, or batch queries and filter or summarize their outputs in code before returning them.",
           yield* describeCatalog(catalog, mode.keepTools),
         ]
       : [],

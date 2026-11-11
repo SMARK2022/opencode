@@ -189,22 +189,13 @@ export const make = <const Tools extends Record<string, unknown> = {}>(
 
 // 仅供宿主显式选择的无类型文本；声明字符串和普通工具结果不会自动进入此路径。
 export const fromJsonText = (text: string): unknown => {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text, (_key, value: unknown) => {
-      // JSON 数字溢出无法保持普通数据的数值意义；不改变现有沙箱 Infinity 语义。
-      if (typeof value === "number" && !Number.isFinite(value)) throw new RangeError("JSON numeric overflow")
-      return value
-    })
-  } catch (error) {
-    if (error instanceof SyntaxError || error instanceof RangeError) return text
-    throw error
-  }
-  // 只有容器需要结构化访问；标量文本保留原格式，避免改变现有字符串工具的用法。
-  if (parsed === null || typeof parsed !== "object") return text
+  // Schema.Json 保证有限数值；危险键和深度仍由下方唯一数据边界判定。
+  const parsed = Schema.decodeUnknownResult(Schema.fromJsonString(Schema.Json))(text)
+  // 只有容器需要结构化访问；解析失败与标量文本均保留原格式。
+  if (parsed._tag === "Failure" || parsed.success === null || typeof parsed.success !== "object") return text
   try {
     // 复用既有深度、危险键和普通对象边界，不引入第二套可表示性规则。
-    return withRawText(ToolRuntime.copyIn(parsed, "JSON tool result"), text)
+    return withRawText(ToolRuntime.copyIn(parsed.success, "JSON tool result"), text)
   } catch (error) {
     // 已知不可表示的文本仍是成功文本；内部意外错误不能伪装成格式选择。
     if (error instanceof ToolRuntime.ToolRuntimeError && error.kind === "InvalidDataValue") return text

@@ -479,6 +479,7 @@ describe("timeout interruption of forked calls", () => {
   })
 })
 
+// then/catch/finally已改为链式组合测试，不再要求拒绝；本组只保留业务字段及未支持静态/构造入口的诊断。
 // 未等待的 Promise 仍是句柄；读取业务字段应提示等待，不能误判为宿主工具失败。
 describe("unsupported promise surface", () => {
   test("other property reads on a promise hint at the missing await", async () => {
