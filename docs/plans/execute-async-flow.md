@@ -2311,3 +2311,5 @@ bun test test/project-copy.test.ts
 发布前核对远端提交和完整 tree 与本地一致，PR 描述列实际测试结果。原样 pre-push 由 `sh .husky/pre-push` 执行；若资源限制再次导致 SIGKILL，按用户允许的 hook 例外提交，同时写明未通过的原门禁和实际通过的补充检查。
 
 测试中的 CallEntry 期望数组使用 `as const` 保留 completed/error 状态字面量，避免 map 把它推宽为 string；不改变预期值和断言。该文件同时运行行为测试与类型检查。
+
+预算回归通过公开 `Tool.make` 注册测试叶子，保持门闩、执行预算和清理的相同顺序。宿主 child 断言先明确其存在，再检查终态和已产生输出；测试须同时满足行为与静态类型合同，不能让可选值或裸函数绕过公共接口。

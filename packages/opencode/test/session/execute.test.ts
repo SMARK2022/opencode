@@ -1678,8 +1678,9 @@ it.instance("execute timeout settles real children and preserves completed mutat
     // 父超时不是事务回滚；已完成的写入和 child 记录必须仍能被模型及审计消费者看见。
     expect(parts.filter((part) => part.tool === "apply_patch")).toMatchObject([{ state: { status: "completed" } }])
     const shellChild = parts.find((part) => part.tool === "bash")
-    expect(["completed", "error"]).toContain(shellChild?.state.status)
-    if (shellChild && "metadata" in shellChild.state) expect(shellChild.state.metadata?.output).toContain("TIMEOUT_READY")
+    if (!shellChild) throw new Error("Expected timeout child receipt")
+    expect(["completed", "error"]).toContain(shellChild.state.status)
+    if ("metadata" in shellChild.state) expect(shellChild.state.metadata?.output).toContain("TIMEOUT_READY")
     expect(parts.some((part) => part.state.status === "running" || part.state.status === "pending")).toBe(false)
     expect(yield* Effect.promise(() => Bun.file(path.join(instance.directory, "before-timeout.txt")).text())).toBe(
       "completed\n",

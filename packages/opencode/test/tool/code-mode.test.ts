@@ -1425,6 +1425,7 @@ describe("code mode permission visibility", () => {
 
 testEffect(Layer.empty).effect("execution budget resumes only the remaining time after overlapping waits", () =>
   Effect.gen(function* () {
+    const { Tool } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
     const budget = yield* makeExecutionBudget
     const entered = Deferred.makeUnsafe<void>()
     const go = Deferred.makeUnsafe<void>()
@@ -1432,16 +1433,20 @@ testEffect(Layer.empty).effect("execution budget resumes only the remaining time
     const execution = yield* CodeMode.execute({
       code: "await tools.work(); return 1",
       tools: {
-        work: () =>
-          Deferred.succeed(entered, undefined).pipe(
-            Effect.andThen(Deferred.await(go)),
-            Effect.andThen(Effect.never),
-            Effect.ensuring(
-              Effect.sync(() => {
-                ended = true
-              }),
+        work: Tool.make({
+          description: "Wait for the execution budget",
+          input: Schema.Struct({}),
+          run: () =>
+            Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(go)),
+              Effect.andThen(Effect.never),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  ended = true
+                }),
+              ),
             ),
-          ),
+        }),
       },
       limits: { timeoutMs: 100 },
       waitForTimeout: budget.wait,
@@ -1472,23 +1477,28 @@ testEffect(Layer.empty).effect("execution budget resumes only the remaining time
 
 testEffect(Layer.empty).effect("external cancellation cleans children while the execution budget is paused", () =>
   Effect.gen(function* () {
+    const { Tool } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
     const budget = yield* makeExecutionBudget
     const entered = Deferred.makeUnsafe<void>()
     let ended = false
     const execution = yield* CodeMode.execute({
       code: "await tools.question()",
       tools: {
-        question: () =>
-          budget.pause(
-            Deferred.succeed(entered, undefined).pipe(
-              Effect.andThen(Effect.never),
-              Effect.ensuring(
-                Effect.sync(() => {
-                  ended = true
-                }),
+        question: Tool.make({
+          description: "Wait for external input",
+          input: Schema.Struct({}),
+          run: () =>
+            budget.pause(
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    ended = true
+                  }),
+                ),
               ),
             ),
-          ),
+        }),
       },
       limits: { timeoutMs: 100 },
       waitForTimeout: budget.wait,
@@ -1505,20 +1515,25 @@ testEffect(Layer.empty).effect(
   "explicit pause closure crosses independent runPromise and leaves other executions timed",
   () =>
     Effect.gen(function* () {
+      const { Tool } = yield* Effect.promise(() => import("@opencode-ai/codemode"))
       const budget = yield* makeExecutionBudget
       const entered = Deferred.makeUnsafe<void>()
       const answer = Deferred.makeUnsafe<void>()
       const execution = yield* CodeMode.execute({
         code: "return await tools.question()",
         tools: {
-          question: () =>
-            Effect.tryPromise(() =>
-              Effect.runPromise(
-                budget.pause(
-                  Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(answer)), Effect.as("ok")),
+          question: Tool.make({
+            description: "Wait for external input through an independent runtime",
+            input: Schema.Struct({}),
+            run: () =>
+              Effect.tryPromise(() =>
+                Effect.runPromise(
+                  budget.pause(
+                    Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(answer)), Effect.as("ok")),
+                  ),
                 ),
               ),
-            ),
+          }),
         },
         limits: { timeoutMs: 100 },
         waitForTimeout: budget.wait,
@@ -1527,7 +1542,13 @@ testEffect(Layer.empty).effect(
       // 闭包显式跨独立Effect入口；另一次没有暂停的执行仍应按时结束。
       const other = yield* CodeMode.execute({
         code: "await tools.wait()",
-        tools: { wait: () => Effect.never },
+        tools: {
+          wait: Tool.make({
+            description: "Wait until cancelled",
+            input: Schema.Struct({}),
+            run: () => Effect.never,
+          }),
+        },
         limits: { timeoutMs: 100 },
       }).pipe(Effect.forkScoped({ startImmediately: true }))
       yield* TestClock.adjust(1000)
