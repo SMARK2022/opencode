@@ -488,6 +488,8 @@ const layer: Layer.Layer<
       permission?: PermissionV1.Ruleset
     }) {
       const ctx = yield* InstanceState.context
+      // 默认标题与 created 必须共用一次时钟读取，标题生成才能精确识别本 Session 的 root fallback。
+      const created = Date.now()
       const result: Info = {
         id: SessionID.descending(input.id),
         slug: Slug.create(),
@@ -497,7 +499,7 @@ const layer: Layer.Layer<
         path: input.path,
         workspaceID: input.workspaceID,
         parentID: input.parentID,
-        title: input.title ?? createDefaultTitle(!!input.parentID),
+        title: input.title ?? createDefaultTitle(!!input.parentID, created),
         agent: input.agent,
         model: input.model,
         metadata: input.metadata,
@@ -505,7 +507,7 @@ const layer: Layer.Layer<
         cost: 0,
         tokens: EmptyTokens,
         time: {
-          created: Date.now(),
+          created,
           updated: Date.now(),
         },
       }

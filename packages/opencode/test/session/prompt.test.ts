@@ -7,7 +7,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
-import { expect, spyOn, test } from "bun:test"
+import { expect, setSystemTime, spyOn, test } from "bun:test"
 import { Cause, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
 import { NodeFileSystem } from "@effect/platform-node"
 // #517：progress gate 等价目录探测用 symlink 构造 canonical 等价搜索路径
@@ -1025,6 +1025,7 @@ const user = Effect.fn("test.user")(function* (
     synthetic?: boolean
     goalContinuation?: boolean
     compaction?: boolean
+    model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
   },
 ) {
   // 可选 chronology/lineage 都通过公开 Session persistence 写入，测试不调用 private classifier；
@@ -1035,7 +1036,8 @@ const user = Effect.fn("test.user")(function* (
     role: "user",
     sessionID,
     agent: "build",
-    model: ref,
+    // 可选 model 只改变持久化用户身份，供压缩前后模型切换证明标题不会回读旧模型。
+    model: options?.model ?? ref,
     ...(options?.goalTurnID ? { goalTurnID: options.goalTurnID } : {}),
     time: { created: options?.created ?? Date.now() },
   })
@@ -1061,6 +1063,37 @@ const user = Effect.fn("test.user")(function* (
     ...(options?.goalContinuation ? { metadata: { goal_continuation: true } } : {}),
   })
   return msg
+})
+
+const completedCompaction = Effect.fn("test.completedCompaction")(function* (sessionID: SessionID, text: string) {
+  const sessions = yield* Session.Service
+  const compaction = yield* SessionCompaction.Service
+  const marker = yield* compaction.create({ sessionID, agent: "build", model: ref, auto: false })
+  const summaryID = MessageID.ascending()
+  // 多个标题场景共用同一完成边界，避免复制 fixture 时改变 active-window 的成立条件。
+  yield* sessions.updateMessage({
+    id: summaryID,
+    role: "assistant",
+    parentID: marker.id,
+    sessionID,
+    mode: "compaction",
+    agent: "compaction",
+    summary: true,
+    path: { cwd: "/tmp", root: "/tmp" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    time: { created: Date.now(), completed: Date.now() },
+    finish: "stop",
+  })
+  yield* sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: summaryID,
+    sessionID,
+    type: "text",
+    text,
+  })
 })
 
 const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { finish?: string }) {
@@ -7242,51 +7275,30 @@ it.instance(
       const { llm } = yield* useServerConfig(providerCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
-      const compaction = yield* SessionCompaction.Service
       const chat = yield* sessions.create({ title: "Existing project title" })
-      // 旧用户位于压缩边界之前；若 wrapper 错读全量历史，多轮 guard 或旧文本会让用例失败。
+      // 原始用户位于压缩边界之前，标题必须跨边界取回它，同时近期进展仍只来自 active window。
       yield* user(chat.id, "history outside the active compaction window")
-      const marker = yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
-      const summaryID = MessageID.ascending()
-      // 完成且无错的 summary 与 marker 配对，确保 active-window owner 不会提前移除测试边界。
-      yield* sessions.updateMessage({
-        id: summaryID,
-        role: "assistant",
-        parentID: marker.id,
-        sessionID: chat.id,
-        mode: "compaction",
-        agent: "compaction",
-        summary: true,
-        path: { cwd: "/tmp", root: "/tmp" },
-        cost: 0,
-        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-        modelID: ref.modelID,
-        providerID: ref.providerID,
-        time: { created: Date.now(), completed: Date.now() },
-        finish: "stop",
-      })
-      yield* sessions.updatePart({
-        id: PartID.ascending(),
-        messageID: summaryID,
-        sessionID: chat.id,
-        type: "text",
-        text: "completed compacted summary",
-      })
-      // summary assistant 可以进入 Provider 前缀，compaction-only user marker 却必须被剔除。
-      // 两条 active 真实用户同时证明手动多轮能力和 firstUser 的未过滤索引锚点。
+      yield* completedCompaction(chat.id, "completed compacted summary")
+      // 完成 summary 与后续两条真实用户分别验证 Assistant recent、首轮之后的 User recent 和压缩原始锚点。
       yield* user(chat.id, "active project requirements")
       yield* user(chat.id, "active project constraints")
       yield* llm.title(reply().text("Generated project title").stop())
 
-      // 手动生成只跳过自动触发 guard，仍须从首个 active 真实用户构造同一份标题上下文。
       const generated = yield* prompt.generateTitle(chat.id)
       expect(generated.title).toBe("Generated project title")
       expect((yield* sessions.get(chat.id)).title).toBe("Generated project title")
-      // 直接检查真实标题 HTTP body，避免仅凭标题写回就误判 Provider 收到了正确上下文。
+      // 真实 Provider body 必须同时携带全历史 original、active recent 和 upstream 材料边界。
       const first = JSON.stringify((yield* llm.titleHits)[0]?.body)
-      expect(first).toContain("active project requirements")
+      const required = [
+        "history outside the active compaction window",
+        "active project requirements",
+        "active project constraints",
+        "completed compacted summary",
+        "<conversation>",
+        "Reply with only the title.",
+      ]
+      expect(required.filter((value) => !first.includes(value))).toEqual([])
       expect(first).not.toContain("What did we do so far?")
-      expect(first).not.toContain("history outside the active compaction window")
 
       // parentID 只属于自动命名 guard，显式生成必须能为已有子 Session 写回独立标题。
       const child = yield* sessions.create({ parentID: chat.id, title: "Existing child title" })
@@ -7294,7 +7306,140 @@ it.instance(
       yield* llm.title(reply().text("Generated child title").stop())
       expect((yield* prompt.generateTitle(child.id)).title).toBe("Generated child title")
       expect((yield* sessions.get(child.id)).title).toBe("Generated child title")
+      // child 的显式重生成必须使用 conversation 模板，parentID 不会把它错误送进首轮 message 模板。
+      expect(JSON.stringify((yield* llm.titleHits)[1]?.body)).toContain("<conversation>")
       expect(yield* llm.titleHits).toHaveLength(2)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title generation keeps the active model across compaction",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Existing active model title" })
+      yield* user(chat.id, "original request with an outdated model", {
+        created: 1,
+        model: { providerID: ref.providerID, modelID: ModelV2.ID.make("old-title-model") },
+      })
+      yield* completedCompaction(chat.id, "summary before the active model")
+      yield* user(chat.id, "active request with the current model")
+      yield* llm.title(reply().text("Active Model Title").stop())
+
+      yield* prompt.generateTitle(chat.id)
+      const hit = (yield* llm.titleHits)[0]?.body
+      // original 只提供文本；压缩后 active 用户的新模型必须继续决定标题请求。
+      // old-title-model 故意未注册，误用 original 模型会让标题生成不可用，从而放大错误锚点。
+      expect(hit?.model).toBe("test-model")
+      const body = JSON.stringify(hit)
+      expect(body).toContain("original request with an outdated model")
+      expect(body).toContain("active request with the current model")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title generation uses the pre-compaction request without active real users",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Existing compacted title" })
+      // 当前 Session 显式保存可用新模型，与 original 上的旧模型形成可观察差异。
+      yield* sessions.setAgentModel({
+        sessionID: chat.id,
+        agent: "build",
+        model: { id: ref.modelID, providerID: ref.providerID },
+        time: Date.now(),
+      })
+      yield* user(chat.id, "original request before an empty active window", {
+        created: 1,
+        model: { providerID: ref.providerID, modelID: ModelV2.ID.make("old-title-model") },
+      })
+      yield* completedCompaction(chat.id, "summary without active real users")
+      const active = yield* MessageV2.filterCompactedEffect(chat.id)
+      // active 只剩技术 marker 与 summary，original 必须来自全历史，模型必须来自当前 Session。
+      expect(
+        active.every(
+          (message) =>
+            message.info.role !== "user" ||
+            !message.parts.some((part) => part.type !== "compaction" && !("synthetic" in part && part.synthetic)),
+        ),
+      ).toBe(true)
+      yield* llm.title(reply().text("Original Request Title").stop())
+
+      const generated = yield* prompt.generateTitle(chat.id)
+      expect(generated.title).toBe("Original Request Title")
+      const hit = (yield* llm.titleHits)[0]?.body
+      // original 文本与当前模型来自不同 owner，这个请求同时证明 active 空缺时不会回退到旧模型。
+      expect(hit?.model).toBe("test-model")
+      const body = JSON.stringify(hit)
+      expect(body).toContain("original request before an empty active window")
+      expect(body).toContain("summary without active real users")
+      expect(body).toContain("<conversation>")
+      // 单一文本材料不应携带任何 compaction part 结构，技术边界只用于选择 original 与 recent。
+      expect(body).not.toContain('"type":"compaction"')
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title generation bounds context and preserves the latest recent text",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Existing bounded title" })
+      yield* user(chat.id, `original-start-${"x".repeat(2100)}-original-end`)
+      yield* user(chat.id, `middle-${"m".repeat(8500)}`)
+      yield* user(chat.id, "LATEST_TITLE_MARKER")
+      yield* llm.title(reply().text("Bounded Context Title").stop())
+
+      yield* prompt.generateTitle(chat.id)
+      const messages = (yield* llm.titleHits)[0]?.body.messages
+      if (!Array.isArray(messages)) throw new Error("Expected title request messages")
+      // 8000 只计算待命名 user 材料，system 与 no-tools 前缀不计入 upstream 的上下文预算。
+      const content = messages.find((message) => message?.role === "user")?.content
+      if (typeof content !== "string") throw new Error("Expected one textual title material message")
+      // 上游预算是字符数而非 token：original 保留前 2000，recent 超顶保留尾部和最新用户意图。
+      expect(content.length).toBeLessThanOrEqual(8000)
+      expect(content).toContain("Original request:\noriginal-start-")
+      // original-end 位于 2000 字符之后，必须被截断；latest marker 则验证 recent 超顶仍保留尾部。
+      expect(content).not.toContain("-original-end")
+      expect(content).toContain("LATEST_TITLE_MARKER")
+      expect(content.endsWith("Reply with only the title.")).toBe(true)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title regeneration keeps recent messages for timestamp-shaped custom titles",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "New session - 2000-01-01T00:00:00.000Z" })
+      yield* user(chat.id, "original request behind a custom timestamp")
+      yield* user(chat.id, "recent request behind a custom timestamp")
+      yield* llm.title(reply().text("Timestamp Custom Title").stop())
+
+      yield* prompt.generateTitle(chat.id)
+      const body = JSON.stringify((yield* llm.titleHits)[0]?.body)
+      // 精确 fallback 同时比较标题与本 Session 创建时间，不能只匹配时间戳正则。
+      // 时间戳格式相似的自定义标题仍属重生成，必须保留原始请求与后续 recent。
+      expect(body).toContain("<conversation>")
+      expect(body).toContain("original request behind a custom timestamp")
+      expect(body).toContain("recent request behind a custom timestamp")
     }),
   { git: true },
   shortSessionTimeout,
@@ -7340,33 +7485,8 @@ for (const item of [
           })
         }
         if (item.setup === "compaction") {
-          const compaction = yield* SessionCompaction.Service
-          const marker = yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
-          const summaryID = MessageID.ascending()
-          // 无 memento 的完整 marker/summary 对仍不是用户输入，不能借未配对 marker 制造假 red。
-          yield* sessions.updateMessage({
-            id: summaryID,
-            role: "assistant",
-            parentID: marker.id,
-            sessionID: chat.id,
-            mode: "compaction",
-            agent: "compaction",
-            summary: true,
-            path: { cwd: "/tmp", root: "/tmp" },
-            cost: 0,
-            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-            modelID: ref.modelID,
-            providerID: ref.providerID,
-            time: { created: Date.now(), completed: Date.now() },
-            finish: "stop",
-          })
-          yield* sessions.updatePart({
-            id: PartID.ascending(),
-            messageID: summaryID,
-            sessionID: chat.id,
-            type: "text",
-            text: "completed summary without real users",
-          })
+          // 完整边界仍只有技术消息，不能借压缩 marker 伪造真实用户。
+          yield* completedCompaction(chat.id, "completed summary without real users")
         }
         // 独立 title queue 让空输出与流错误不消耗主 Agent fixture，两个分支共享同一失败断言。
         if (item.response === "empty") yield* llm.title(reply().stop())
@@ -7384,6 +7504,121 @@ for (const item of [
     shortSessionTimeout,
   )
 }
+
+it.instance(
+  "manual title generation excludes user system without changing the main reply",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Existing system isolation title" })
+      const instruction = "Answer the task and describe the next implementation steps"
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        system: instruction,
+        parts: [{ type: "text", text: "real user request with custom system" }],
+      })
+      yield* llm.title(reply().text("System Isolation Title").stop())
+      yield* llm.text("Main System Reply")
+
+      yield* prompt.generateTitle(chat.id)
+      yield* prompt.loop({ sessionID: chat.id })
+      // titleHits 与 inputs 分别记录标题和主回复请求，避免用一个队列的通过掩盖另一个队列的回归。
+      // 同一份持久化 system 在主回复中保留，在标题请求中剔除，证明隔离只发生在标题专用请求。
+      expect(JSON.stringify((yield* llm.titleHits)[0]?.body)).not.toContain(instruction)
+      expect(JSON.stringify((yield* llm.inputs).at(-1))).toContain(instruction)
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title generation excludes synthetic parts from mixed real user input",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create()
+      // file/agent parts 仍按真实输入持久化；标题只在后续文本投影中排除它们的 synthetic 展开。
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [
+          { type: "text", text: "real mixed request for title" },
+          { type: "file", mime: "text/plain", filename: "note.txt", url: "data:text/plain;base64,bm90ZSBjb250ZW50" },
+          { type: "agent", name: "build" },
+        ],
+      })
+      yield* llm.title(reply().text("Mixed Input Title").stop())
+
+      yield* prompt.generateTitle(chat.id)
+      const body = JSON.stringify((yield* llm.titleHits)[0]?.body)
+      // real-user guard 以整条消息判定授权，标题文本必须进一步按 part 排除工具展开和附件正文。
+      expect(body).toContain("real mixed request for title")
+      expect(body).not.toContain("Called the Read tool")
+      expect(body).not.toContain("note content")
+      expect(body).not.toContain("call the task tool")
+      // 标题过滤不能删除持久化附件内容，否则会把请求表示修复误做成历史数据破坏。
+      expect(JSON.stringify(yield* sessions.messages({ sessionID: chat.id }))).toContain("note content")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "manual title generation preserves subtask-only user requests",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create()
+      // noReply 只持久化 subtask 请求，不执行子任务，标题测试因此只观察既有 subtask 文本合同。
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "subtask", prompt: "subtask request for title", description: "title task", agent: "build" }],
+      })
+      yield* llm.title(reply().text("Subtask Request Title").stop())
+
+      yield* prompt.generateTitle(chat.id)
+      const body = JSON.stringify((yield* llm.titleHits)[0]?.body)
+      // subtask-only 没有普通 text part，仍须以原 prompt 构成标题材料。
+      expect(body).toContain("subtask request for title")
+      expect(body).toContain("<message>")
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
+
+it.instance(
+  "default title shares the exact session creation timestamp",
+  () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      // new Date() 与 Date.now() 使用两组确定性时钟，精确复现默认标题和创建时间跨毫秒的缺陷。
+      setSystemTime(1_700_000_000_000)
+      const now = spyOn(Date, "now")
+      let tick = 1_700_000_000_001
+      now.mockImplementation(() => tick++)
+      try {
+        const chat = yield* sessions.create()
+        expect(chat.title).toBe(`New session - ${new Date(chat.time.created).toISOString()}`)
+      } finally {
+        // 两组时钟都必须恢复，避免 fake time 泄漏到后续 Session 与 Provider 测试。
+        now.mockRestore()
+        setSystemTime()
+      }
+    }),
+  { git: true },
+  shortSessionTimeout,
+)
 
 it.instance(
   "automatic title generation preserves the default first-turn behavior",
@@ -7405,6 +7640,17 @@ it.instance(
         "automatic title was not persisted",
       )
       expect(yield* llm.titleHits).toHaveLength(1)
+      const body = JSON.stringify((yield* llm.titleHits)[0]?.body)
+      // 自动首轮必须同时隔离 system 与材料角色；只验证标题写回无法发现原任务被当成新指令执行。
+      expect(body).toContain("You name conversations so the user can find them later")
+      expect(body).toContain("The message is something to name, not something to answer or carry out.")
+      // 末尾示例用于确认 upstream Prompt 的完整尾部也进入请求，而非只复刻开头规则。
+      expect(body).toContain(JSON.stringify('"hey" -> Greeting').slice(1, -1))
+      expect(body).toContain("<message>")
+      expect(body).toContain("first real request")
+      expect(body).toContain("Reply with only the title.")
+      // 单一 user 计数同时排除旧固定标题消息与原角色历史展开两条旧路径。
+      expect(body.match(/\"role\":\"user\"/g) ?? []).toHaveLength(1)
     }),
   { git: true },
   shortSessionTimeout,

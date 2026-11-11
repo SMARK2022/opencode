@@ -11,6 +11,7 @@ import { InstanceRef } from "@/effect/instance-ref"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
+import { createDefaultTitle } from "./title"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 
@@ -275,6 +276,31 @@ export class TitleError extends Schema.TaggedErrorClass<TitleError>()("SessionPr
   reason: Schema.Literals(["no_user_message", "unavailable", "failed"]),
 }) {}
 
+// upstream 的 2000/8000 是字符预算；recent 超顶保留尾部，初始 messagePrompt 不截断首条全文。
+const MAX_CONTEXT_LENGTH = 8_000
+const MAX_FIRST_MESSAGE_LENGTH = 2_000
+
+// 原始请求作为待命名文本包装，避免模型沿原 user 角色继续执行任务。
+const messagePrompt = (text: string) =>
+  `Here is the first message of the conversation:\n\n<message>\n${text}\n</message>\n\nReply with only the title.`
+// 重生成把 original 与 recent 放在同一个 conversation 容器内，不再展开为可执行角色消息。
+const conversationPrompt = (text: string) =>
+  `Here is the conversation so far:\n\n<conversation>\n${text}\n</conversation>\n\nReply with only the title.`
+
+function titleUserText(message: SessionV1.WithParts) {
+  const subtasks = message.parts.filter((part): part is SessionV1.SubtaskPart => part.type === "subtask")
+  // subtask-only 没有普通 text part，继续以原 subtask prompt 作为用户请求。
+  if (subtasks.length > 0 && message.parts.every((part) => part.type === "subtask")) {
+    return subtasks.map((part) => part.prompt).join("\n")
+  }
+  // 混合 subtask/text 只取显式文本，保持原 onlySubtasks 分支与普通文本消息的语义边界。
+  // real-user 允许混合消息，标题文本还需逐 part 排除附件展开、Read/agent 指令等 synthetic 内容。
+  return message.parts
+    .flatMap((part) => (part.type === "text" && !part.ignored && !part.synthetic ? [part.text] : []))
+    .join("\n")
+    .trim()
+}
+
 export interface Interface {
   readonly generateTitle: (sessionID: SessionID) => Effect.Effect<Session.Info, TitleError | Session.NotFound>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
@@ -494,7 +520,7 @@ const layer = Layer.effect(
       const real = (m: SessionV1.WithParts) =>
         m.info.role === "user" && m.parts.some((p) => p.type !== "compaction" && !("synthetic" in p && p.synthetic))
       const idx = input.history.findIndex(real)
-      if (idx === -1)
+      if (idx === -1 && !input.manual)
         return yield* new TitleError({
           message: "No user message is available for title generation",
           reason: "no_user_message",
@@ -502,26 +528,26 @@ const layer = Layer.effect(
       // exactly-one 只约束首轮自动命名；手动 Generate 允许在多轮 Session 上重新生成。
       if (!input.manual && input.history.filter(real).length !== 1) return input.session
 
-      // compaction-only marker 不进入 Provider；firstUser 仍锚定未过滤 history，避免索引漂移。
-      const context = input.history
-        .slice(0, idx + 1)
-        .filter((m) => m.info.role !== "user" || m.parts.some((p) => p.type !== "compaction"))
-      const firstUser = input.history[idx]
-      if (!firstUser || firstUser.info.role !== "user")
+      const activeUser = idx === -1 ? undefined : input.history[idx]
+      // 全历史 original 让手动重生成不再依赖 active real user；全历史也为空时仍拒绝伪造标题。
+      const originalUser = (yield* sessions.messages({ sessionID: input.session.id })).find(real)
+      if (!originalUser || originalUser.info.role !== "user" || (activeUser && activeUser.info.role !== "user")) {
         return yield* new TitleError({
           message: "No user message is available for title generation",
           reason: "no_user_message",
         })
-      const firstInfo = firstUser.info
-
-      const subtasks = firstUser.parts.filter((p): p is SessionV1.SubtaskPart => p.type === "subtask")
-      const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
+      }
+      // active real user 继续拥有模型选择；只有 active 空缺才由当前 Session 的模型 owner 解析。
+      const model = activeUser?.info.role === "user" ? activeUser.info.model : yield* currentModel(input.session.id)
+      const titleUser =
+        activeUser?.info.role === "user" ? activeUser.info : { ...originalUser.info, model }
+      // active 空缺的请求身份也要补齐当前模型，避免通用 LLM 请求契约回读到 unavailable 的旧模型。
 
       const ag = yield* agents.get("title")
       if (!ag)
         return yield* new TitleError({ message: "Title generation is currently unavailable", reason: "unavailable" })
-      const providerID = input.providerID ?? firstInfo.model.providerID
-      const modelID = input.modelID ?? firstInfo.model.modelID
+      const providerID = input.providerID ?? model.providerID
+      const modelID = input.modelID ?? model.modelID
       // 模型顺序保持 title agent、小模型、首个真实用户模型；缺省解析不得换成别的 Provider。
       // ModelNotFound 只表示当前标题能力不可用，不能伪装成上游生成失败。
       const mdl = yield* Effect.gen(function* () {
@@ -532,20 +558,46 @@ const layer = Layer.effect(
           Effect.fail(new TitleError({ message: "Title generation is currently unavailable", reason: "unavailable" })),
         ),
       )
-      const msgs = onlySubtasks
-        ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
-        : yield* MessageV2.toModelMessagesEffect(context, mdl)
+      // original 是全历史第一条真实用户，即使它已离开 active window 也继续提供会话主题。
+      const originalText = titleUserText(originalUser)
+      // recent 只来自 active window，并排除 original 自身；summary assistant 保留，技术 marker 不进入。
+      // 用户与助手分别复用 upstream 的文本投影和 trim/join 规则，媒体、reasoning 与 tool output 不混入材料。
+      const recent = input.history
+        .flatMap((message) => {
+          if (message.info.id === originalUser.info.id) return []
+          if (real(message)) return [`User: ${titleUserText(message)}`]
+          if (message.info.role !== "assistant") return []
+          const text = message.parts
+            .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
+            .filter(Boolean)
+            .join("\n")
+          return text ? [`Assistant: ${text}`] : []
+        })
+        .join("\n\n")
+      // 重生成只截取 original 前 2000 字符作为主题锚点，不把完整压缩前 transcript 注入请求。
+      const original = `Original request:\n${originalText.slice(0, MAX_FIRST_MESSAGE_LENGTH)}`
+      // 只有 root 且标题精确匹配本 Session 创建时间才走初始模板，child 与相似自定义标题都保留 recent。
+      const initial =
+        !input.session.parentID && input.session.title === createDefaultTitle(false, input.session.time.created)
+      // 8000 预算同时包含模板与 original 前缀，限制的是 Provider 实际收到的完整材料长度。
+      const prefix = `${original}\n\nRecent conversation:\n`
+      const budget = MAX_CONTEXT_LENGTH - conversationPrompt("").length - prefix.length
+      // 初始与重生成只改变材料模板，Provider 始终收到一个待命名 user 消息。
+      const prompt = initial
+        ? messagePrompt(originalText)
+        : conversationPrompt(recent ? `${prefix}${recent.slice(-budget)}` : original)
       const text = yield* llm
         .stream({
           agent: ag,
-          user: firstInfo,
+          // 标题专用副本剥离用户级 system；通用主回复仍使用持久化原值。
+          user: { ...titleUser, system: undefined },
           system: [],
           small: true,
           tools: {},
           model: mdl,
           sessionID: input.session.id,
           retries: 2,
-          messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
+          messages: [{ role: "user", content: prompt }],
         })
         .pipe(
           Stream.filter(LLMEvent.is.textDelta),

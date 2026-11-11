@@ -613,7 +613,8 @@ function hit(url: string, body: unknown) {
 
 function isTitleRequest(body: unknown): boolean {
   if (!body || typeof body !== "object") return false
-  return JSON.stringify(body).includes("Generate a title for this conversation")
+  // 两种 upstream 材料模板共用 closing；识别不依赖可被用户覆盖的 title system。
+  return JSON.stringify(body).includes("Reply with only the title.")
 }
 
 namespace TestLLMServer {
