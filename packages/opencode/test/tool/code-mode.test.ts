@@ -946,8 +946,13 @@ describe("code mode execute", () => {
     expect(out.output).not.toContain("PRIVATE_")
     // 所有失败均已由 allSettled 观察；正文不列错误名称，恢复 metadata 仍保留完整调用事实。
     expect(out.metadata.toolCalls).toEqual([
-      ...names.map((name) => ({ tool: `batch.${name}`, status: "error", input: { secret: "PRIVATE_ARGUMENT" } })),
-      { tool: "batch.ok", status: "completed", input: { secret: "PRIVATE_ARGUMENT" } },
+      // 固定状态不能被 map 推宽为任意 string；预期回执仍按真实 CallEntry 合同检查。
+      ...names.map((name) => ({
+        tool: `batch.${name}`,
+        status: "error" as const,
+        input: { secret: "PRIVATE_ARGUMENT" },
+      })),
+      { tool: "batch.ok", status: "completed" as const, input: { secret: "PRIVATE_ARGUMENT" } },
     ])
     // 子调用全被观察后，父成功与子失败可以并存；父 error 标志不能直接取“是否有失败 child”。
     expect(out.metadata.error).toBeUndefined()
