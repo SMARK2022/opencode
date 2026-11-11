@@ -1154,3 +1154,117 @@ describe("promise chaining", () => {
     expect(result.ok && result.value).toBe(1)
   })
 })
+
+// await 回调与迭代共享 Promise 生命周期；这里同时覆盖取消穿透及逐项绑定。
+describe("async standard-library callbacks and iteration", () => {
+  // replace拥有既有async扩展；嵌套替换专门验证挂起期间保留外层匹配游标。
+  test("nested async replacers keep independent output and preserve ordinary rejection", async () => {
+    const echo = Tool.make({
+      description: "Echo",
+      input: Schema.String,
+      output: Schema.String,
+      run: (value) => Effect.succeed(value),
+    })
+    expect(
+      await Effect.runPromise(
+        CodeMode.execute({
+          tools: { host: { echo } },
+          // 外层连续匹配a、b，每次内层替换又await工具；AB同时检验外层游标与内层输出缓冲互不覆盖。
+          code: 'return "ab".replace(/./g, async c => c.replace(/./g, async d => await tools.host.echo(d.toUpperCase())))',
+        }),
+      ),
+    ).toMatchObject({ ok: true, value: "AB" })
+    // 兼容扩展只负责等待 async 回调，用户抛出的普通错误仍走原 catch 语义。
+    expect(
+      await value(
+        'try { return "ab".replace(/./g, async () => { throw new Error("replacer refused") }) } catch(e) { return e.message }',
+      ),
+    ).toBe("replacer refused")
+  })
+
+  test("host interruption in an async replacer cannot resume caught side effects", async () => {
+    const later: string[] = []
+    const stop = Tool.make({ description: "Stop", input: Schema.Struct({}), run: () => Effect.interrupt })
+    const after = Tool.make({
+      description: "After",
+      input: Schema.Struct({}),
+      run: () =>
+        Effect.sync(() => {
+          later.push("ran")
+          return "wrong"
+        }),
+    })
+    // 真正宿主取消不是可恢复的替换失败；后续工具效果和脚本伪成功都必须缺席。
+    const result = await Effect.runPromise(
+      CodeMode.execute({
+        tools: { host: { stop, after } },
+        code: 'try { return "ab".replace(/./g, async () => await tools.host.stop({})) } catch(e) { return await tools.host.after({}) }',
+      }).pipe(Effect.exit),
+    )
+    expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true)
+    // Exit含中断仍可能夹带catch里的副作用，宿主later清单独立证明取消后没有继续调用after。
+    expect(later).toEqual([])
+  })
+
+  // 内建令牌沿用函数的不透明边界，别名和集合回调只能返回受监管的 Promise。
+  test("sleep aliases and callbacks retain callable identity without exposing global methods", async () => {
+    expect(
+      await value(`const pause = sleep; const box = { pause };
+    await box.pause(0.25); await Promise.all([0, 0].map(pause));
+    new Set([0]).forEach(pause); new Map([[0, 0]]).forEach(pause);
+    async function nested() { await pause(0); return 3; }
+    return [typeof pause, await nested(), await pause(0)];`),
+    ).toEqual(["function", 3, null])
+    // sleep可当回调传递但不暴露宿主函数属性；Math.abs的反例保留原有全局方法不可提取的限制。
+    for (const code of [
+      "return sleep.name",
+      "return sleep.constructor",
+      "return [1].map(Math.abs)",
+      "return sleep.call(null, 0)",
+    ]) {
+      expect((await run(code)).ok).toBe(false)
+    }
+    // 非法参数必须在调用sleep时同步抛出，脚本未await仍能catch；样本同时约束类型、有限性与计时器上限。
+    for (const arg of ['"0"', "undefined", "null", "NaN", "Infinity", "-1", "2147483648"]) {
+      expect(await value(`try { sleep(${arg}); } catch (e) { return true; } return false`)).toBe(true)
+    }
+    // 上限是有限可取消计时器，不能为了测试等待二十四天；根返回负责取消它。
+    expect(await value("sleep(2147483647); return 1")).toBe(1)
+  })
+
+  // 循环后才调用闭包，才能发现各次迭代错误复用同一Binding；continue分支也必须保留自己的值。
+  test("for-await settles yielded promises and preserves sequential bodies and iteration bindings", async () => {
+    expect(
+      // out因continue跳过2，闭包仍各自保存1、2、3；assigned为4则覆盖复用外部变量的另一种绑定入口。
+      await value(`const out = [], closures = [];
+    for await (const [n] of [Promise.resolve([1]), [2], [3]]) {
+      await sleep(0); closures.push(() => n); if (n === 2) continue; out.push(n);
+    }
+    let assigned = 0; for await (assigned of [Promise.resolve(4)]) {}
+    return [out, closures.map(f => f()), assigned];`),
+    ).toEqual([[1, 3], [1, 2, 3], 4])
+    // Map产出的是条目数组，只等待最外层条目；其中的Promise值仍由循环体显式await。
+    expect(
+      // 字符串按码点产出emoji，Set逐项等待Promise，Map条目内的Promise保持身份，三个迭代域分别约束一层等待。
+      await value(`const chars = []; for await (const c of "A😀") chars.push(c);
+    const set = []; for await (const n of new Set([Promise.resolve(1), 2])) set.push(n);
+    const pairs = []; for await (const [k, v] of new Map([["a", Promise.resolve(3)]]))
+      pairs.push([k, v instanceof Promise, await v]);
+    return [chars, set, pairs];`),
+    ).toEqual([["A", "😀"], [1, 2], [["a", true, 3]]])
+  })
+
+  // 外层n在两次绑定失败后仍为7，区分循环帧正确释放与只返回了预期错误消息。
+  test("for-await rejects before binding and cleans frames through destructuring and early exits", async () => {
+    expect(
+      // no而非body证明拒绝先于循环体，break只留下1，return取得9；两次失败后外层n仍为7。
+      await value(`let n = 7; let caught = "";
+    try { for await (const n of [Promise.reject("no")]) { throw "body"; } } catch (e) { caught = e; }
+    try { for await (const [n = missing] of [[]]) {} } catch (e) {}
+    const out = []; for await (const x of [1, 2, 3]) { if (x === 2) break; out.push(x); }
+    async function first() { for await (const x of [Promise.resolve(9)]) return x; }
+    return [n, caught, out, await first()];`),
+    ).toEqual([7, "no", [1], 9])
+    expect((await run("for await (const x of { a: 1 }) {} ")).ok).toBe(false)
+  })
+})

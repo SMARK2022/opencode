@@ -25651,6 +25651,26 @@
             },
             "additionalProperties": false
           },
+          "codemode": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "keep_tools": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ],
+            "description": "配置 Code Mode 工具编排；显式环境变量优先于此设置。"
+          },
           "snapshot": {
             "type": "boolean"
           },
