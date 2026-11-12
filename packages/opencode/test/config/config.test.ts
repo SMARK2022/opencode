@@ -1,8 +1,10 @@
 import { test, expect, describe, afterEach, beforeEach, spyOn } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
-import { Cause, Effect, Exit, Layer, Logger, Option } from "effect"
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Logger, Option } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { Config } from "@/config/config"
@@ -288,6 +290,41 @@ async function check(map: (dir: string) => string) {
     await clear()
   }
 }
+
+it.live("getGlobal retries an interrupted initial read and reuses the successful config", () =>
+  Effect.gen(function* () {
+    const previous = Flag.OPENCODE_CONFIG_CONTENT
+    Flag.OPENCODE_CONFIG_CONTENT = "{}"
+    // 配置 flag 在 scope 结束时恢复，避免内联配置污染后续文件加载测试。
+    yield* Effect.addFinalizer(() => Effect.sync(() => { Flag.OPENCODE_CONFIG_CONTENT = previous }))
+    const started = yield* Deferred.make<void>()
+    let reads = 0
+    // 非 Effect 成员只为满足 FSUtil 继承边界，实际读取仍由内存实现接管。
+    const fsLayer = Layer.mock(FSUtil.Service)({
+      "~effect/platform/FileSystem": "~effect/platform/FileSystem",
+      sink: () => { throw new Error("unexpected sink") },
+      globMatch: () => { throw new Error("unexpected globMatch") },
+      readFileStringSafe: () => Effect.gen(function* () {
+        reads++
+        // 后续文件缺失返回 undefined，确保测试中的异常只来自首次请求中断。
+        if (reads > 1) return undefined
+        yield* Deferred.succeed(started, undefined)
+        return yield* Effect.never
+      }),
+    })
+    // fresh layer 隔离 Config 的全局缓存，避免 beforeEach 使用的实例影响本测试。
+    const context = yield* Layer.build(Layer.fresh(AppNodeBuilder.build(Config.node, [[FSUtil.node, fsLayer]])))
+    const svc = Context.get(context, Config.Service)
+    const first = yield* svc.getGlobal().pipe(Effect.forkChild)
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(first)
+    const second = yield* svc.getGlobal()
+    const third = yield* svc.getGlobal()
+    // 全局配置缓存独立失效后应重读；成功结果继续复用，不能每次请求都读文件。
+    expect(reads).toBeGreaterThan(1)
+    expect(third).toBe(second)
+  }),
+)
 
 it.instance("loads config with defaults when no files exist", () =>
   Effect.gen(function* () {

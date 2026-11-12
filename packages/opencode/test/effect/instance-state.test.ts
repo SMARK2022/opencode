@@ -317,6 +317,53 @@ it.live("InstanceState dedupes concurrent lookups", () =>
   }),
 )
 
+it.live("InstanceState retries interrupted lookups while preserving cache contracts", () =>
+  Effect.gen(function* () {
+    const dir = yield* tmpdirScoped()
+    const started = yield* Deferred.make<void>()
+    const events: string[] = []
+    let attempts = 0
+    const state = yield* InstanceState.make(() => {
+      const attempt = ++attempts
+      if (attempt === 1) {
+        // 首个 generation 持有真实 finalizer，用来区分中断当下释放与下一次 lookup 替换时释放。
+        return Effect.acquireRelease(
+          Deferred.succeed(started, undefined).pipe(Effect.as({ attempt })),
+          () => Effect.sync(() => events.push("finalized:first")),
+        ).pipe(Effect.flatMap(() => Effect.never))
+      }
+      if (attempt === 2) events.push("lookup:second")
+      return Effect.yieldNow.pipe(Effect.as({ attempt }))
+    })
+
+    const first = yield* access(state, dir).pipe(Effect.forkChild)
+    yield* Deferred.await(started)
+    yield* Fiber.interrupt(first)
+
+    // 两个重试调用必须加入同一个新 generation，不能各自触发一次初始化。
+    const one = yield* access(state, dir).pipe(Effect.forkChild)
+    const two = yield* access(state, dir).pipe(Effect.forkChild)
+    const [a, b] = yield* Effect.all([Fiber.join(one), Fiber.join(two)], { concurrency: "unbounded" })
+    // 中断后的新 generation 只初始化一次，且旧 entry 必须先释放再参与重试。
+    expect(a).toBe(b)
+    expect(a).toEqual({ attempt: 2 })
+    expect(attempts).toBe(2)
+    expect(events).toEqual(["finalized:first", "lookup:second"])
+    expect(yield* access(state, dir)).toBe(a)
+
+    // 独立缓存的普通错误控制证明成功目录的 retry 不会意外改变失败保留策略。
+    let failures = 0
+    const failed = yield* InstanceState.make(() =>
+      Effect.sync(() => failures++).pipe(Effect.flatMap(() => Effect.fail("persistent-config-error"))),
+    )
+    const failure1 = yield* Effect.exit(access(failed, dir))
+    const failure2 = yield* Effect.exit(access(failed, dir))
+    // 普通 typed failure 不是请求中断，连续读取仍共享首次结果，避免重复初始化。
+    expect(failures).toBe(1)
+    expect(failure1).toEqual(failure2)
+  }),
+)
+
 it.live("InstanceState survives deferred resume from the same instance context", () =>
   Effect.gen(function* () {
     const dir = yield* tmpdirScoped({ git: true })

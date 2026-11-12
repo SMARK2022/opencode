@@ -18,6 +18,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, ReadResourceRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js"
 import { ChildProcessSpawner } from "effect/unstable/process"
 import { McpConnection } from "@opencode-ai/core/mcp/connection"
+import { McpOAuthCallback } from "@opencode-ai/core/mcp/oauth-callback"
 import { McpAuth } from "@opencode-ai/core/mcp/auth"
 import { McpBrowser } from "@opencode-ai/core/mcp/browser"
 import { McpRuntime } from "@opencode-ai/core/mcp"
@@ -310,6 +311,196 @@ describe("ToolRegistry", () => {
         expect((yield* service.materialize()).definitions.map(tool => tool.name)).toEqual(["echo"])
       }
       expect(state.closes).toBe(3)
+    }),
+  )
+
+  it.live("McpConnection cleans partial clients and retries interrupted initialization", () =>
+    Effect.gen(function* () {
+      const watchInstalled = yield* Deferred.make<void>()
+      const hangingStarted = yield* Deferred.make<void>()
+      const server = new Server({ name: "fixture", version: "1" }, { capabilities: {} })
+      let constructions = 0
+      let fastCloses = 0
+      let healthy = false
+      // id=1 建立完整连接，id=2 永久挂起，构造部分成功后被中断的真实连接池。
+      class MemoryClient extends Client {
+        id = ++constructions
+        override async connect(..._args: Parameters<Client["connect"]>) {
+          if (this.id === 2) {
+            await Effect.runPromise(Deferred.succeed(hangingStarted, undefined))
+            return new Promise<never>(() => {})
+          }
+          const pair = InMemoryTransport.createLinkedPair()
+          await server.connect(pair[1])
+          await super.connect(pair[0])
+        }
+        // watch 在客户端入库后安装 handler，该信号比固定 sleep 更准确地表示可以发起中断。
+        override setNotificationHandler(...args: Parameters<Client["setNotificationHandler"]>) {
+          const result = super.setNotificationHandler(...args)
+          if (this.id === 1) Effect.runFork(Deferred.succeed(watchInstalled, undefined))
+          return result
+        }
+        // 只统计首个 fast client，避免重试成功后的新连接混淆资源泄漏断言。
+        override async close() {
+          if (this.id === 1) fastCloses++
+          await super.close()
+        }
+      }
+      const connection = yield* McpConnection.make({
+        directory: process.cwd(),
+        Client: MemoryClient,
+        // retry 仅禁用 hanging server，验证新配置会重新求值，同时不访问真实网络。
+        config: () => Effect.succeed(ConfigMCP.resolve([ConfigMigrateV1.mcp({ mcp: {
+          fast: { type: "remote", url: "https://fast.fixture.invalid", oauth: false, timeout: 60000 },
+          hanging: { type: "remote", url: "https://hanging.fixture.invalid", oauth: false, enabled: !healthy, timeout: 60000 },
+        } }) ?? {}])),
+        notify: () => Effect.void,
+      }).pipe(Effect.provide(Layer.mergeAll(
+        Layer.mock(McpAuth.Service, {}),
+        Layer.mock(McpBrowser.Service, {}),
+        Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}),
+      )))
+      // 测试 server 独立关闭，连接池是否履行清理仍由 fastCloses 单独判定。
+      yield* Effect.addFinalizer(() => Effect.promise(() => server.close()))
+      const first = yield* connection.status().pipe(Effect.forkChild)
+      const waiting = yield* connection.status().pipe(Effect.forkChild)
+      yield* Deferred.await(watchInstalled)
+      yield* Deferred.await(hangingStarted)
+      yield* Fiber.interrupt(first)
+      const waitingExit = yield* Fiber.await(waiting)
+      // 同代等待者收到原始中断；失败 generation 已创建的客户端必须立即清理。
+      expect(Exit.isFailure(waitingExit) && Cause.hasInterrupts(waitingExit.cause)).toBe(true)
+      expect(fastCloses).toBe(1)
+      healthy = true
+      const retried = yield* connection.status()
+      expect(retried.fast?.status).toBe("connected")
+      expect(retried.hanging?.status).toBe("disabled")
+      const count = constructions
+      yield* connection.status()
+      // 重试成功后继续使用同一连接池，不能每次 status 都重连。
+      expect(constructions).toBe(count)
+    }),
+  )
+
+  it.live("McpConnection keeps failed dispose isolated from OAuth and clears it after success", () =>
+    Effect.gen(function* () {
+      // 内存 Auth 只响应流程调用，不读取或写入真实凭据。
+      const deps = Layer.mergeAll(
+        Layer.mock(McpAuth.Service, {
+          get: () => Effect.succeed(undefined),
+          getForUrl: () => Effect.succeed(undefined),
+          set: () => Effect.void,
+          updateOAuthState: () => Effect.void,
+          updateCodeVerifier: () => Effect.void,
+          clearOAuthState: () => Effect.void,
+          clearCodeVerifier: () => Effect.void,
+        }),
+        Layer.mock(McpBrowser.Service, {}),
+        Layer.mock(ChildProcessSpawner.ChildProcessSpawner, {}),
+      )
+      // 本机 HTTP fixture 只通过公开 401、discovery 和 token 响应驱动 SDK OAuth。
+      const oauthServer = Bun.serve({
+        port: 0,
+        fetch(request) {
+          const url = new URL(request.url)
+          if (url.pathname === "/.well-known/oauth-authorization-server") {
+            // RFC 8414 元数据让 SDK 自己构造授权 URL，测试不读取 transport 私有字段。
+            return Response.json({
+              issuer: url.origin,
+              authorization_endpoint: `${url.origin}/authorize`,
+              token_endpoint: `${url.origin}/token`,
+              response_types_supported: ["code"],
+              grant_types_supported: ["authorization_code"],
+              code_challenge_methods_supported: ["S256"],
+            })
+          }
+          if (url.pathname === "/token" && request.method === "POST") {
+            // 公开 token 响应覆盖 finishAuth 的交换与 pending provider commit。
+            return Response.json({ access_token: "fixture-token", token_type: "Bearer" })
+          }
+          if (url.pathname === "/mcp" && request.method === "POST") {
+            return new Response("unauthorized", { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="fixture"' } })
+          }
+          return new Response("not found", { status: 404 })
+        },
+      })
+      const base = `http://127.0.0.1:${oauthServer.port}`
+      const pending = yield* McpConnection.make({
+        directory: process.cwd(),
+        Client,
+        // disabled 阻止普通初始化提前连接；client_id 避免动态注册，流程只经过公开端点。
+        config: () => Effect.succeed(ConfigMCP.resolve([ConfigMigrateV1.mcp({ mcp: {
+          pending: { type: "remote", url: `${base}/mcp`, oauth: { clientId: "fixture-client" }, enabled: false },
+        } }) ?? {}])),
+        notify: () => Effect.void,
+      }).pipe(Effect.provide(deps))
+      // 回调服务只绑定测试端口，结束后显式释放，避免影响其他 OAuth 用例。
+      yield* Effect.addFinalizer(() => Effect.promise(() => McpOAuthCallback.stop()))
+      // 本机 OAuth 与 callback 服务分别关闭，避免把 discovery 生命周期误认为连接池 owner 生命周期。
+      yield* Effect.addFinalizer(() => Effect.promise(() => oauthServer.stop()))
+      expect((yield* pending.startAuth("pending")).authorizationUrl).toContain("/authorize")
+
+      const hangingStarted = yield* Deferred.make<void>()
+      class HangingClient extends Client {
+        override async connect(..._args: Parameters<Client["connect"]>) {
+          // 永久挂起让状态 generation 保持未完成，才能覆盖失败后直接 dispose。
+          await Effect.runPromise(Deferred.succeed(hangingStarted, undefined))
+          return new Promise<never>(() => {})
+        }
+      }
+      // 失败 owner 使用独立 Scope，避免测试宿主把成功与失败 finalizer 混在一起。
+      const failedScope = yield* Scope.make()
+      const failed = yield* McpConnection.make({
+        directory: process.cwd(),
+        Client: HangingClient,
+        config: () => Effect.succeed(ConfigMCP.resolve([ConfigMigrateV1.mcp({ mcp: {
+          hanging: { type: "remote", url: "https://hanging.fixture.invalid", oauth: false },
+        } }) ?? {}])),
+        notify: () => Effect.void,
+      }).pipe(Effect.provide(deps), Scope.provide(failedScope))
+      const waiting = yield* failed.status().pipe(Effect.forkChild)
+      yield* Deferred.await(hangingStarted)
+      yield* Fiber.interrupt(waiting)
+      // 独立关闭失败 generation 的 owner Scope，不能清除其他连接的 OAuth pending。
+      yield* Scope.close(failedScope, Exit.void)
+      const survived = yield* Effect.exit(pending.finishAuth("pending", "code"))
+      // finishAuth 成功说明 pending transport 仍存在，而不是仅检查一个内部布尔值。
+      expect(Exit.isSuccess(survived)).toBe(true)
+
+      // 第二份 pending 与第一份生命周期无关，专门验证成功 dispose 的清理合同。
+      yield* pending.startAuth("pending")
+      const server = new Server({ name: "oauth-success", version: "1" }, { capabilities: {} })
+      let successCloses = 0
+      class SuccessClient extends Client {
+        override async connect(..._args: Parameters<Client["connect"]>) {
+          const pair = InMemoryTransport.createLinkedPair()
+          await server.connect(pair[1])
+          await super.connect(pair[0])
+        }
+        override async close() {
+          // 成功 owner 关闭时既要断开客户端，也要执行既有 OAuth 全局清理。
+          successCloses++
+          await super.close()
+        }
+      }
+      const successScope = yield* Scope.make()
+      const success = yield* McpConnection.make({
+        directory: process.cwd(),
+        Client: SuccessClient,
+        config: () => Effect.succeed(ConfigMCP.resolve([ConfigMigrateV1.mcp({ mcp: {
+          fast: { type: "remote", url: "https://fast.fixture.invalid", oauth: false },
+        } }) ?? {}])),
+        notify: () => Effect.void,
+      }).pipe(Effect.provide(deps), Scope.provide(successScope))
+      yield* Effect.addFinalizer(() => Effect.promise(() => server.close()))
+      // 先形成成功 generation，后续 Scope 关闭验证的才是成功聚合 finalizer。
+      expect((yield* success.status()).fast?.status).toBe("connected")
+      // 成功 generation 的聚合 finalizer 必须在 owner Scope 关闭时完整执行。
+      yield* Scope.close(successScope, Exit.void)
+      expect(successCloses).toBe(1)
+      const cleared = yield* Effect.exit(pending.finishAuth("pending", "code"))
+      // 成功 dispose 后再次出现 No pending，证明旧全局清理没有被失败隔离逻辑误删。
+      expect(Exit.isFailure(cleared) && Cause.pretty(cleared.cause)).toContain("No pending OAuth flow")
     }),
   )
 

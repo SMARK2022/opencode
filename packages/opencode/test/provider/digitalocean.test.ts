@@ -77,7 +77,7 @@ it.instance(
         oauth_expires: String(Date.now() + 60 * 60 * 1000),
       },
       Effect.gen(function* () {
-        const fetchSpy = spyOn(NetworkProxy, "fetch").mockResolvedValue(
+        const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () =>
           Response.json({
             model_routers: [
               { name: "my-router", uuid: "11f1499a-aaaa-bbbb-cccc-4e013e2ddde4" },
@@ -94,11 +94,11 @@ it.instance(
         expect(models["router:my-router"].api.url).toBe("https://inference.do-ai.run/v1")
         expect(models["router:my-router"].api.npm).toBe("@ai-sdk/openai-compatible")
         expect(models["router:other-router"]).toBeDefined()
-        expect(fetchSpy).toHaveBeenCalledTimes(1)
-        expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("plugin")
-        expect(fetchSpy.mock.calls[0]?.[0]).toBe("https://api.digitalocean.com/v2/gen-ai/models/routers")
-        expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer doo_v1_test")
-        expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
+        const routerCalls = fetchSpy.mock.calls.filter((call) => call[1]?.purpose === "plugin")
+        expect(routerCalls).toHaveLength(1)
+        expect(routerCalls[0]?.[0]).toBe("https://api.digitalocean.com/v2/gen-ai/models/routers")
+        expect(new Headers(routerCalls[0]?.[1]?.headers).get("authorization")).toBe("Bearer doo_v1_test")
+        expect(routerCalls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
       }),
     ),
   { config: {} },

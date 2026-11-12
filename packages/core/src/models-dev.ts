@@ -1,5 +1,5 @@
 import path from "path"
-import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
+import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schedule, Schema, ScopedCache } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { ModelsDev } from "@opencode-ai/schema/models-dev"
 import { Global } from "./global"
@@ -247,9 +247,16 @@ const layer = Layer.effect(
       return JSON.parse(text) as Record<string, Provider>
     }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
 
-    const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
+    const cache = yield* ScopedCache.makeWith({
+      // 单 key 让 Provider 与后台刷新共享同一目录 generation，避免各调用方自建缓存。
+      capacity: 1,
+      lookup: () => populate,
+      // 只有请求中断允许下一次 get 重建；成功目录和既有错误仍复用，refresh 才主动更新。
+      timeToLive: (exit) =>
+        Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? Duration.zero : Duration.infinity,
+    })
 
-    const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
+    const get = (): Effect.Effect<Record<string, Provider>> => ScopedCache.get(cache, "models")
 
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
       if (!force && (yield* fresh())) return
@@ -260,7 +267,7 @@ const layer = Layer.effect(
           // our outer check and lock acquisition.
           if (!force && (yield* fresh())) return
           yield* fetchAndWrite()
-          yield* invalidate
+          yield* ScopedCache.invalidate(cache, "models")
           yield* events.publish(Event.Refreshed, {})
         }),
       ).pipe(

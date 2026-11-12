@@ -19,7 +19,7 @@ import { isRecord } from "@/util/record"
 import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
-import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema, ScopedCache } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
 import { containsPath, type InstanceContext } from "../project/instance-context"
@@ -307,18 +307,24 @@ const layer = Layer.effect(
       return result
     })
 
-    const [cachedGlobal, invalidateGlobal] = yield* Effect.cachedInvalidateWithTTL(
-      loadGlobal().pipe(
-        Effect.tapError((error) =>
-          Effect.logError("failed to load global config, using defaults", { error: String(error) }),
+    const globalCache = yield* ScopedCache.makeWith({
+      capacity: 1,
+      lookup: () =>
+        loadGlobal().pipe(
+          Effect.tapError((error) =>
+            Effect.logError("failed to load global config, using defaults", { error: String(error) }),
+          ),
+          Effect.orElseSucceed((): Info => ({})),
         ),
-        Effect.orElseSucceed((): Info => ({})),
-      ),
-      Duration.infinity,
-    )
+      // 全局配置的中断不跨请求保留；普通错误仍按原逻辑转成默认配置并缓存。
+      timeToLive: (exit) =>
+        Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? Duration.zero : Duration.infinity,
+    })
+    // invalidate 只移除当前全局 entry，不主动重载；下一次 getGlobal 才决定新的读取。
+    const invalidateGlobal = ScopedCache.invalidate(globalCache, "global")
 
     const getGlobal = Effect.fn("Config.getGlobal")(function* () {
-      return yield* cachedGlobal
+      return yield* ScopedCache.get(globalCache, "global")
     })
 
     const ensureGitignore = Effect.fn("Config.ensureGitignore")(function* (dir: string) {

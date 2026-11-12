@@ -19,7 +19,7 @@ import { withTimeout } from "../util/timeout"
 import { McpOAuthPendingProvider, McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
-import { Cause, Effect, Exit, Schema, Scope, Stream } from "effect"
+import { Cause, Duration, Effect, Exit, Schema, Scope, ScopedCache, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { McpCatalog } from "./catalog"
 import { McpEvent } from "@opencode-ai/schema/mcp-event"
@@ -486,8 +486,10 @@ export const make = Effect.fn("McpConnection.make")(function* (options: Options)
     }
 
     // 延迟池绑定创建时的owner scope，不能由首次工具调用的短scope提前释放。
-    const state = yield* Effect.cached(
-      Effect.fn("MCP.state")(function* () {
+    const cache = yield* ScopedCache.makeWith<string, State>({
+      // 单 key 连接池让 status、tools 与同代等待者共享一次初始化。
+      capacity: 1,
+      lookup: Effect.fn("MCP.state")(function* () {
         const cfg = yield* options.config()
         const config = cfg.servers ?? {}
         const s: State = {
@@ -498,6 +500,8 @@ export const make = Effect.fn("McpConnection.make")(function* (options: Options)
           instructions: {},
         }
 
+        // 客户端清理由每个 generation 自己拥有，重复执行也不能关闭其他 generation 的客户端。
+        yield* Effect.addFinalizer(() => closeClients(s))
         yield* Effect.forEach(
           Object.entries(config),
           ([key, mcp]) =>
@@ -517,10 +521,18 @@ export const make = Effect.fn("McpConnection.make")(function* (options: Options)
               }
             }),
           { concurrency: "unbounded" },
+        ).pipe(
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? closeClients(s)
+              : Effect.addFinalizer(() =>
+                  closeClients(s).pipe(Effect.andThen(Effect.sync(() => pendingOAuthTransports.clear()))),
+                ),
+          ),
         )
 
-        yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
+        function closeClients(s: State) {
+          return Effect.gen(function* () {
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
@@ -542,13 +554,16 @@ export const make = Effect.fn("McpConnection.make")(function* (options: Options)
                 }),
               { concurrency: "unbounded" },
             )
-            pendingOAuthTransports.clear()
-          }),
-        )
+          })
+        }
 
+        // onExit 成功完成器不可中断，聚合 finalizer 注册前不会出现半提交状态。
         return s
-      })().pipe(Effect.provideService(Scope.Scope, scope)),
-    )
+      }, Effect.provideService(Scope.Scope, scope)),
+      timeToLive: (exit) =>
+        Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) ? Duration.zero : Duration.infinity,
+    })
+    const state = ScopedCache.get(cache, "state")
 
     function closeClient(s: State, name: string) {
       const client = s.clients[name]

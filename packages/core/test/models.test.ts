@@ -1,8 +1,9 @@
 import { describe, expect, beforeEach, afterAll, spyOn } from "bun:test"
-import { Effect, Layer, Ref } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Ref } from "effect"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { NetworkProxy } from "@opencode-ai/core/network-proxy"
 import { it } from "./lib/effect"
@@ -233,6 +234,42 @@ describe("ModelsDev Service", () => {
       expect(after).toEqual(fixture2)
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBe(1)
+    }),
+  )
+
+  it.live("get() retries an interrupted initial read and reuses the successful catalog", () =>
+    Effect.gen(function* () {
+      const previous = Flag.OPENCODE_DISABLE_MODELS_FETCH
+      Flag.OPENCODE_DISABLE_MODELS_FETCH = true
+      // 全局 flag 在 scope 结束时恢复，避免禁用网络的行为泄漏到其他测试。
+      yield* Effect.addFinalizer(() => Effect.sync(() => { Flag.OPENCODE_DISABLE_MODELS_FETCH = previous }))
+      const started = yield* Deferred.make<void>()
+      let reads = 0
+      // FSUtil 继承 FileSystem，三个非 Effect 成员必须显式提供，测试仍不会触达真实磁盘。
+      const fsLayer = Layer.mock(FSUtil.Service)({
+        "~effect/platform/FileSystem": "~effect/platform/FileSystem",
+        sink: () => { throw new Error("unexpected sink") },
+        globMatch: () => { throw new Error("unexpected globMatch") },
+        readJson: () => Effect.gen(function* () {
+          reads++
+          // 只有第一次读取卡住，后续读取成功才能把真正重试与中断重放区分开。
+          if (reads > 1) return fixture
+          yield* Deferred.succeed(started, undefined)
+          return yield* Effect.never
+        }),
+      })
+      // fresh layer 防止服务 memoMap 复用其他测试已经建立的全局目录缓存。
+      const context = yield* Layer.build(Layer.fresh(AppNodeBuilder.build(ModelsDev.node, [[FSUtil.node, fsLayer]])))
+      const svc = Context.get(context, ModelsDev.Service)
+      const first = yield* svc.get().pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      yield* Fiber.interrupt(first)
+      const second = yield* svc.get()
+      const third = yield* svc.get()
+      // 首次读取被请求中断后，下一次 get 必须重新读取；成功目录仍由后续 get 复用。
+      expect(second).toEqual(fixture)
+      expect(third).toBe(second)
+      expect(reads).toBe(2)
     }),
   )
 

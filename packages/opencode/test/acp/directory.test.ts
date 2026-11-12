@@ -1,11 +1,12 @@
 import { describe, expect } from "bun:test"
 import { Directory } from "@/acp/directory"
+import { ServiceFailureError } from "@/acp/error"
 import { Command } from "@/command"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { it } from "../lib/effect"
 
 const command = (name: string): Command.Info => ({
@@ -124,6 +125,69 @@ describe("ACP directory snapshot", () => {
       expect(calls).toEqual(["alpha"])
       expect(first).toBe(second)
     }).pipe(Effect.provide(fakeLayer(calls)))
+  })
+
+  it.live("retries interrupted loads without changing failure or refresh semantics", () => {
+    const started = Deferred.makeUnsafe<void>()
+    const refreshStarted = Deferred.makeUnsafe<void>()
+    const releaseRefresh = Deferred.makeUnsafe<void>()
+    // 每个目录独立计数，才能分别证明中断、typed failure、defect 与 refresh 的加载次数。
+    const calls = new Map<string, number>()
+    const layer = LayerNode.compile(Directory.node, [[
+      Directory.loaderNode,
+      Layer.succeed(Directory.Loader, Directory.Loader.of({
+        load: (directory) => Effect.gen(function* () {
+          const count = (calls.get(directory) ?? 0) + 1
+          calls.set(directory, count)
+          if (directory === "alpha" && count === 1) {
+            yield* Deferred.succeed(started, undefined)
+            return yield* Effect.never
+          }
+          if (directory === "typed") {
+            // 使用公开 ACP typed error，避免 fixture 自身的 TypeError 被误判为业务 defect。
+            return yield* Effect.fail(new ServiceFailureError({ safeMessage: "invalid config" }))
+          }
+          if (directory === "defect") return yield* Effect.die("broken loader")
+          if (directory === "refresh" && count === 2) {
+            // 第二次加载先暂停，确保并发 get 确实发生在新 snapshot 尚未完成时。
+            yield* Deferred.succeed(refreshStarted, undefined)
+            yield* Deferred.await(releaseRefresh)
+          }
+          return snapshot(directory)
+        }),
+      })),
+    ]])
+    return Effect.gen(function* () {
+      const directory = yield* Directory.Service
+      const first = yield* directory.get("alpha").pipe(Effect.forkChild)
+      yield* Deferred.await(started)
+      yield* Fiber.interrupt(first)
+      const recovered = yield* directory.get("alpha")
+      expect(yield* directory.get("alpha")).toBe(recovered)
+      expect(calls.get("alpha")).toBe(2)
+
+      const typed1 = yield* Effect.exit(directory.get("typed"))
+      const typed2 = yield* Effect.exit(directory.get("typed"))
+      const defect1 = yield* Effect.exit(directory.get("defect"))
+      const defect2 = yield* Effect.exit(directory.get("defect"))
+      // typed failure 保持逐次重试，纯 defect 继续复用首次失败，不被统一清除。
+      expect(Exit.isFailure(typed1) && Exit.isFailure(typed2)).toBe(true)
+      expect(Exit.isFailure(defect1) && Exit.isFailure(defect2)).toBe(true)
+      expect(calls.get("typed")).toBe(2)
+      expect(calls.get("defect")).toBe(1)
+
+      // 对象身份而非字段相等性用于证明 refresh 替换快照，后续 get 不读旧对象。
+      const previous = yield* directory.get("refresh")
+      const refreshing = yield* directory.refresh("refresh").pipe(Effect.forkChild)
+      yield* Deferred.await(refreshStarted)
+      const waiting = yield* directory.get("refresh").pipe(Effect.forkChild)
+      yield* Deferred.succeed(releaseRefresh, undefined)
+      const refreshed = yield* Fiber.join(refreshing)
+      // refresh 期间的 get 必须加入新 generation，不能读取 refresh 前的快照。
+      expect(yield* Fiber.join(waiting)).toBe(refreshed)
+      expect(refreshed).not.toBe(previous)
+      expect(calls.get("refresh")).toBe(2)
+    }).pipe(Effect.provide(layer))
   })
 
   it.effect("different directories get different snapshots", () => {

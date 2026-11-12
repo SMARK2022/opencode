@@ -7,7 +7,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
-import { Context, Effect, Layer, SynchronizedRef } from "effect"
+import { Cause, Context, Duration, Effect, Exit, Layer, ScopedCache } from "effect"
 import type * as ACPError from "./error"
 
 export type ModelOption = {
@@ -145,52 +145,25 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const loader = yield* Loader
-    const snapshots = yield* SynchronizedRef.make(new Map<string, Effect.Effect<Snapshot, ACPError.Error>>())
-
-    const cached = Effect.fnUntraced(function* (directory: string) {
-      return yield* SynchronizedRef.modifyEffect(
-        snapshots,
-        Effect.fnUntraced(function* (items) {
-          const current = items.get(directory)
-          if (current) return [current, items] as const
-          const next = yield* Effect.cached(
-            loader.load(directory).pipe(
-              Effect.tapError(() =>
-                SynchronizedRef.update(snapshots, (state) => {
-                  const next = new Map(state)
-                  next.delete(directory)
-                  return next
-                }),
-              ),
-            ),
-          )
-          return [next, new Map(items).set(directory, next)] as const
-        }),
-      )
+    const snapshots = yield* ScopedCache.makeWith({
+      // 目录 key 不按 LRU 驱逐，避免 ACP 会话之间出现原有语义之外的快照淘汰。
+      capacity: Number.POSITIVE_INFINITY,
+      lookup: (directory: string) => loader.load(directory),
+      // typed failure 与请求中断允许下一次读取重试；纯 defect 保持原有的失败缓存。
+      timeToLive: (exit) =>
+        Exit.isFailure(exit) && (Cause.hasInterrupts(exit.cause) || Cause.hasFails(exit.cause))
+          ? Duration.zero
+          : Duration.infinity,
     })
 
     const get = Effect.fn("ACPDirectory.get")(function* (directory: string) {
-      return yield* yield* cached(directory)
+      return yield* ScopedCache.get(snapshots, directory)
     })
 
     const refresh = Effect.fn("ACPDirectory.refresh")(function* (directory: string) {
-      return yield* SynchronizedRef.modifyEffect(
-        snapshots,
-        Effect.fnUntraced(function* (items) {
-          const next = yield* Effect.cached(
-            loader.load(directory).pipe(
-              Effect.tapError(() =>
-                SynchronizedRef.update(snapshots, (state) => {
-                  const next = new Map(state)
-                  next.delete(directory)
-                  return next
-                }),
-              ),
-            ),
-          )
-          return [next, new Map(items).set(directory, next)] as const
-        }),
-      ).pipe(Effect.flatten)
+      // 先移除旧 entry，再建立唯一的新 generation；refresh 期间的 get 共享这次加载。
+      yield* ScopedCache.invalidate(snapshots, directory)
+      return yield* ScopedCache.get(snapshots, directory)
     })
 
     return Service.of({
