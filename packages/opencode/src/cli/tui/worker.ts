@@ -22,6 +22,9 @@ import { HttpApiApp } from "@/server/routes/instance/httpapi/server"
 import { GlobalBus } from "@/bus/global"
 import { DisposedReason, Event } from "@/server/event"
 import { win32DetachConsole } from "@opencode-ai/tui/terminal-win32"
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads"
+import { MaintenanceExecutor } from "@/cli/maintenance"
+import { DatabaseGate } from "@opencode-ai/core/database/gate"
 
 Heap.start()
 
@@ -36,6 +39,7 @@ process.on("uncaughtException", onUncaughtException)
 let activeMaintenance:
   | { taskID: string; controller: AbortController; promise: Promise<void> }
   | undefined
+const immediateMaintenance = new Map<string, { controller: AbortController; promise: Promise<void> }>()
 let maintenanceRecoveryPromise: Promise<void> | undefined
 let maintenanceShutdownRequested = false
 // #535：pending 覆盖 accepted request 到 activeMaintenance 发布之间的 await 窗口；active 单独覆盖 runner 生命周期。
@@ -51,7 +55,76 @@ function maintenanceError(error: unknown) {
   return { status: 500, message: error instanceof Error ? error.message : String(error) }
 }
 
-const isDaemon = process.env.OPENCODE_PROCESS_ROLE === "worker"
+type MaintenanceWorkerData = {
+  role: "maintenance"
+  dbPath: string
+  prepared: ColdMaintain.PreparedMaintenance
+  task?: ColdMaintain.MaintenanceTask
+}
+
+async function runMaintenanceThread(data: MaintenanceWorkerData, port: NonNullable<typeof parentPort>) {
+  const controller = new AbortController()
+  const pending = new Map<string, { resolve(id: string): void; reject(error: Error): void }>() // 每个数据库预约都有独立请求号，回复不会串到另一批次。
+  port.on("message", (message: { type: string; requestID?: string; holdID?: string; error?: string }) => {
+    if (message.type === "abort") controller.abort()
+    const request = message.requestID ? pending.get(message.requestID) : undefined
+    if (message.type === "hold-ack" && message.requestID && message.holdID) {
+      pending.delete(message.requestID)
+      request?.resolve(message.holdID)
+    }
+    if (message.type === "hold-error" && message.requestID) {
+      pending.delete(message.requestID)
+      request?.reject(new Error(message.error ?? "Database hold failed"))
+    }
+  })
+  const reserve = () => new Promise<() => void>((resolve, reject) => { // SQL 执行前必须等待父侧 gate 确认，release 由本闭包回传。
+    const requestID = crypto.randomUUID()
+    pending.set(requestID, { resolve: () => resolve(() => { port.postMessage({ type: "release", requestID }) }), reject })
+    port.postMessage({ type: "hold", requestID })
+  })
+  const held = async <A>(body: () => Promise<A>) => {
+    const release = await reserve()
+    try { return await body() } finally { await release() }
+  }
+  const runtime = ManagedRuntime.make(Database.layerFromPath(data.dbPath)) // maintenance-only runtime 只拥有指定数据库连接，不装配 HTTP 服务树。
+  let open = false
+  const dispose = () => open ? held(() => runtime.dispose()).then(() => { open = false }) : Promise.resolve() // 关闭前 checkpoint 与 native close 也必须在同一父侧预约内完成。
+  try {
+    const database = await held(() => runtime.runPromise(Database.Service)) // native open、PRAGMA 和 migration 不得先于首次 hold 执行。
+    open = true
+    let ready = false // 每个任务只在首个 durable running checkpoint 上报一次 ready。
+    const result = await MaintenanceExecutor.runOffline(database, data.prepared, (task) => {
+      port.postMessage({ type: "checkpoint", task })
+      if (task.status !== "running" || ready) return
+      ready = true
+      port.postMessage({ type: "ready", task })
+    }, {
+      task: data.task,
+      signal: controller.signal,
+      onLease: (lease) => port.postMessage({ type: "lease", taskID: lease.taskID, token: lease.token }),
+      reserve,
+    })
+    await dispose()
+    port.postMessage({ type: "result", result })
+  } catch (error) {
+    await dispose().catch(() => undefined)
+    port.postMessage({
+      type: "failure",
+      error: error instanceof Error ? error.message : String(error),
+      kind: error instanceof ServerLock.MaintenanceBusyError ? "busy"
+        : error instanceof ServerLock.MaintenanceLeaseError ? "lease"
+          : error instanceof ColdStorage.ValidationError ? "validation" : undefined,
+    })
+  } finally {
+    for (const request of pending.values()) request.reject(new Error("Maintenance Worker exited"))
+    port.close()
+  }
+}
+
+const isMaintenance = !isMainThread && workerData?.role === "maintenance" // 独立角色判断让维护线程与 Daemon 启动互斥。
+if (isMaintenance && parentPort) void runMaintenanceThread(workerData as MaintenanceWorkerData, parentPort)
+
+const isDaemon = !isMaintenance && process.env.OPENCODE_PROCESS_ROLE === "worker" // 即使继承 worker 环境，维护线程也不会再开启第二组监听。
 // 共享 daemon 是唯一生产入口；线程 RPC 不再持有数据库或转发事件。
 
 if (isDaemon) {
@@ -101,51 +174,98 @@ if (isDaemon) {
   let shutdownInProgress = false
 
   // 所有退出入口收敛到这个闭包，不能从事件 callback 单独调用 Database.close。
-  
-  async function maintain(prepared: ColdMaintain.PreparedMaintenance, runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} }) {
-    const database = await AppRuntime.runPromise(Database.Service)
-    // 每批只预约本 runtime 的同一连接；文件 checkpoint 期间释放预约，普通会话仍可继续。
-    return ColdMaintain.maintain(database.sync, prepared, {
-      ...runtime,
-      run: (body) => Effect.runPromise(Database.withSync(database, body)),
-    })
-  }
-
-  // runMaintenance 在返回 202 前登记 activeMaintenance，使 startup/idle timer 从第一刻就看到活跃任务。
-  // task-backed operation 必须先获得跨进程 lease；新 task 可注入已获取 lease，resume/recovery 在此获取。
-  // task promise 只在 terminal/interrupted checkpoint 后释放 lease 和 active 标记，daemon 不会提前退出。
-  // shutdown race 通过 maintenanceShutdownRequested 立即 abort 刚创建的 controller，避免恢复窗口漏掉停止信号。
-  async function runMaintenance(
+  function runMaintenance<T extends ColdMaintain.MaintenanceResult | ColdMaintain.MaintenanceTask>(
     prepared: ColdMaintain.PreparedMaintenance,
     existing?: ColdMaintain.MaintenanceTask,
-    acquired?: ServerLock.MaintenanceLease,
-  ) {
-    if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Expected task-backed maintenance" })
-    const task = existing ?? prepared.task
-    const lease = acquired ?? (await ServerLock.acquireMaintenanceLease(task))
+  ): Promise<T> {
+    if (prepared.type === "task" && activeMaintenance) {
+      throw new ServerLock.MaintenanceBusyError(`Maintenance task already active: ${activeMaintenance.taskID}`) // 新 Worker 创建前拒绝重叠任务，保留赢家的 active 监督与停机保护。
+    }
+    const taskID = existing?.taskID ?? (prepared.type === "task" ? prepared.task.taskID : `immediate_${crypto.randomUUID()}`)
+    const dbPath = Database.path()
+    const supervisor = `maintenance_${crypto.randomUUID()}` // 每次 Worker 使用独立监督身份，异常清理不会释放其他任务的 gate。
     const controller = new AbortController()
+    const holds = new Map<string, string>()
+    let lease: { taskID: string; token: string; dbPath: string } | undefined
+    let terminal = false
+    let exited = false
+    let resolveAccepted: (value: T) => void = () => undefined
+    let rejectAccepted: (error: Error) => void = () => undefined
+    const accepted = new Promise<T>((resolve, reject) => { resolveAccepted = resolve; rejectAccepted = reject })
     const promise = (async () => {
-      try {
-        await maintain(prepared, {
-          task,
-          lease,
-          signal: controller.signal,
-          checkpoint: (next) => ServerLock.writeMaintenanceTask(next),
-        })
-      } catch (error) {
-        log.error("database maintenance failed", { taskID: task.taskID, error: String(error) })
-      } finally {
-        await lease.release()
-        if (activeMaintenance?.taskID === task.taskID) activeMaintenance = undefined
-        armIdleTimer()
+      const worker = new Worker(new URL(import.meta.url), {
+        workerData: { role: "maintenance", dbPath, prepared, task: existing } satisfies MaintenanceWorkerData,
+      })
+      controller.signal.addEventListener("abort", () => { try { worker.postMessage({ type: "abort" }) } catch {} })
+      worker.on("message", (message: {
+        type: string
+        token?: string
+        taskID?: string
+        task?: ColdMaintain.MaintenanceTask
+        result?: ColdMaintain.MaintenanceResult
+        error?: string
+        kind?: "busy" | "lease" | "validation"
+        requestID?: string
+      }) => {
+        if (message.type === "lease" && message.taskID && message.token) lease = { taskID: message.taskID, token: message.token, dbPath }
+        if (message.type === "ready" && message.task) {
+          // ready 等待 durable running，但既有新任务 202 仍返回受理时的 queued 快照。
+          resolveAccepted((prepared.type === "task" && !existing ? prepared.task : message.task) as T)
+        }
+        if (message.type === "result" && message.result) {
+          terminal = true
+          const task = message.result.type === "task" ? message.result.task : message.result
+          resolveAccepted(task as T)
+        }
+        if (message.type === "failure") {
+          terminal = true
+          const text = message.error ?? "Maintenance Worker failed"
+          if (message.kind === "busy") rejectAccepted(new ServerLock.MaintenanceBusyError(text))
+          else if (message.kind === "lease") rejectAccepted(new ServerLock.MaintenanceLeaseError(text))
+          else if (message.kind === "validation") rejectAccepted(new ColdStorage.ValidationError({ message: text }))
+          else rejectAccepted(new Error(text))
+        }
+        if (message.type === "hold" && message.requestID) {
+          const requestID = message.requestID
+          void DatabaseGate.hold(dbPath, supervisor, controller.signal).then((holdID) => {
+            if (exited) return DatabaseGate.release(dbPath, holdID)
+            holds.set(requestID, holdID)
+            worker.postMessage({ type: "hold-ack", requestID, holdID })
+          }).catch((error) => {
+            try { worker.postMessage({ type: "hold-error", requestID, error: String(error) }) } catch {}
+          })
+        }
+        if (message.type === "release" && message.requestID) {
+          const holdID = holds.get(message.requestID)
+          holds.delete(message.requestID)
+          if (holdID) DatabaseGate.release(dbPath, holdID)
+        }
+      })
+      worker.once("error", (error) => rejectAccepted(error))
+      const code = await new Promise<number>((resolve) => worker.once("exit", resolve))
+      exited = true
+      DatabaseGate.releaseSupervisor(dbPath, supervisor) // 线程退出后统一清理未确认和已确认的残留持有项。
+      if (!terminal) {
+        // 线程死亡后才清理已报告 token，并从最后 durable cursor 标记可恢复状态。
+        if (lease) await ServerLock.releaseMaintenanceLease(lease, lease.token) // immediate/VACUUM 也按实际上报身份释放，避免存活 Daemon 残留永久 busy。
+        if (prepared.type === "task") await ServerLock.reconcileMaintenanceTask(taskID, dbPath)
+        throw new Error(`Maintenance Worker exited before a terminal result (${code})`)
       }
-    })()
-    activeMaintenance = { taskID: task.taskID, controller, promise }
+    })().catch((error) => {
+      rejectAccepted(error instanceof Error ? error : new Error(String(error)))
+      return log.error("database maintenance failed", { taskID, error: String(error) })
+    }).finally(() => {
+      if (prepared.type === "task" && activeMaintenance?.taskID === taskID) activeMaintenance = undefined
+      if (prepared.type === "immediate") immediateMaintenance.delete(taskID)
+      armIdleTimer()
+    })
+    if (prepared.type === "task") activeMaintenance = { taskID, controller, promise }
+    if (prepared.type === "immediate") immediateMaintenance.set(taskID, { controller, promise })
     if (maintenanceShutdownRequested) controller.abort()
     cancelIdleTimer("maintenance-started")
     cancelStartupIdleTimer("maintenance-started")
     void promise
-    return task
+    return accepted
   }
 
   // startMaintenance 只做 request decode、prepare、task conflict 和 runtime 装配，operation SQL 全部留在 ColdStorage。
@@ -163,33 +283,9 @@ if (isDaemon) {
   async function startMaintenanceBody(input: unknown) {
     const request = ColdMaintain.parseMaintenanceRequest(input)
     const prepared = ColdMaintain.prepareMaintenance(request)
-    if (prepared.type === "immediate") {
-      if (request.operation === "vacuum") {
-        // interrupted task 虽不持有 live lease，仍是待恢复的 nonterminal 工作；vacuum 不得绕过它重排数据库页面。
-        // daemon 与 offline CLI 都先做同一冲突检查，再用 pseudo taskID 获取 lease，保持运行域行为一致。
-        const existing = await ServerLock.findNonterminalMaintenanceTask()
-        if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
-        const pseudo = { taskID: `vacuum_${crypto.randomUUID()}`, dbPath: Database.path() }
-        const lease = await ServerLock.acquireMaintenanceLease(pseudo)
-        try {
-          return await maintain(prepared, { lease, checkpoint: async () => {} })
-        } finally {
-          await lease.release()
-        }
-      }
-      return await maintain(prepared)
-    }
-    const existing = await ServerLock.findNonterminalMaintenanceTask()
-    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
-    const lease = await ServerLock.acquireMaintenanceLease(prepared.task)
-    try {
-      await ServerLock.writeMaintenanceTask(prepared.task)
-      const task = await runMaintenance(prepared, undefined, lease)
-      return { type: "task" as const, task }
-    } catch (error) {
-      await lease.release()
-      throw error
-    }
+    if (prepared.type === "immediate") return runMaintenance<ColdMaintain.MaintenanceResult>(prepared)
+    const task = await runMaintenance<ColdMaintain.MaintenanceTask>(prepared)
+    return { type: "task" as const, task }
   }
 
   // resume 先 reconcile dead owner，只接受 interrupted；running/completed/failed/queued 都返回明确 conflict。
@@ -245,6 +341,11 @@ if (isDaemon) {
 
   let reconcileStale: ((scope: SessionStaleTurn.Scope, options?: { budgetMs?: number }) => Promise<void>) | undefined
 
+  const stopImmediateMaintenance = () => Promise.allSettled([...immediateMaintenance.values()].map((item) => {
+    item.controller.abort()
+    return item.promise
+  }))
+
   async function gracefulShutdown(exitCode = 0, reason = "unknown", defer = false) {
     if (shutdownInProgress) return
     shutdownInProgress = true
@@ -266,11 +367,13 @@ if (isDaemon) {
       activeMaintenance.controller.abort()
       await activeMaintenance.promise.catch(() => undefined)
     }
+    await stopImmediateMaintenance()
     if (maintenanceRecoveryPromise) await maintenanceRecoveryPromise.catch(() => undefined)
     if (activeMaintenance) {
       activeMaintenance.controller.abort()
       await activeMaintenance.promise.catch(() => undefined)
     }
+    await stopImmediateMaintenance()
     cancelIdleTimer("shutdown")
     cancelStartupIdleTimer("shutdown")
     cancelLauncherWatcher("shutdown")
@@ -369,7 +472,7 @@ if (isDaemon) {
   // startup 在启动 timer 前已 await recovery 注册 activeMaintenance，因此这里不需要临时恢复标志。
   // 所有 launcher/startup/idle timer 复用该 predicate，避免各自遗漏新的后台工作类型。
   function isActive() {
-    return sseClients > 0 || SessionActivity.count() > 0 || activeMaintenance !== undefined
+    return sseClients > 0 || SessionActivity.count() > 0 || activeMaintenance !== undefined || immediateMaintenance.size > 0 || maintenanceTransitionPending > 0 // immediate 执行期间同样阻止 idle shutdown。
   }
 
   function cancelIdleTimer(reason: string) {
@@ -610,7 +713,7 @@ if (isDaemon) {
         // DB preflight没有中断其他维护的授权；普通stop保留既有abort与退出责任。
         if (
           url.searchParams.get("maintenance-idle") === "1" &&
-          (maintenanceTransitionPending > 0 || activeMaintenance !== undefined)
+          (maintenanceTransitionPending > 0 || activeMaintenance !== undefined || immediateMaintenance.size > 0)
         ) {
           return Response.json({ error: "database maintenance is active" }, { status: 409 })
         }

@@ -82,7 +82,7 @@ describe("ServerLock", () => {
   })
 
   describe("ping", () => {
-    test("returns true for a running HTTP server that responds with 200", async () => {
+    test("classifies healthy, unauthorized and mismatched responses", async () => {
       // fixture 有真实 HTTP socket 与认证门，不能用对 fetch 的 mock 掩盖漏带 header 的错误。
       const credentials = { username: "health-test", password: "protected" }
       const server = Bun.serve({
@@ -98,14 +98,14 @@ describe("ServerLock", () => {
       })
       try {
         // 同一 listener 上正误 credentials 必须得到不同结果，防止 health 被偷偷改为公共路由。
-        expect(await ServerLock.ping(server.port!, credentials)).toBe(true)
-        expect(await ServerLock.ping(server.port!, { password: "wrong" })).toBe(false)
+        expect(await ServerLock.ping(server.port!, credentials)).toBe("ok")
+        expect(await ServerLock.ping(server.port!, { password: "wrong" })).toBe("unauthorized")
       } finally {
         server.stop(true)
       }
     })
 
-    test("returns false for a port with no listener", async () => {
+    test("classifies a port with no listener", async () => {
       // 先持有后释放端口而非猜一个固定数字，避免误探测用户机器上其他正常服务。
       const server = Bun.serve({ port: 0, fetch: () => new Response("ok") })
       const port = server.port!
@@ -113,10 +113,10 @@ describe("ServerLock", () => {
       await Bun.sleep(50)
       const result = await ServerLock.ping(port)
       // 网络拒绝必须成为 false，不能 catch 后返回一个伪健康成功供 discover 复用。
-      expect(result).toBe(false)
+      expect(result).toBe("unreachable")
     })
 
-    test("returns false for health endpoint returning non-200", async () => {
+    test("classifies health endpoint returning non-200", async () => {
       // HTTP 可达但状态为 502 不能算就绪，检测 resp.ok 不能退化为 fetch 未抛错。
       const server = Bun.serve({
         port: 0,
@@ -125,10 +125,31 @@ describe("ServerLock", () => {
         },
       })
       try {
-        expect(await ServerLock.ping(server.port!)).toBe(false)
+        expect(await ServerLock.ping(server.port!)).toBe("unreachable")
       } finally {
         server.stop(true)
       }
     })
+
+    test("classifies wrong versions, malformed JSON and deadlines", async () => {
+      let requests = 0
+      const server = Bun.serve({
+        port: 0,
+        async fetch() {
+          requests++
+          if (requests === 1) return Response.json({ healthy: true, version: "0.0.0" })
+          if (requests === 2) return new Response("not-json")
+          await Bun.sleep(700)
+          return Response.json({ healthy: true, version: InstallationVersion })
+        },
+      })
+      try {
+        expect(await ServerLock.ping(server.port!)).toBe("mismatch")
+        expect(await ServerLock.ping(server.port!)).toBe("mismatch")
+        expect(await ServerLock.ping(server.port!)).toBe("timeout")
+      } finally {
+        server.stop(true)
+      }
+    }, 5_000)
   })
 })

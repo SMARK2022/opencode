@@ -17,13 +17,23 @@ import { PartView } from "@opencode-ai/core/session/part-view"
 import { DisposedReason, Event } from "@/server/event"
 import type { MessageV2 } from "@/session/message-v2"
 
-function eventData(data: unknown): Sse.Event {
-  return {
+const CLIENT_EVENT_CAPACITY = 256
+const serializedEvents = new WeakMap<GlobalBusEvent, { complete?: Sse.Event; viewer?: Sse.Event }>()
+
+function eventData(event: GlobalBusEvent, viewer: boolean): Sse.Event {
+  const variant = viewer ? "viewer" : "complete"
+  const cached = serializedEvents.get(event)
+  const existing = cached?.[variant]
+  if (existing) return existing
+  // 同一广播对象在所有连接间共享；完整与 viewer 投影各占独立缓存槽。
+  const serialized = {
     _tag: "Event",
     event: "message",
     id: undefined,
-    data: JSON.stringify(data),
-  }
+    data: JSON.stringify(viewer ? projectViewerEvent(event) : event),
+  } satisfies Sse.Event
+  serializedEvents.set(event, { ...cached, [variant]: serialized })
+  return serialized
 }
 
 // 只投影当前viewer连接的副本，ID/顺序/次数与其他listener的完整事件保持不变。
@@ -53,12 +63,15 @@ function eventResponse(clients: EventClients.Interface, viewer: boolean) {
   return Effect.gen(function* () {
     yield* Effect.logInfo("global event connected")
     const events = Stream.callback<GlobalBusEvent>((queue) => {
-      const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
+      const handler = (event: GlobalBusEvent) => {
+        // 慢客户端溢出后结束当前流，重连以 server.connected 为边界重新同步。
+        if (!Queue.offerUnsafe(queue, event)) Queue.endUnsafe(queue)
+      }
       return Effect.acquireRelease(
         Effect.sync(() => GlobalBus.on("event", handler)),
         () => Effect.sync(() => GlobalBus.off("event", handler)),
       )
-    })
+    }, { bufferSize: CLIENT_EVENT_CAPACITY, strategy: "dropping" })
     const heartbeat = Stream.tick("10 seconds").pipe(
       Stream.drop(1),
       Stream.map(() => ({ payload: { id: EventV2.ID.create(), type: "server.heartbeat", properties: {} } })),
@@ -72,7 +85,7 @@ function eventResponse(clients: EventClients.Interface, viewer: boolean) {
         Stream.takeUntil((event) =>
           event.payload?.type === Event.Disposed.type && event.payload.properties?.reason === DisposedReason.DaemonStop,
         ),
-        Stream.map((event) => eventData(viewer ? projectViewerEvent(event) : event)),
+        Stream.map((event) => eventData(event, viewer)),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
         Stream.ensuring(Effect.logInfo("global event disconnected")),

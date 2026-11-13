@@ -11,6 +11,7 @@ import { statSync } from "fs"
 import { DatabaseMigration } from "./migration"
 import { InstallationChannel } from "../installation/version"
 import { makeGlobalNode } from "../effect/app-node"
+import { DatabaseGate } from "./gate"
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type DatabaseShape = Effect.Success<typeof makeDatabase>
@@ -19,6 +20,7 @@ export interface Interface {
   db: DatabaseShape & { readonly sync: Sqlite.DrizzleClient }
   // 同一 Layer 原生连接的同步 facade，不注册模块级最后连接或另建数据库。
   sync: Sqlite.DrizzleClient
+  readonly filename?: string
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
@@ -64,7 +66,7 @@ const layer = (filename: string) => Layer.effect(
     // 上层 finalizer 先于依赖连接释放执行，保留 checkpoint-before-close 顺序。
     // 条件恢复仍保留 query error 类型；仅在 finalizer 边界转为 defect，剩余失败不能伪装成功。
     yield* Effect.addFinalizer(() => checkpoint(db).pipe(Effect.orDie))
-    return { db, sync }
+    return { db, sync, filename }
   }).pipe(Effect.orDie),
 )
 
@@ -82,9 +84,12 @@ export function checkpoint(db: DatabaseShape) {
 
 // 同步事务复用 Effect 驱动的连接预约；不跨 await 持有连接，也不重复开启 Effect SQL 事务。
 export function withSync<A>(database: Interface, body: (sync: Sqlite.DrizzleClient) => A) {
-  return Effect.scoped(Effect.andThen(database.db.$client.reserve, Effect.sync(() => body(database.sync)))).pipe(
-    Effect.orDie,
-  )
+  return Effect.scoped(Effect.gen(function* () {
+    const exit = yield* DatabaseGate.enter(database.filename ?? path())
+    yield* Effect.addFinalizer(() => exit)
+    yield* database.db.$client.reserve
+    return yield* Effect.sync(() => body(database.sync))
+  })).pipe(Effect.orDie)
 }
 
 export function layerFromPath(filename: string) {

@@ -603,25 +603,19 @@ function hydrate(
     const admitted = includeHidden ? rows : rows.filter((row) => !row.data.hidden)
     // viewer只省略user summary，assistant同包批量恢复而不逐条解压。
     const selected = messageProjection === "viewer" ? admitted.filter((row) => row.data.role === "assistant") : admitted
-    const restored = new Map(
-      (yield* Database.withSync({ db, sync }, () => ColdStorage.inspectMessageRows(sync, selected))).map((row) => [row.id, row]),
+    // 同一 deferred 快照只复制 owner 与 payload；解压、摘要和 envelope 解析在 Worker 完成。
+    const restored = yield* ColdStorage.inspectMessageAndPartRows(
+      { db, sync },
+      { messages: selected, partMessages: admitted, includeHidden },
     )
+    const restoredMessages = new Map(restored.messages.map((row) => [row.id, row]))
     const infos = admitted.map((row) => {
-      const complete = restored.get(row.id) ?? row
+      const complete = restoredMessages.get(row.id) ?? row
       return messageProjection === "viewer" ? viewerInfo(complete) : infoFromRestored(complete)
     })
-    const ids = admitted.map((row) => row.id)
     const partByMessage = new Map<string, Part[]>()
-    if (ids.length > 0) {
-      // SELECT与冷读取在同一次连接预约和快照中完成，不能跨await携带已失效的cold locator。
-      const restoredParts = yield* Database.withSync({ db, sync }, () => sync.transaction((tx) => {
-        const partRows = tx.select().from(PartTable).where(inArray(PartTable.message_id, ids))
-          .orderBy(PartTable.message_id, PartTable.id).all()
-        const visible = includeHidden ? partRows : partRows.filter((row) => !row.data.hidden)
-        // 普通SDK与viewer共享只读恢复，保留同连接查询快照和完整性检查。
-        return ColdStorage.inspectPartRows(tx, visible)
-      }, { behavior: "deferred" }))
-      for (const row of restoredParts) {
+    if (restored.parts.length > 0) {
+      for (const row of restored.parts) {
         const next = partFromRestored(row)
         // [0624] viewer 路径再过一次 TUI 专用纯投影，剪掉同 Part 内逐字重复的大字段。
         const projected = messageProjection === "viewer" ? PartView.project(next) : next
@@ -1226,6 +1220,31 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
   return { messages, parts, missing: false as const }
 }
 
+export const pageBoundaries = Effect.fn("MessageV2.pageBoundaries")(function* (
+  sessionID: SessionID,
+  opts?: { includeHidden?: boolean; fromMessageID?: MessageID },
+) {
+  const { db } = yield* Database.Service
+  const anchor = opts?.fromMessageID
+    ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, opts.fromMessageID))).get().pipe(Effect.orDie)
+    : undefined
+  const rows = yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+    .where(and(
+      eq(MessageTable.session_id, sessionID),
+      opts?.fromMessageID ? anchor ? atOrNewer(anchor) : sql`0` : undefined,
+      opts?.includeHidden ? undefined : sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`,
+    ))
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).all().pipe(Effect.orDie)
+  // 仅游标进入响应前的轻量快照；实际正文仍按这些边界逐页读取。
+  const boundaries = [undefined] as (string | undefined)[]
+  for (let index = 50; index < rows.length; index += 50) {
+    const tail = rows[index - 1]
+    if (tail) boundaries.push(cursor.encode({ id: tail.id, time: tail.time }))
+  }
+  return boundaries
+})
+
 // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取
 export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; fromMessageID?: MessageID }) {
   // includeHidden 默认 false：正常流不返回被撤销隐藏的消息和 part
@@ -1248,6 +1267,8 @@ export function stream(sessionID: SessionID, opts?: { includeHidden?: boolean; f
       }
       if (!next.more || !next.cursor) break
       before = next.cursor
+      // 页间宏任务让 health、SSE 与短请求在下一页数据库工作前获得执行机会。
+      yield* Effect.promise(() => Bun.sleep(0))
     }
     return result
   })

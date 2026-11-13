@@ -1,5 +1,5 @@
 import { Config } from "@/config/config"
-import { AppRuntime } from "@/effect/app-runtime"
+import { Effect } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Installation } from "@/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -19,7 +19,8 @@ export function shouldNotify(input: {
 
 // Returns undefined when checks are disabled or fail, so the TUI only suggests OpenCode 2 after a successful check.
 export async function upgrade() {
-  const config = await AppRuntime.runPromise(Config.Service.use((cfg) => cfg.getGlobal()))
+  // 更新检查与 discovery 使用同一全局读取入口，客户端复用远程 owner 后也不会触发本地建库。
+  const config = await Effect.runPromise(Config.readGlobalConfig())
   if (config.autoupdate === false || Flag.OPENCODE_DISABLE_AUTOUPDATE) return
   const latest = await Installation.latest(await Installation.method()).catch(() => {})
   if (!latest) return

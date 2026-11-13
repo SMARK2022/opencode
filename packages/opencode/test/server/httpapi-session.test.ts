@@ -4,7 +4,7 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Config, Context, Deferred, Effect, Exit, Fiber, Layer, Scope } from "effect"
+import { Cause, Config, Context, Deferred, Effect, Exit, Fiber, Layer, Scope, Stream } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -24,6 +24,7 @@ import { InstanceBootstrap as InstanceBootstrapService } from "../../src/project
 import { InstanceStore } from "../../src/project/instance-store"
 import { Project } from "../../src/project/project"
 import { HttpApiApp } from "../../src/server/routes/instance/httpapi/server"
+import { Server } from "../../src/server/server"
 import * as HttpSessionError from "../../src/server/routes/instance/httpapi/handlers/session-errors"
 import { ExperimentalPaths } from "../../src/server/routes/instance/httpapi/groups/experimental"
 import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/session"
@@ -616,6 +617,67 @@ describe("session HttpApi", () => {
           })).data,
         ).toMatchObject([{ type: "assistant" }])
       }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "streams no-limit messages oldest-first across page boundaries",
+    () => Effect.gen(function* () {
+      const test = yield* TestInstance
+      const headers = { "x-opencode-directory": test.directory }
+      const scope = yield* Scope.Scope
+      const shared = HttpApiApp.createSharedServices()
+      const services = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)
+      const seeded = yield* Effect.gen(function* () {
+        yield* Project.use.fromDirectory(test.directory)
+        const session = yield* createSession({ title: "streamed history" }) // 独立会话确保 101 条记录严格跨越三个 50 条页面边界。
+        const ids = [] as ReturnType<typeof MessageID.ascending>[] // 创建顺序作为 oldest-first 的直接行为 oracle。
+        for (let index = 0; index < 101; index++) {
+          const text = index >= 50 && index < 100 ? `message-${index}-${"x".repeat(65_536)}` : `message-${index}`
+          const message = yield* createTextMessage(session.id, text) // 第二大页提供真实序列化工作段，第三页用于观察 health 是否插队。
+          ids.push(message.info.id)
+        }
+        return { session, ids }
+      }).pipe(Effect.provide(services), provideInstanceEffect(test.directory))
+      const app = Server.Default().app // 直接 HTTP handler 与种子共享 memoMap，避免真实网络 chunk 的自然调度掩盖页间让出。
+      const response = yield* Effect.promise(() => Promise.resolve(app.request(pathFor(SessionPaths.messages, { sessionID: seeded.session.id }), { headers })))
+      expect(response.status).toBe(200)
+      const messages = yield* Effect.promise(() => response.json() as Promise<SessionV1.WithParts[]>) // 完整客户端仍按普通 JSON 数组解析，不改变 SDK 合同。
+      expect(messages.map((message) => message.info.id)).toEqual(seeded.ids) // 跨页反转必须恢复原始时间顺序且不重排任何消息。
+      expect(messages[0]?.parts[0]).toMatchObject({ type: "text", text: "message-0" })
+      expect(messages[50]?.parts[0]).toMatchObject({ type: "text", text: expect.stringContaining("message-50") })
+      expect(messages[100]?.parts[0]).toMatchObject({ type: "text", text: "message-100" })
+      const zero = yield* Effect.promise(() => Promise.resolve(app.request(`${pathFor(SessionPaths.messages, { sessionID: seeded.session.id })}?limit=0`, { headers })))
+      expect(yield* Effect.promise(() => zero.json() as Promise<SessionV1.WithParts[]>)).toEqual(messages) // limit=0 在 HEAD 同样返回完整历史，不能变成有界空页。
+
+      let healthStarted = false
+      const health = new Promise<Response>((resolve, reject) => {
+        setTimeout(() => {
+          healthStarted = true
+          Promise.resolve(app.request("/global/health", { headers })).then(resolve, reject)
+        }, 0)
+      }) // health 在流式请求前排入宏任务，直接观察它能否在两个生产页之间执行。
+      const streamed = yield* Effect.promise(() => Promise.resolve(app.request(pathFor(SessionPaths.messages, { sessionID: seeded.session.id }), { headers })))
+      if (!streamed.body) throw new Error("streamed response body required")
+      const reader = streamed.body.getReader()
+      const decoder = new TextDecoder()
+      let started = false
+      let healthBeforeSecondPage = false
+      while (true) {
+        const next = yield* Effect.promise(() => reader.read())
+        if (next.done) break
+        const chunk = decoder.decode(next.value, { stream: true })
+        if (chunk === "[" || chunk === "]") continue
+        if (!started) {
+          started = true
+          expect(chunk).not.toContain("message-100") // 首内容页不是末页，后续读取仍在真实进行。
+          continue
+        }
+        if (chunk.includes("message-50")) healthBeforeSecondPage = healthStarted // 持续消费第二页时 health 宏任务必须已经发出请求，而不是停止流后再检查。
+      }
+      expect((yield* Effect.promise(() => health)).status).toBe(200)
+      expect(healthBeforeSecondPage).toBe(true) // 删除 HTTP 页间让出后，第二页会先于并发 health 到达并使本断言变红。
+    }),
     { git: true, config: { formatter: false, lsp: false } },
   )
 

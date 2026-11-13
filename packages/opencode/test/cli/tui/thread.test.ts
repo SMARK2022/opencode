@@ -150,7 +150,7 @@ describe("tui thread", () => {
     function baseDeps(overrides: Partial<DiscoverDaemonDeps> & Pick<DiscoverDaemonDeps, "read" | "spawn">): DiscoverDaemonDeps {
       return {
         alive: () => true,
-        ping: async () => true,
+        ping: async () => "ok",
         clear: async () => {},
         acquire: async () => ({ release: async () => {} }) as never,
         sleep: async () => {},
@@ -250,7 +250,7 @@ describe("tui thread", () => {
         ping: async () => {
           expect(process.env.NO_PROXY).toBe(noProxy)
           expect(process.env.no_proxy).toBe(noProxy)
-          return true
+          return "ok"
         },
         spawn: ((_cmd, _opts) => {
           daemonSpawnCount++
@@ -387,7 +387,7 @@ describe("tui thread", () => {
         ping: async () => {
           pingCount++
           // 认证失败与短暂不可达均不能创建同身份的第二个服务。
-          return pingCount > 2
+          return "unreachable"
         },
         clear: async () => {
           clearCalled = true
@@ -396,7 +396,7 @@ describe("tui thread", () => {
           daemonSpawnCount++
           return { pid: FAKE_DAEMON_PID, unref() {}, kill() {} } as ReturnType<typeof Bun.spawn>
         }) as DiscoverDaemonDeps["spawn"],
-      }))).rejects.toThrow("health or authentication")
+      }))).rejects.toThrow("unreachable")
       expect(daemonSpawnCount).toBe(0)
       expect(clearCalled).toBe(false)
     })
@@ -650,7 +650,7 @@ describe("daemon startup exit (#179)", () => {
         electionStaleMs: 1000,
         read: async () => undefined,
         alive: () => false,
-        ping: async () => false,
+        ping: async () => "unreachable",
         acquire: async () => ({ release: async () => undefined }),
         clear: async () => undefined,
         resolveDaemonFile: async () => "/tmp/fake-daemon.js",

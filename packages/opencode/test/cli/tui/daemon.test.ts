@@ -241,7 +241,7 @@ async function spawnDaemon(lockPath: string, env: Record<string, string> = {}) {
         username: env.OPENCODE_SERVER_USERNAME ?? credentials.username,
         password: env.OPENCODE_SERVER_PASSWORD ?? credentials.password,
       })
-      if (ok) return { proc, lock }
+      if (ok === "ok") return { proc, lock }
     }
     await Bun.sleep(POLL_INTERVAL_MS)
   }
@@ -283,7 +283,7 @@ async function spawnHangingDisposerDaemon(lockPath: string) {
         .catch(() => undefined)
       if (lock && lock.pid === proc.pid && ServerLock.alive(lock.pid)) {
         const ok = await ServerLock.ping(lock.port, credentials)
-        if (ok) return lock
+        if (ok === "ok") return lock
       }
       await Bun.sleep(POLL_INTERVAL_MS)
     }
@@ -329,7 +329,7 @@ async function spawnProbeDaemon(lockPath: string, probe: string) {
       .catch(() => undefined)
     if (lock && lock.pid === proc.pid && ServerLock.alive(lock.pid)) {
       const ok = await ServerLock.ping(lock.port, credentials)
-      if (ok) {
+      if (ok === "ok") {
         expect(await readLineMatching(proc.stdout, line => line === "probe-ready").catch(async (error) => {
           proc.kill()
           await proc.exited.catch(() => undefined)
@@ -529,21 +529,63 @@ function interruptedCompressTask(taskID: string, dbPath: string): MaintenanceTas
 // stage:stale-rename 与 rename-blocked-N 同序，表示进入 dead-owner rename gate。
 // pid 哨兵 2147483647 在 Windows/Unix 上均 dead，强制走 rename reclaim 而非 live busy。
 function maintenanceStageWorkerSource(leaseDir: string) {
-  return `
+  const hooks = `
     import { mock } from "bun:test"
     import * as fs from "node:fs/promises"
     import path from "node:path"
-    // #539：write-before-stdin 合同：就绪信号必须用 stdout.write 而非 console.log，
-    // 避免跨进程缓冲延迟导致 gate token 与 marker 观察顺序错乱。
-    const input = Bun.stdin.stream().getReader()
+    import { parentPort, workerData } from "node:worker_threads"
     const realRename = fs.rename.bind(fs)
     const realRm = fs.rm.bind(fs)
     const realMkdir = fs.mkdir.bind(fs)
     const leaseLock = path.resolve(${JSON.stringify(leaseDir)})
-    // #539：path.resolve 归一匹配——Windows 分隔符/相对前缀差异不得让 rename gate 漏拦。
+    let release = workerData.stageIndex === 1
+    const marker = (name) => parentPort.postMessage({ type: "test-stage-marker", name })
+    const gate = (name) => new Promise((resolve) => {
+      const resume = (message) => {
+        if (message.type !== "test-stage-continue" || message.name !== name) return
+        parentPort.off("message", resume)
+        resolve()
+      }
+      parentPort.on("message", resume)
+      parentPort.postMessage({ type: "test-stage-gate", name })
+    })
+    mock.module("fs/promises", () => ({
+      ...fs,
+      mkdir: async (target, options) => {
+        if (path.resolve(String(target)) === leaseLock) {
+          marker("stage:mkdir-attempt")
+          const out = await realMkdir(target, options)
+          marker("stage:mkdir-ok")
+          return out
+        }
+        return realMkdir(target, options)
+      },
+      rename: async (from, to) => {
+        if (path.resolve(String(from)) === leaseLock) {
+          marker("stage:stale-rename")
+          await gate("rename-blocked-" + workerData.stageIndex)
+        }
+        return realRename(from, to)
+      },
+      rm: async (target, options) => {
+        if (release && options?.recursive && path.resolve(String(target)) === leaseLock) {
+          release = false
+          await gate("lease-release-blocked")
+        }
+        return realRm(target, options)
+      },
+    }))
+    await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
+  `
+  // FS mock 必须在实际维护线程安装；主线程只转发 marker 和 stdin gate，不复制维护算法。
+  return `
+    import { mock } from "bun:test"
+    import threads from "node:worker_threads"
+    const RealWorker = threads.Worker
+    const source = new URL("data:application/javascript," + encodeURIComponent(${JSON.stringify(hooks)}))
+    const input = Bun.stdin.stream().getReader()
     let buffered = ""
-    let renameIndex = 0
-    let release = true
+    let stageIndex = 0
     const gate = async (name) => {
       process.stdout.write(name + "\\n")
       while (!buffered.includes("\\n")) {
@@ -553,38 +595,21 @@ function maintenanceStageWorkerSource(leaseDir: string) {
       }
       buffered = buffered.slice(buffered.indexOf("\\n") + 1)
     }
-    mock.module("fs/promises", () => ({
-      ...fs,
-      mkdir: async (target, options) => {
-        // #539：mkdir stage 只针对 lease 目录：诊断序验证 acquire FS 触达，不干扰其它 mkdir。
-        if (path.resolve(String(target)) === leaseLock) {
-          process.stdout.write("stage:mkdir-attempt\\n")
-          try {
-            const out = await realMkdir(target, options)
-            process.stdout.write("stage:mkdir-ok\\n")
-            return out
-          } catch (error) {
-            throw error
-          }
-        }
-        return realMkdir(target, options)
-      },
-      rename: async (from, to) => {
-        if (path.resolve(String(from)) === leaseLock) {
-          process.stdout.write("stage:stale-rename\\n")
-          await gate("rename-blocked-" + (++renameIndex))
-        }
-        return realRename(from, to)
-      },
-      rm: async (target, options) => {
-        // #539：release 单次标志——仅首笔 lease 释放阻塞，后续清理走原生路径防死锁。
-        if (release && options?.recursive && path.resolve(String(target)) === leaseLock) {
-          release = false
-          await gate("lease-release-blocked")
-        }
-        return realRm(target, options)
-      },
-    }))
+    mock.module("node:worker_threads", () => ({ ...threads, Worker: class extends RealWorker {
+      constructor(filename, options) {
+        const maintenance = options?.workerData?.role === "maintenance"
+        const index = maintenance && options.workerData.prepared.type === "task" ? ++stageIndex : 0
+        super(maintenance ? source : filename, maintenance ? {
+          ...options, workerData: { ...options.workerData, stageIndex: index },
+        } : options)
+        if (maintenance) this.on("message", (message) => {
+          if (message.type === "test-stage-marker") process.stdout.write(message.name + "\\n")
+          if (message.type === "test-stage-gate") void gate(message.name).then(() => {
+            this.postMessage({ type: "test-stage-continue", name: message.name })
+          })
+        })
+      }
+    }}))
     await import(${JSON.stringify(pathToFileURL(WORKER_TS).href)})
   `
 }
@@ -769,7 +794,7 @@ describe("daemon lifecycle", () => {
     const forbidden = () => { throw new Error("observation must not start, elect, clear, or wait") }
     const lock: ServerLock.ServerLock = { pid: 71, port: 3101, token: "private-token", dbPath: path.resolve("observer-only.db"), channel: "test", startedAt: "2026-10-28" }
     const observe = (owner: ServerLock.ServerLock | undefined, overrides: Partial<DiscoverDaemonDeps> = {}) => connectionInfo({
-      read: async () => owner, alive: () => true, ping: async () => true,
+      read: async () => owner, alive: () => true, ping: async () => "ok",
       clear: forbidden, acquire: forbidden, spawn: forbidden,
       sleep: forbidden, resolveDaemonFile: forbidden, resolveNetwork: forbidden,
       identity: () => ({ dbPath: lock.dbPath, channel: lock.channel }), placement: () => "observer-only",
@@ -783,7 +808,7 @@ describe("daemon lifecycle", () => {
     const healthy = await observe(lock)
     expect(healthy).toEqual({ running: true, pid: 71, url: "http://127.0.0.1:3101", responsive: true })
     expect(Object.keys(healthy).toSorted()).toEqual(["pid", "responsive", "running", "url"])
-    await expect(observe(lock, { ping: async () => false })).resolves.toMatchObject({ running: true, pid: 71, responsive: false })
+    await expect(observe(lock, { ping: async () => "unreachable" })).resolves.toMatchObject({ running: true, pid: 71, responsive: false })
     // 身份不符、探测中换代与读取失败均保留失败，不伪装无owner并触发重建。
     await expect(observe({ ...lock, dbPath: path.resolve("other.db") })).rejects.toThrow("different database or channel")
     let reads = 0
@@ -979,7 +1004,7 @@ describe("daemon lifecycle", () => {
         // opencode.log出现probe-rejection证明真实handler执行，不能只观察stdout。
         // 之后 ping 仍成功才证明策略是只记录而非自杀（INV-03）。
         await waitForDaemonLog(lockPath, proc.pid, "probe-rejection")
-        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
+        expect(await ServerLock.ping(lock.port, credentials)).toBe("ok")
         expect(ServerLock.alive(proc.pid)).toBe(true)
       } finally {
         if (ServerLock.alive(proc.pid)) proc.kill()
@@ -1298,7 +1323,7 @@ describe("daemon lifecycle", () => {
         // #523：acquire 提供 asyncDispose 空实现——测试不进入真实 flock 文件锁竞争。
         read: () => Bun.file(lockPath).text().then((t) => JSON.parse(t)).catch(() => undefined),
         alive: ServerLock.alive,
-        ping: async () => true,
+        ping: async () => "ok",
         clear: ServerLock.clearIfOwner,
         acquire: async () => ({ release: async () => {}, [Symbol.asyncDispose]: async () => {} }),
         spawn: async () => ({ pid: process.pid, exited: Promise.resolve(1), unref() {}, kill() {} }),
@@ -1891,8 +1916,8 @@ describe("daemon lifecycle", () => {
       const { proc, lock } = await spawnDaemon(lockPath)
       try {
         // 第二次独立连接排除一次性响应后已经退出的 worker，同时覆盖 auth header 的重复构造。
-        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
-        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
+        expect(await ServerLock.ping(lock.port, credentials)).toBe("ok")
+        expect(await ServerLock.ping(lock.port, credentials)).toBe("ok")
       } finally {
         proc.kill()
         await proc.exited
@@ -2014,7 +2039,7 @@ describe("daemon lifecycle", () => {
       let lock: ServerLock.ServerLock | undefined
       while (Date.now() < deadline) {
         lock = await ServerLock.read(lockPath)
-        if (lock && lock.pid === proc.pid && (await ServerLock.ping(lock.port, credentials))) break
+        if (lock && lock.pid === proc.pid && (await ServerLock.ping(lock.port, credentials)) === "ok") break
         lock = undefined
         await Bun.sleep(POLL_INTERVAL_MS)
       }
@@ -2327,7 +2352,7 @@ test(
         await waitForDaemonLog(lockPath, lock.pid, "global event disconnected")
         expect(ServerLock.alive(lock.pid)).toBe(true)
         // 断言原 lock PID 而非任意 health 响应，防止 replacement daemon 把 parent-exit 回归伪装成成功。
-        expect(await ServerLock.ping(lock.port, credentials)).toBe(true)
+        expect(await ServerLock.ping(lock.port, credentials)).toBe("ok")
         expect((await Bun.file(lockPath).json()).pid).toBe(lock.pid)
       } finally {
         await runDaemonStop(lockPath).catch(() => undefined)
@@ -2575,10 +2600,21 @@ test(
         // 202 证明 worker 已接受真实 task；后续 409 不能由测试伪造的内存 flag 提供。
         const start = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
         expect(start.status).toBe(202)
-        // 只有公开 202 之后发出的 conditional request 才能证明 gate 覆盖已接受任务，而非预请求占位。
-        // query mode 的授权只属于 DB preflight；它不能继承显式 daemon stop 的“中断后关闭”语义。
-        const conditional = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
-        expect(conditional.status).toBe(409)
+        const overlapping = await controlRequest(lock, ServerLock.CONTROL_MAINTENANCE_PATH, "POST", { operation: "compress", olderThanMs: 0, batchSize: 1 })
+        expect(overlapping.status).toBe(409) // 并发竞争失败只能返回 busy，不能清除仍在运行的首个任务监督。
+        const started = (await start.json()) as { taskID: string }
+        let activeChecks = 0
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const status = await controlRequest(lock, `${ServerLock.CONTROL_MAINTENANCE_STATUS_PATH}?task=${started.taskID}`)
+          const current = (await status.json()) as { status?: string }
+          if (current.status !== "running") break
+          activeChecks++
+          // 每次轮询都以 durable running 为就绪信号；失败 Worker 退出后也不能让原任务失去停机保护。
+          const conditional = await controlRequest(lock, `${ServerLock.CONTROL_SHUTDOWN_PATH}?maintenance-idle=1`, "POST")
+          expect(conditional.status).toBe(409)
+          await Bun.sleep(25)
+        }
+        expect(activeChecks).toBeGreaterThan(0)
         // 409 是业务拒绝：daemon 必须继续存活，不得把 busy 错误升级成进程退出。
         expect(ServerLock.alive(proc.pid)).toBe(true)
         // 不带 query 的公开 stop 仍须成功，防止 DB preflight 收紧既有用户控制面。

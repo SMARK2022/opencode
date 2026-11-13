@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { DateTime, Effect, Layer, Queue, Schema, Stream } from "effect"
+import { DateTime, Deferred, Effect, Layer, Queue, Schema, Stream } from "effect"
 import { Sse } from "effect/unstable/encoding"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -22,6 +22,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { OpenCodeEvent } from "@opencode-ai/protocol/groups/event"
+import { Server } from "../../src/server/server"
 
 const EventData = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -242,33 +243,119 @@ describe("event HttpApi", () => {
           })
         const viewer = yield* openGlobalStream(true)
         const complete = yield* openGlobalStream(false)
+        const completeSecond = yield* openGlobalStream(false) // 第二个完整连接用于识别逐客户端重复 JSON.stringify。
+        let serializations = 0 // toJSON 计数直接记录真实序列化次数，不依赖实现内部 mock。
         try {
           expect((yield* readPayload(viewer.reader))?.type).toBe("server.connected")
           expect((yield* readPayload(complete.reader))?.type).toBe("server.connected")
+          expect((yield* readPayload(completeSecond.reader))?.type).toBe("server.connected")
 
           GlobalBus.emit("event", {
             directory,
-            payload: { type: "message.part.updated", properties: { sessionID: "ses_viewer_sse", part, time: 2 } },
+            payload: { type: "message.part.updated", properties: {
+              sessionID: "ses_viewer_sse", part, time: 2,
+              // 同一原始事件的完整变体只序列化一次；viewer 变体使用独立缓存槽。
+              probe: { toJSON: () => { serializations++; return "ok" } }, // 同一对象跨连接共享，完整与 viewer 应各计算一次。
+            } },
           })
 
           // viewer 连接剪掉与 diff 逐字重复的 patch；默认连接的合同字段原样保留。
           const viewerEvent = yield* readPartEvent(viewer.reader)
           const completeEvent = yield* readPartEvent(complete.reader)
+          yield* readPartEvent(completeSecond.reader) // 第二个完整客户端必须收到同一事件，缓存不能替代投递。
           const viewerPart = viewerEvent?.properties?.part
           const completePart = completeEvent?.properties?.part
           expect(viewerPart).toMatchObject({ type: "tool", state: { status: "completed", metadata: { diff: patch } } })
           expect(viewerPart?.type === "tool" && viewerPart.state.status === "completed" ? viewerPart.state.metadata.filediff : undefined)
             .toEqual({ file: "a.ts", additions: 64, deletions: 0 })
           expect(completePart).toMatchObject({ type: "tool", state: { metadata: { filediff: { patch } } } })
+          expect(serializations).toBe(2) // 三个连接只产生 complete 与 viewer 两种 wire 变体。
         } finally {
           // 先沿请求 signal 释放 heartbeat、GlobalBus 订阅和连接计数，再结算两个 reader。
           controller.abort()
           yield* Queue.shutdown(viewer.reader)
           yield* Queue.shutdown(complete.reader)
+          yield* Queue.shutdown(completeSecond.reader)
         }
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
+
+  it.instance("terminates an overflowing slow client and reconnects through server.connected", () => Effect.gen(function* () {
+    const { directory } = yield* TestInstance
+    const Frame = Schema.Struct({ payload: Schema.Struct({
+      type: Schema.String,
+      properties: Schema.Record(Schema.String, Schema.Any),
+    }) })
+    const slowController = new AbortController()
+    const replacementController = new AbortController()
+    const started = yield* Deferred.make<void>() // 首帧 readiness 证明慢客户端订阅已注册，随后才制造积压。
+    const resume = yield* Deferred.make<void>() // resume 控制消费者暂停窗口，使服务端队列真实增长。
+    const done = yield* Deferred.make<void>() // done 只由实际流退出触发，不能用固定睡眠猜测溢出。
+    const headers = new Headers({ "x-opencode-directory": directory })
+    const slow = yield* Effect.promise(() => Promise.resolve(Server.Default().app.request("/global/event", { headers, signal: slowController.signal })))
+    const body = slow.body
+    if (!body) throw new Error("SSE response body required")
+    // 直接控制响应 body 的读取，操作系统 socket 与客户端缓冲不参与背压判定。
+    yield* Stream.fromReadableStream({ evaluate: () => body, onError: (error) => error }).pipe(
+      Stream.decodeText(),
+      Stream.pipeThroughChannel(Sse.decodeDataSchema(Frame)),
+      Stream.runForEach((event) => event.data.payload.type !== "server.connected" ? Effect.void :
+        Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(resume)))),
+      Effect.onExit(() => Deferred.succeed(done, undefined)),
+      Effect.forkScoped,
+    )
+    const good = yield* requestInDirectory("/global/event", directory, { headers })
+    const reader = yield* Queue.unbounded<typeof Frame.Type["payload"]>() // 健全客户端持续消费，隔离慢客户端造成的全局影响。
+    yield* good.stream.pipe(
+      Stream.decodeText(),
+      Stream.pipeThroughChannel(Sse.decodeDataSchema(Frame)),
+      Stream.runForEach((event) => Queue.offer(reader, event.data.payload)),
+      Effect.forkScoped,
+    )
+    const next = () => Queue.take(reader).pipe(Effect.timeoutOrElse({
+      duration: "10 seconds", orElse: () => Effect.fail(new Error("timed out waiting for ordered event")),
+    }))
+    try {
+      yield* Deferred.await(started) // 等待 server.connected，而不是在订阅建立前开始发事件。
+      expect((yield* next()).type).toBe("server.connected")
+      const count = 512 // 超过 256 容量及流合并的有限预取；按帧计数，无需构造大字符串。
+      for (let index = 0; index < count; index++) {
+        if (index % 10 === 0) yield* Effect.promise(() => Bun.sleep(0)) // 让健全 reader 获得调度，同时慢 reader 仍保持背压。
+        GlobalBus.emit("event", {
+          directory,
+          payload: { type: "message.part.updated", properties: {
+            sessionID: "ses_backpressure", time: index,
+            part: { id: "prt_backpressure", messageID: "msg_backpressure", sessionID: "ses_backpressure",
+              type: "text", text: String(index) },
+          } },
+        })
+      }
+      yield* Deferred.succeed(resume, undefined)
+      yield* Deferred.await(done).pipe(Effect.timeoutOrElse({ // 超时意味着慢流未按容量合同终止，形成明确红信号。
+        duration: "10 seconds", orElse: () => Effect.fail(new Error("slow SSE client did not overflow")),
+      }))
+      const times: number[] = [] // 健全连接的时间序列必须与生产顺序完全一致。
+      while (times.length < count) {
+        const event = yield* next()
+        if (event.type === "message.part.updated") times.push(event.properties.time as number)
+      }
+      expect(times).toEqual(Array.from({ length: count }, (_, index) => index)) // 慢流溢出不能丢弃或重排其他客户端的帧。
+
+      const replacement = yield* requestInDirectory("/global/event", directory, { headers, signal: replacementController.signal }) // 替换连接复用现有重连入口，不增加新事件类型。
+      const connected = yield* replacement.stream.pipe(
+        Stream.decodeText(),
+        Stream.pipeThroughChannel(Sse.decodeDataSchema(Frame)),
+        Stream.runHead,
+        Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.fail(new Error("reconnect timed out")) }),
+      )
+      expect(connected._tag === "Some" && connected.value.data.payload.type).toBe("server.connected") // 首帧驱动既有同步刷新，之后才能应用增量。
+    } finally {
+      slowController.abort() // 清理慢连接及其 GlobalBus 订阅，避免跨用例泄漏。
+      replacementController.abort() // 替换连接也随 scope 终止，释放连接计数和 heartbeat。
+      yield* Queue.shutdown(reader) // 健全 reader 在断言结束后统一关闭，后台 fiber 不留挂起任务。
+    }
+  }), { git: true, config: { formatter: false, lsp: false } })
 
   it.instance("native viewer HTTP and both SSE transports preserve identity order and complete data", () => Effect.gen(function* () {
     const instance = yield* TestInstance

@@ -1,4 +1,5 @@
-import { deflateSync, gzipSync } from "node:zlib"
+import { deflate, gzip } from "node:zlib"
+import { promisify } from "node:util"
 import { Effect } from "effect"
 import { HttpBody, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
@@ -12,6 +13,8 @@ const STREAMING_PATHS = new Set(["/event", "/global/event"])
 const STREAMING_POST_REGEX = /^\/session\/[^/]+\/(?:message|prompt_async)$/
 
 const THRESHOLD_BYTES = 1024
+const gzipAsync = promisify(gzip)
+const deflateAsync = promisify(deflate)
 
 type Encoding = "gzip" | "deflate"
 
@@ -54,7 +57,10 @@ export const compressionLayer = HttpRouter.middleware<{ handles: unknown }>()((e
     const encoding = pickEncoding(request.headers["accept-encoding"])
     if (!encoding) return response
 
-    const compressed = encoding === "gzip" ? gzipSync(body.body) : deflateSync(body.body)
+    // zlib 在线程池压缩大响应，主线程可以继续处理 health、SSE 和其他短请求。
+    const compressed = yield* Effect.promise(() =>
+      encoding === "gzip" ? gzipAsync(body.body) : deflateAsync(body.body),
+    )
     return HttpServerResponse.setHeader(
       HttpServerResponse.setBody(response, HttpBody.uint8Array(compressed, contentType)),
       "content-encoding",

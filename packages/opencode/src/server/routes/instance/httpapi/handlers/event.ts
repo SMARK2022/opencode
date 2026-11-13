@@ -2,7 +2,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { GlobalBus } from "@/bus/global"
 import { EventV2 } from "@opencode-ai/core/event"
-import { Effect, Queue } from "effect"
+import { Cause, Effect, Queue } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -10,13 +10,22 @@ import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
 import { EventClients } from "@opencode-ai/server/event-clients"
 
-function eventData(data: unknown): Sse.Event {
-  return {
+const CLIENT_EVENT_CAPACITY = 256
+const serializedEvents = new WeakMap<object, Sse.Event>()
+
+function eventData(data: unknown, source?: object): Sse.Event {
+  const key = source ?? (data !== null && typeof data === "object" ? data : undefined)
+  const cached = key ? serializedEvents.get(key) : undefined
+  if (cached) return cached
+  const serialized = {
     _tag: "Event",
     event: "message",
     id: undefined,
     data: JSON.stringify(data),
-  }
+  } satisfies Sse.Event
+  // EventV2 payload 是共享的不可变广播对象，绕开每个连接新建的包装对象。
+  if (key) serializedEvents.set(key, serialized)
+  return serialized
 }
 
 function eventID() {
@@ -27,21 +36,17 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
   return Effect.gen(function* () {
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
-    // Listener registration is eager, so events published after this point cannot
-    // be lost while the HTTP body fiber is starting or emitting server.connected.
-    const queue = yield* Queue.unbounded<EventV2.Payload>()
-    // 此处只同步入队；SSE 编码和网络写入仍在 response stream 中执行。
-    const unsubscribe = yield* events.listen((event) => Effect.sync(() => Queue.offerUnsafe(queue, event)), { finalizerSafe: true })
-    yield* Effect.addFinalizer(() => unsubscribe)
-    const stream = Stream.fromQueue(queue).pipe(
+    // 注册先于 server.connected，容量溢出会失败当前响应并触发客户端重连刷新。
+    const input = yield* EventV2.allBounded(events, CLIENT_EVENT_CAPACITY)
+    const stream = input.pipe(
       Stream.filter(
         (event) =>
           event.location?.directory === instance.directory &&
           (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
       ),
-      Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data })),
+      Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data, source: event })),
     )
-    const compatibility = yield* Queue.unbounded<{ id: string; type: string; properties: unknown }>()
+    const compatibility = yield* Queue.dropping<{ id: string; type: string; properties: unknown }, EventV2.SubscriberOverflowError>(CLIENT_EVENT_CAPACITY)
     const listener = (event: {
       directory?: string
       workspace?: string
@@ -52,11 +57,12 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
       const snapshot = event.payload.type === "session.updated" && event.payload.metadata?.projection === true
       if (!snapshot && event.payload.type !== "server.instance.disposed") return
       if (snapshot && event.workspace !== undefined && event.workspace !== workspaceID) return
-      Queue.offerUnsafe(compatibility, {
+      const accepted = Queue.offerUnsafe(compatibility, {
         id: event.payload.id ?? eventID(),
         type: snapshot ? "session.updated" : "server.instance.disposed",
         properties: event.payload.properties ?? {},
       })
+      if (!accepted) Queue.failCauseUnsafe(compatibility, Cause.fail(new EventV2.SubscriberOverflowError({ capacity: CLIENT_EVENT_CAPACITY })))
     }
     // 与Core listener一样在响应前注册；退出随同一Scope退订，不丢首包前的请求投影。
     yield* Effect.acquireRelease(
@@ -77,7 +83,10 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
       // /event 使用相同 body-scope 租约，不能因为未订阅 /global/event 被误判为空闲。
       Stream.unwrap(Effect.as(clients.acquire, Stream.make({ id: eventID(), type: "server.connected", properties: {} }).pipe(
         Stream.concat(output.pipe(Stream.merge(heartbeat, { haltStrategy: "left" }))),
-        Stream.map(eventData),
+        Stream.map((event) => eventData(
+          { id: event.id, type: event.type, properties: event.properties },
+          "source" in event ? event.source : undefined,
+        )),
         Stream.pipeThroughChannel(Sse.encode()),
         Stream.encodeText,
         Stream.ensuring(Effect.logInfo("event disconnected")),

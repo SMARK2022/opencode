@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { gunzipSync, inflateSync } from "node:zlib"
+import { randomBytes } from "node:crypto"
+import { Effect, Layer } from "effect"
+import { HttpBody, HttpRouter, HttpServer, HttpServerResponse } from "effect/unstable/http"
 import { Server } from "../../src/server/server"
+import { compressionLayer } from "../../src/server/routes/instance/httpapi/middleware/compression"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 
@@ -43,6 +47,32 @@ describe("HttpApi compression", () => {
       expect(json).toMatchObject({ username: "compression-test-user" })
       expect(compressed.byteLength).toBeLessThan(decompressed.byteLength)
     })
+
+    test("lets the event loop run while compressing a high-entropy body", async () => {
+      let heartbeat = false // 定时器在 contentType 读取点排入，直接观察压缩是否让出主线程。
+      const { handler, dispose } = HttpRouter.toWebHandler(
+        HttpRouter.use((router) => router.add("GET", "/", () => {
+          const body = HttpBody.uint8Array(randomBytes(4_000_000), "application/json") // 高熵正文避免高压缩率样本掩盖同步 zlib 停顿。
+          // contentType 紧邻压缩执行；此时排入定時器才能准确观察压缩是否让出主线程。
+          Object.defineProperty(body, "contentType", {
+            get() {
+              setTimeout(() => { heartbeat = true }, 0)
+              return "application/json"
+            },
+          })
+          return Effect.succeed(HttpServerResponse.setBody(HttpServerResponse.empty(), body))
+        })).pipe(Layer.provide(compressionLayer), Layer.provide(HttpServer.layerServices)),
+        { disableLogger: true },
+      )
+      try {
+        const response = await handler(new Request("http://localhost/", { headers: { "accept-encoding": "gzip" } })) // 通过真实 middleware 与 HTTP 编码路径执行压缩。
+        expect(heartbeat).toBe(true) // 同步 gzip 返回前定时器为 false，异步实现应先让定时器运行。
+        expect(response.headers.get("content-encoding")).toBe("gzip") // 让出事件循环不能改变既有 Content-Encoding 合同。
+        expect(gunzipSync(new Uint8Array(await response.arrayBuffer()))).toHaveLength(4_000_000) // 解压字节长度验证压缩结果完整且未截断。
+      } finally {
+        await dispose()
+      }
+    }, 20_000)
 
     test("uses deflate when only deflate is acceptable", async () => {
       await using tmp = await tmpdir({ config: fatConfig() })

@@ -14,6 +14,7 @@ import type { Connection } from "effect/unstable/sql/SqlConnection"
 import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
 import * as Statement from "effect/unstable/sql/Statement"
 import { Sqlite } from "./sqlite"
+import { DatabaseGate } from "./gate"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
 
@@ -53,8 +54,8 @@ const make = (options: Config) =>
       ? Statement.defaultTransforms(options.transformResultNames).array
       : undefined
 
-    const run = (query: string, params: ReadonlyArray<unknown> = []) =>
-      Effect.withFiber<Array<Record<string, unknown>>, SqlError>((fiber) => {
+    const run = (query: string, params: ReadonlyArray<unknown> = [], admit = true) => {
+      const execute = Effect.withFiber<Array<Record<string, unknown>>, SqlError>((fiber) => {
         const statement = native.query(query)
         // @ts-ignore bun-types missing safeIntegers method, fixed in https://github.com/oven-sh/bun/pull/26627
         statement.safeIntegers(Context.get(fiber.context, Client.SafeIntegers))
@@ -68,9 +69,11 @@ const make = (options: Config) =>
           )
         }
       })
+      return admit ? Effect.andThen(DatabaseGate.wait(options.filename), execute) : execute
+    }
 
-    const runValues = (query: string, params: ReadonlyArray<unknown> = []) =>
-      Effect.withFiber<Array<unknown[]>, SqlError>((fiber) => {
+    const runValues = (query: string, params: ReadonlyArray<unknown> = [], admit = true) => {
+      const execute = Effect.withFiber<Array<unknown[]>, SqlError>((fiber) => {
         const statement = native.query(query)
         // @ts-ignore bun-types missing safeIntegers method, fixed in https://github.com/oven-sh/bun/pull/26627
         statement.safeIntegers(Context.get(fiber.context, Client.SafeIntegers))
@@ -84,16 +87,18 @@ const make = (options: Config) =>
           )
         }
       })
+      return admit ? Effect.andThen(DatabaseGate.wait(options.filename), execute) : execute
+    }
 
-    const connection = identity<SqliteConnection>({
+    const makeConnection = (admit: boolean) => identity<SqliteConnection>({
       execute(query, params, transformRows) {
-        return transformRows ? Effect.map(run(query, params), transformRows) : run(query, params)
+        return transformRows ? Effect.map(run(query, params, admit), transformRows) : run(query, params, admit)
       },
       executeRaw(query, params) {
-        return run(query, params)
+        return run(query, params, admit)
       },
       executeValues(query, params) {
-        return runValues(query, params)
+        return runValues(query, params, admit)
       },
       executeUnprepared(query, params, transformRows) {
         return this.execute(query, params, transformRows)
@@ -117,16 +122,22 @@ const make = (options: Config) =>
             }),
         }),
     })
+    const connection = makeConnection(true)
+    // 事务预约时已持有父侧许可，内部语句不能再次等待 Worker hold 形成交叉等待。
+    const transactionConnection = makeConnection(false)
 
     const semaphore = yield* Semaphore.make(1)
     const acquirer = semaphore.withPermits(1)(Effect.succeed(connection))
     const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
       const fiber = Fiber.getCurrent()!
       const scope = Context.getUnsafe(fiber.context, Scope.Scope)
-      return Effect.as(
-        Effect.tap(restore(semaphore.take(1)), () => Scope.addFinalizer(scope, semaphore.release(1))),
-        connection,
-      )
+      return Effect.gen(function* () {
+        const exit = yield* restore(DatabaseGate.enter(options.filename))
+        yield* Scope.addFinalizer(scope, exit)
+        yield* restore(semaphore.take(1))
+        yield* Scope.addFinalizer(scope, semaphore.release(1))
+        return transactionConnection
+      })
     })
 
     const client = Object.assign(

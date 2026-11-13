@@ -538,9 +538,8 @@ const defaultDiscoverDeps = (): DiscoverDaemonDeps => ({
   placement: ServerLock.placement,
   // 全局 server 配置与 CLI 显式值按现有 network owner 合并，复用前即解析。
   resolveNetwork: async (args) => {
-    const { AppRuntime } = await import("@/effect/app-runtime")
-    const { resolveNetworkOptions } = await import("@/cli/network")
-    return AppRuntime.runPromise(resolveNetworkOptions(args))
+    const { resolveNetworkOptionsFromGlobal } = await import("@/cli/network")
+    return resolveNetworkOptionsFromGlobal(args)
   },
   // contender 可等待冷启动 winner 完成交付；超时只拒绝此次获锁请求，不驱逐持锁者。
   // acquire 超时必须显式失败，不能在未获得租约时私自拉起另一个同身份服务。
@@ -608,11 +607,11 @@ async function inspectDaemonOwner(
   if (network && (!lock.externalUrl || JSON.stringify(lock.network) !== JSON.stringify(network)))
     throw new Error("Existing opencode daemon has incompatible network options; stop it explicitly before changing listeners")
   const stopping = await ownerIsStopping(lock)
-  const responsive = !stopping && await deps.ping(lock.port)
+  const health = stopping ? undefined : await deps.ping(lock.port)
   // 探测完成后仍复读同一placement，不能把换代前的PID/端口交给调用方。
   const current = await deps.read(lockPath)
   if (current?.token !== lock.token || current.pid !== lock.pid) throw new Error("Opencode daemon ownership changed during discovery")
-  return { lock, stopping, responsive }
+  return { lock, stopping, health }
 }
 
 // #532：只公开连接字段，不把token、私有控制端口或数据库路径交给外部client。
@@ -624,7 +623,7 @@ export async function connectionInfo(deps: DiscoverDaemonDeps = defaultDiscoverD
   const lockPath = deps.placement()
   const owner = await inspectDaemonOwner(await deps.read(lockPath), deps, lockPath, deps.identity())
   if (!owner) return { running: false }
-  return { running: true, pid: owner.lock.pid, url: `http://127.0.0.1:${owner.lock.port}`, responsive: owner.responsive }
+  return { running: true, pid: owner.lock.pid, url: `http://127.0.0.1:${owner.lock.port}`, responsive: owner.health === "ok" }
 }
 
 // #165：共享 daemon 选举/复用；禁止重引入 per-TUI Worker+Rpc.client
@@ -645,14 +644,23 @@ export async function discoverOrSpawnDaemon(
   // 同一 DB/channel 共用发现路径；显式网络请求只在复用检查中判断兼容性。
   const lockPath = deps.placement()
   async function reuse(lock: ServerLock.ServerLock | undefined) {
-    const owner = await inspectDaemonOwner(lock, deps, lockPath, identity, external ? network : undefined)
+    let owner = await inspectDaemonOwner(lock, deps, lockPath, identity, external ? network : undefined)
+    if (!owner) return null
+    // 只有发现编排可以等待瞬态超时；connectionInfo 仍只观察一次，且每轮都复读 owner token。
+    for (let attempt = 0; owner?.health === "timeout" && attempt < 3; attempt++) {
+      await deps.sleep([500, 1_000, 2_000][attempt])
+      owner = await inspectDaemonOwner(lock, deps, lockPath, identity, external ? network : undefined)
+    }
     if (!owner) return null
     if (owner.stopping) {
       await waitForOwnerExit(owner.lock, deps)
       return null
     }
-    if (!owner.responsive) throw new Error("Existing opencode daemon health or authentication check failed")
-    return external && owner.lock.externalUrl ? owner.lock.externalUrl : `http://127.0.0.1:${owner.lock.port}`
+    if (owner.health === "ok") return external && owner.lock.externalUrl ? owner.lock.externalUrl : `http://127.0.0.1:${owner.lock.port}`
+    if (owner.health === "unauthorized") throw new Error("Existing opencode daemon authentication failed")
+    if (owner.health === "mismatch") throw new Error("Existing opencode daemon health or version check failed")
+    if (owner.health === "unreachable") throw new Error("Existing opencode daemon is unreachable")
+    throw new Error("Existing opencode daemon health check timed out")
   }
   // 快速检查与持锁复查都调用 reuse，身份、认证与 token 校验不分叉。
   let existingUrl = await reuse(await deps.read(lockPath))
@@ -757,7 +765,7 @@ export async function discoverOrSpawnDaemon(
           // 启动器 PID 可不同；健康锁仍必须通过 reuse 的身份与稳定 owner 校验。
           while (!existingUrl && Date.now() < deadline) {
             const daemonLock = await deps.read(lockPath)
-            if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port)) {
+            if (daemonLock && deps.alive(daemonLock.pid) && await deps.ping(daemonLock.port) === "ok") {
               // 交付身份、认证与 token 复读均通过的 daemon owner，启动器 PID 不代替锁身份。
               existingUrl = await reuse(daemonLock)
               // 重载信号的目标是已验证 daemon，而不是可能已经退出的启动器。

@@ -52,9 +52,15 @@ function networkArgs() {
   return process.argv.slice(2, separator === -1 ? undefined : separator)
 }
 
+export async function resolveNetworkOptionsFromGlobal(args: NetworkOptions) {
+  const { Config } = await import("@/config/config")
+  // discovery 直接读取全局文件；完整 AppRuntime 会把无关 Database 一并构建。
+  return resolveNetworkOptionsNoConfig(args, await Effect.runPromise(Config.readGlobalConfig()))
+}
+
 export const resolveNetworkOptions = Effect.fn("Cli.resolveNetworkOptions")(function* (args: NetworkOptions) {
   const { Config } = yield* Effect.promise(() => import("@/config/config"))
-  const config = yield* Config.Service.use((cfg) => cfg.getGlobal())
+  const config = yield* Config.Service.use((cfg) => cfg.getGlobal()) // web/serve/acp 保留完整 Config 服务边界与既有错误语义。
   return resolveNetworkOptionsNoConfig(args, config)
 })
 

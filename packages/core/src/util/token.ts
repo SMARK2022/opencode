@@ -248,7 +248,6 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
 }
 
 function stringChars(value: string) {
-  // JSON 的控制字符与孤立 surrogate 会转义；有效 Unicode pair 仍按原有 UTF-16 字符口径计数。
-  return value.length + 2 + Array.from(value.matchAll(/["\\\u0000-\u001f]|[\ud800-\udfff]/gu)).reduce((sum, match) =>
-    sum + (/["\\\b\f\n\r\t]/u.test(match[0]) ? 1 : 5), 0)
+  // 原生序列化直接给出 JSON 字符串长度，避免大请求里逐码点分配 matchAll 数组。
+  return JSON.stringify(value).length
 }

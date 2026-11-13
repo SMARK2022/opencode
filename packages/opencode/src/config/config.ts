@@ -148,6 +148,87 @@ function globalConfigFile() {
   return candidates[0]
 }
 
+type GlobalDiagnostic = ReturnType<typeof ConfigV2Compat.lower>["diagnostics"][number]
+
+function decodeLoadedConfig(input: unknown, source: string, onDiagnostic?: (diagnostic: GlobalDiagnostic) => void) {
+  const result = ConfigV2Compat.lower(normalizeLoadedConfig(input), source)
+  for (const diagnostic of result.diagnostics) onDiagnostic?.(diagnostic)
+  return ConfigParse.schema(ConfigV1.Info, result.value, source)
+}
+
+type GlobalConfigIO = {
+  readFile: (filepath: string) => Effect.Effect<string | undefined, unknown>
+  writeFile: (filepath: string, content: string) => Effect.Effect<void, unknown>
+  writeWithDirs: (filepath: string, content: string) => Effect.Effect<void, unknown>
+  removeFile: (filepath: string) => Effect.Effect<void, unknown>
+}
+
+const nodeGlobalConfigIO: GlobalConfigIO = {
+  readFile: (filepath) =>
+    Effect.promise(() =>
+      fsNode.readFile(filepath, "utf8").catch((error: { code?: string }) => {
+        if (error.code === "ENOENT") return undefined
+        throw error
+      }),
+    ),
+  writeFile: (filepath, content) => Effect.promise(() => fsNode.writeFile(filepath, content).catch(() => undefined)),
+  writeWithDirs: (filepath, content) =>
+    Effect.promise(() => fsNode.mkdir(path.dirname(filepath), { recursive: true }).then(() => fsNode.writeFile(filepath, content)).catch(() => undefined)),
+  removeFile: (filepath) => Effect.promise(() => fsNode.unlink(filepath).catch(() => undefined)),
+}
+
+function readGlobalFile(io: GlobalConfigIO, filepath: string, env: Record<string, string> | undefined, onDiagnostic?: (diagnostic: GlobalDiagnostic) => void) {
+  return Effect.gen(function* () {
+    const text = yield* io.readFile(filepath)
+    if (!text) return {} as Info
+    const expanded = yield* Effect.promise(() => ConfigVariable.substitute({ text, type: "path", path: filepath, env }))
+    const data = decodeLoadedConfig(ConfigParse.jsonc(expanded, filepath), filepath, onDiagnostic)
+    yield* Effect.promise(() => resolveLoadedPlugins(data, filepath))
+    if (data.$schema) return data
+    data.$schema = "https://opencode.ai/config.json"
+    const updated = text.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
+    yield* io.writeFile(filepath, updated).pipe(Effect.catch(() => Effect.void))
+    return data
+  })
+}
+
+function readGlobalConfigWithIO(io: GlobalConfigIO, env?: Record<string, string>, onDiagnostic?: (diagnostic: GlobalDiagnostic) => void) {
+  return Effect.gen(function* () {
+    let result: Info = {}
+    if (!Flag.OPENCODE_CONFIG && !Flag.OPENCODE_CONFIG_DIR && !Flag.OPENCODE_CONFIG_CONTENT) {
+      const file = globalConfigFile()
+      if (!existsSync(file)) {
+        // 保留默认 schema；纯客户端和 Daemon 各自的文件系统适配器共享同一迁移语义。
+        yield* io.writeWithDirs(file, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2)).pipe(
+          Effect.catch(() => Effect.void),
+        )
+      }
+    }
+    for (const file of ["config.json", "opencode.json", "opencode.jsonc"]) {
+      result = mergeConfig(result, yield* readGlobalFile(io, path.join(Global.Path.config, file), env, onDiagnostic))
+    }
+    const legacy = path.join(Global.Path.config, "config")
+    if (existsSync(legacy)) {
+      yield* Effect.gen(function* () {
+        const mod = yield* Effect.promise(() => import(pathToFileURL(legacy).href, { with: { type: "toml" } }).catch(() => undefined))
+        if (!mod) return // legacy 导入失败在 HEAD 中就是非致命分支，已读取的 JSON 配置继续生效。
+        const { provider, model, ...rest } = mod.default
+        if (provider && model) result.model = `${provider}/${model}`
+        result["$schema"] = "https://opencode.ai/config.json"
+        result = mergeConfig(result, rest)
+        yield* io.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
+        yield* io.removeFile(legacy)
+      }).pipe(Effect.catch(() => Effect.void))
+    }
+    return result
+  })
+}
+
+export function readGlobalConfig(env?: Record<string, string>, onDiagnostic?: (diagnostic: GlobalDiagnostic) => void) {
+  // 远程客户端只运行这个独立 Effect；不会构建 Account、Database 或完整 AppRuntime。
+  return readGlobalConfigWithIO(nodeGlobalConfigIO, env, onDiagnostic)
+}
+
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
   const root = parseTree(input)
   // 只有双方都是对象才逐字段合并；布尔开关切换为配置对象或原节点缺席时，必须整体替换该节点。
@@ -189,8 +270,9 @@ const layer = Layer.effect(
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
 
     const decodeConfig = Effect.fnUntraced(function* (input: unknown, source: string) {
-      const result = ConfigV2Compat.lower(normalizeLoadedConfig(input), source)
-      yield* Effect.forEach(result.diagnostics, (diagnostic) =>
+      const diagnostics: GlobalDiagnostic[] = []
+      const result = decodeLoadedConfig(input, source, (diagnostic) => diagnostics.push(diagnostic))
+      yield* Effect.forEach(diagnostics, (diagnostic) =>
         Effect.logWarning("configuration compatibility diagnostic", {
           source,
           path: diagnostic.path,
@@ -198,7 +280,7 @@ const layer = Layer.effect(
           action: diagnostic.message,
         }),
       )
-      return ConfigParse.schema(ConfigV1.Info, result.value, source)
+      return result
     })
 
     const fetchRemoteJson = Effect.fnUntraced(function* <S extends Schema.Top>(
@@ -273,37 +355,22 @@ const layer = Layer.effect(
     })
 
     const loadGlobal = Effect.fnUntraced(function* (env?: Record<string, string>) {
-      let result: Info = {}
-      // Seed the default global config with the schema for editor completion, but avoid writing when the user
-      // explicitly routes config through env-provided paths or content.
-      if (!Flag.OPENCODE_CONFIG && !Flag.OPENCODE_CONFIG_DIR && !Flag.OPENCODE_CONFIG_CONTENT) {
-        const file = globalConfigFile()
-        if (!existsSync(file)) {
-          yield* fs
-            .writeWithDirs(file, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2))
-            .pipe(Effect.catch(() => Effect.void))
-        }
-      }
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
-
-      const legacy = path.join(Global.Path.config, "config")
-      if (existsSync(legacy)) {
-        yield* Effect.promise(() =>
-          import(pathToFileURL(legacy).href, { with: { type: "toml" } })
-            .then(async (mod) => {
-              const { provider, model, ...rest } = mod.default
-              if (provider && model) result.model = `${provider}/${model}`
-              result["$schema"] = "https://opencode.ai/config.json"
-              result = mergeConfig(result, rest)
-              await fsNode.writeFile(path.join(Global.Path.config, "config.json"), JSON.stringify(result, null, 2))
-              await fsNode.unlink(legacy)
-            })
-            .catch(() => {}),
-        )
-      }
-
+      const diagnostics: GlobalDiagnostic[] = []
+      const result = yield* readGlobalConfigWithIO({
+        readFile: (filepath) => fs.readFileStringSafe(filepath).pipe(Effect.orDie),
+        writeFile: (filepath, content) => fs.writeFileString(filepath, content).pipe(Effect.catch(() => Effect.void)),
+        writeWithDirs: (filepath, content) => fs.writeWithDirs(filepath, content).pipe(Effect.catch(() => Effect.void)),
+        removeFile: (filepath) => fs.remove(filepath).pipe(Effect.catch(() => Effect.void)),
+      }, env, (diagnostic) => diagnostics.push(diagnostic))
+      // 全局与项目文件共享同一兼容解码器；诊断仍在 Effect 日志域内发布，保留可观测性。
+      yield* Effect.forEach(diagnostics, (diagnostic) =>
+        Effect.logWarning("configuration compatibility diagnostic", {
+          source: Global.Path.config,
+          path: diagnostic.path,
+          kind: diagnostic.kind,
+          action: diagnostic.message,
+        }),
+      )
       return result
     })
 

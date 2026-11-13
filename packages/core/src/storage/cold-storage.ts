@@ -654,6 +654,7 @@ export {
   thawPartRows,
   inspectMessageRows,
   inspectPartRows,
+  inspectMessageAndPartRows,
   inspectSessionMessageRows,
   inspectSessionMessageStats,
   thawSessionMessageRowsInTransaction,

@@ -637,7 +637,10 @@ describe("MessageV2.stream", () => {
       Effect.gen(function* () {
         const ids = yield* fill(sessionID, 60)
 
+        let heartbeat = false
+        setTimeout(() => { heartbeat = true }, 0) // 两页 hot rows 之间必须执行真实宏任务，而非仅依赖 Effect 微任务调度。
         const items = yield* MessageV2.stream(sessionID)
+        expect(heartbeat).toBe(true) // 移除页间 Bun.sleep(0) 后，该回调只能在完整读取结束后运行。
         expect(items).toHaveLength(60)
         expect(items[0].info.id).toBe(ids[ids.length - 1])
         expect(items[59].info.id).toBe(ids[0])

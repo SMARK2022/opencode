@@ -52,6 +52,56 @@ function runMaintenance(
   return ColdMaintain.maintain(database.sync, prepared, { ...runtime, run: body => Effect.runPromise(Database.withSync(database, body)) })
 }
 
+test("cold reader decodes and validates payloads off the calling thread", async () => {
+  const raw = Buffer.from(ColdCodec.canonical({
+    version: 1,
+    owner: "message",
+    fields: { text: "cold reader payload ".repeat(200_000) }, // 大字段让同步解码期间的定时器差异具备可观察性。
+  }))
+  const payload = Bun.zstdCompressSync(raw) // 使用真实 zstd 帧，而不是伪造 Worker 返回值。
+  let heartbeat = false // Worker 解码完成前，主线程定时器必须先得到执行。
+  setTimeout(() => { heartbeat = true }, 0)
+  const result = await ColdCodec.decodeColdPayloads([{
+    owner: "message",
+    payload: {
+      hash: ColdCodec.digest("message", raw),
+      kind: "message",
+      codec: "zstd",
+      payload,
+      raw_bytes: raw.byteLength,
+      compressed_bytes: payload.byteLength,
+    },
+  }])
+  expect(heartbeat).toBe(true) // 该断言直接拒绝主线程同步解压行为。
+  expect(result[0]?.envelope?.fields.text).toContain("cold reader payload") // 执行位置变化不能改变恢复后的字段内容。
+  await expect(ColdCodec.decodeColdPayloads([{
+    owner: "message",
+    payload: {
+      hash: "corrupt",
+      kind: "message",
+      codec: "zstd",
+      payload: new Uint8Array([1, 2, 3]),
+      raw_bytes: 3,
+      compressed_bytes: 3,
+    },
+  }])).rejects.toMatchObject({ _tag: "ColdStorageCorruptionError" })
+  await expect(ColdCodec.decodeColdPayloads([{
+    owner: "message",
+    payload: {
+      hash: "uncloneable", kind: (() => "message") as never, codec: "zstd", // 函数字段触发真实 structured-clone 传输失败。
+      payload: new Uint8Array([1]), raw_bytes: 1, compressed_bytes: 1,
+    },
+  }])).rejects.toThrow()
+  const recovered = await ColdCodec.decodeColdPayloads([{ // 后续请求必须延迟创建新池，不走主线程解码 fallback。
+    owner: "message",
+    payload: {
+      hash: ColdCodec.digest("message", raw), kind: "message", codec: "zstd",
+      payload: Bun.zstdCompressSync(raw), raw_bytes: raw.byteLength, compressed_bytes: payload.byteLength,
+    },
+  }])
+  expect(recovered[0]?.envelope?.owner).toBe("message") // 新池恢复后仍使用同一 envelope 校验语义。
+}, 20_000)
+
 test("cold worker completes a batch with more than 128 source packs", async () => {
   // 同一模块既供正常 import，也作线程入口；workerData 明确选择专属消息处理器。
   const worker = new Worker(new URL("../../../core/src/storage/cold-codec.ts", import.meta.url), {
@@ -318,6 +368,48 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
       )
     }),
   )
+
+it.instance("ordinary cold reads retain their immutable payload snapshot", () =>
+  Effect.gen(function* () {
+    const database = yield* Database.Service
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({})
+    const session = yield* sessions.create({ parentID: root.id })
+    const messageID = MessageID.ascending()
+    yield* sessions.updateMessage({
+      id: messageID, sessionID: session.id, role: "user", agent: "build", time: { created: 1 },
+      model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test") },
+    })
+    const part = {
+      id: PartID.ascending(), messageID, sessionID: session.id, type: "text" as const,
+      text: "snapshot-owned payload ".repeat(100_000), // 子 Session 的大字段既符合冻结资格，也提供清晰快照时序窗口。
+    }
+    yield* sessions.updatePart(part)
+    yield* withDb((db) => ColdStorage.freezeOwner(db, { type: "part", id: part.id, olderThanMs: 0 }))
+    const message = yield* withDb((db) => db.select().from(MessageTable).where(eq(MessageTable.id, messageID)).get())
+    if (!message) throw new Error("message missing")
+
+    const blockerRaw = Buffer.from(ColdCodec.canonical({ version: 1, owner: "message", fields: { text: "blocker ".repeat(3_000_000) } }))
+    const blockerPayload = Bun.zstdCompressSync(blockerRaw)
+    const blocker = ColdCodec.decodeColdPayloads([{ owner: "message", payload: { // 先占用批量 admission，使目标快照复制后暂候 Worker 解码。
+      hash: ColdCodec.digest("message", blockerRaw), kind: "message", codec: "zstd",
+      payload: blockerPayload, raw_bytes: blockerRaw.byteLength, compressed_bytes: blockerPayload.byteLength,
+    } }])
+    const pending = Effect.runPromise(ColdStorage.inspectMessageAndPartRows(database, { // 通过普通业务 hydration 接缝取得真实只读快照。
+      messages: [message], partMessages: [message], includeHidden: false,
+    }))
+    yield* Effect.promise(() => Bun.sleep(30)) // 等待数据库预约释放，再修改持久帧验证请求字节所有权。
+    const owner = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, part.id)).get())
+    if (!owner?.cold_ref) throw new Error("cold owner missing")
+    // 读取预约已复制原帧；此后即使持久字节被替换，请求仍只能看到复制时的内容。
+    yield* withDb((db) => db.update(ColdStorageTable).set({ payload: Bun.zstdCompressSync(Buffer.from("changed")) }) // 后续持久化变化不能回写已经复制的请求快照。
+      .where(eq(ColdStorageTable.hash, owner.cold_ref!)).run())
+    yield* Effect.promise(() => blocker) // 等待阻塞解码完成后，目标批次才进入 Worker。
+    const restored = yield* Effect.promise(() => pending)
+    expect(restored.parts[0]?.data).toMatchObject({ type: "text", text: part.text }) // 返回值必须来自复制时帧而非修改后的数据库内容。
+  }),
+  30_000,
+)
 
 it.instance("explicit recompress reduces an existing frame and preserves owner identity", () =>
   Effect.gen(function* () {

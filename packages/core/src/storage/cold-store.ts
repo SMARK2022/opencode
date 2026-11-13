@@ -55,6 +55,8 @@ import {
   parseSessionMessageStats,
   splitPacks,
   decodePayload,
+  decodeColdPayloads,
+  type ColdDecodeJob,
   type PackWireRow,
   type PackWire,
   type PackScanResult,
@@ -507,7 +509,7 @@ export function decodedBatch(db: TxOrDb, hashes: string[], owner: OwnerKind) {
 
 // decodedBatch 的完整性检查保证每个 requested hash 都有值；该 helper 把保证转成显式分支而非非空断言。
 // 若未来 batching 代码破坏 map 完整性，expand 会以 typed corruption 中止而不是向 restore 传 undefined。
-export function requiredEnvelope(values: Map<string, Envelope>, hash: string) {
+export function requiredEnvelope(values: ReadonlyMap<string, Envelope>, hash: string) {
   const value = values.get(hash)
   if (!value) throw new CorruptionError({ message: "Decoded cold batch is missing an envelope", hash })
   return value
@@ -1525,20 +1527,13 @@ export function thawPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]
   )
 }
 
-// inspect 为普通读取恢复内存对象，保留 owner cold_ref 和 payload ref_count 不动。
-// 它与 thaw 共用完整性门禁，只有持久预热才写回 owner 并释放引用。
-export function inspectMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
-  // 一次读取按包分组，完整 Message 返回值不改变持久引用或时间戳。
-  // 普通查看不调用 release，多个 fork 的共享生命周期保持独立。
-  // v1 的单 owner envelope 与 packed owner 各走明确版本路径。
-  const hashes = [...new Set(rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])))]
-  requireReferenceMetadata(db, hashes, "message-pack")
-  const packs = new Map(hashes.map((hash) => [hash, decodePack(db, hash, "message")]))
-  const legacy = decodedBatch(
-    db,
-    rows.flatMap((row) => (row.cold_ref && !row.cold_key ? [row.cold_ref] : [])),
-    "message",
-  )
+type DecodedPackMap = ReadonlyMap<string, ReadonlyMap<string, Record<string, Json>>>
+
+function restoreInspectedMessageRows(
+  rows: (typeof MessageTable.$inferSelect)[],
+  legacy: ReadonlyMap<string, Envelope>,
+  packs: DecodedPackMap,
+) {
   return rows.map((row) => {
     if (!row.cold_ref) {
       if (row.cold_key) throw new CorruptionError({ message: "Message key has no pack" })
@@ -1552,22 +1547,11 @@ export function inspectMessageRows(db: TxOrDb, rows: (typeof MessageTable.$infer
   })
 }
 
-export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
-  const legacy = rows.filter(
-    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
-  )
-  const packed = rows.filter(
-    (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
-  )
-  const legacyValues = decodedBatch(
-    db,
-    legacy.map((row) => row.cold_ref),
-    "part",
-  )
-  // 非持久 inspect 与 thaw/Stats 共用真实 owner gate，不能仅因 pack bytes 可解码就忽略 refcount drift。
-  const packedHashes = [...new Set(packed.map((row) => row.cold_ref))]
-  requireReferenceMetadata(db, packedHashes, "part-pack")
-  const packs = new Map(packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const))
+function restoreInspectedPartRows(
+  rows: (typeof PartTable.$inferSelect)[],
+  legacy: ReadonlyMap<string, Envelope>,
+  packs: DecodedPackMap,
+) {
   return rows.map((row) => {
     if (!row.cold_ref) {
       if (row.cold_key) throw new CorruptionError({ message: "Part owner has a key without a ref" })
@@ -1578,13 +1562,105 @@ export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect
       const fields = packs.get(row.cold_ref)?.get(row.cold_key.toString("hex"))
       if (!fields) throw new CorruptionError({ message: "Part inspect key is missing from pack", hash: row.cold_ref })
       const data = restorePackedPart(row.data, fields, row.cold_ref)
-      // 保留目标普通读取的统计完整性核对，职责拆分不能让损坏投影被读成成功。
       requirePartStats(row, projectPartStats(data))
       return { ...row, data }
     }
     return {
       ...row,
-      data: restorePart(row.data, requiredEnvelope(legacyValues, row.cold_ref), row.cold_ref),
+      data: restorePart(row.data, requiredEnvelope(legacy, row.cold_ref), row.cold_ref),
+    }
+  })
+}
+
+function prepareDecodeJobs(
+  db: TxOrDb,
+  rows: Array<{ owner: OwnerKind; cold_ref: string | null; cold_key: Uint8Array | null }>,
+) {
+  const expected = new Map<string, { owner: OwnerKind; kind: StorageKind }>()
+  for (const row of rows) {
+    if (!row.cold_ref) continue
+    const kind = row.cold_key ? packKind(row.owner) : row.owner
+    const previous = expected.get(row.cold_ref)
+    if (previous && previous.kind !== kind)
+      throw new CorruptionError({ message: "Cold payload is shared across incompatible owners", hash: row.cold_ref })
+    expected.set(row.cold_ref, { owner: row.owner, kind })
+  }
+  if (expected.size === 0) return [] as ColdDecodeJob[]
+  const hashes = [...expected.keys()]
+  const payloads = db.select().from(ColdStorageTable).where(inArray(ColdStorageTable.hash, hashes)).all()
+  if (payloads.length !== hashes.length) throw new CorruptionError({ message: "Cold batch contains a missing payload" })
+  const counts = ownerCounts(db, hashes)
+  return payloads.map((payload) => {
+    const metadata = expected.get(payload.hash)
+    if (!metadata || payload.kind !== metadata.kind || payload.ref_count !== (counts.get(payload.hash) ?? 0)) {
+      throw new CorruptionError({ message: "Cold batch payload metadata is inconsistent", hash: payload.hash })
+    }
+    // BLOB 在释放数据库预约前复制；后续 thaw/cleanup 不会改变本请求的字节快照。
+    return { owner: metadata.owner, payload: { ...payload, payload: new Uint8Array(payload.payload) } }
+  })
+}
+
+// inspect 为普通读取恢复内存对象，保留 owner cold_ref 和 payload ref_count 不动。
+// 它与 thaw 共用完整性门禁，只有持久预热才写回 owner 并释放引用。
+export function inspectMessageRows(db: TxOrDb, rows: (typeof MessageTable.$inferSelect)[]) {
+  const hashes = [...new Set(rows.flatMap((row) => (row.cold_ref && row.cold_key ? [row.cold_ref] : [])))]
+  requireReferenceMetadata(db, hashes, "message-pack")
+  const packs = new Map(hashes.map((hash) => [hash, decodePack(db, hash, "message")]))
+  const legacy = decodedBatch(db, rows.flatMap((row) => (row.cold_ref && !row.cold_key ? [row.cold_ref] : [])), "message")
+  return restoreInspectedMessageRows(rows, legacy, packs)
+}
+
+export function inspectPartRows(db: TxOrDb, rows: (typeof PartTable.$inferSelect)[]) {
+  const legacy = rows.filter(
+    (row): row is typeof row & { cold_ref: string; cold_key: null } => !!row.cold_ref && !row.cold_key,
+  )
+  const packed = rows.filter(
+    (row): row is typeof row & { cold_ref: string; cold_key: Buffer } => !!row.cold_ref && !!row.cold_key,
+  )
+  const legacyValues = decodedBatch(db, legacy.map((row) => row.cold_ref), "part")
+  const packedHashes = [...new Set(packed.map((row) => row.cold_ref))]
+  requireReferenceMetadata(db, packedHashes, "part-pack")
+  const packs = new Map(packedHashes.map((hash) => [hash, decodePack(db, hash, "part")] as const))
+  return restoreInspectedPartRows(rows, legacyValues, packs)
+}
+
+export function inspectMessageAndPartRows(
+  database: Database.Interface,
+  input: {
+    messages: (typeof MessageTable.$inferSelect)[]
+    partMessages: (typeof MessageTable.$inferSelect)[]
+    includeHidden: boolean
+  },
+) {
+  return Effect.gen(function* () {
+    const snapshot = yield* Database.withSync(database, () => database.sync.transaction((tx) => {
+      const ids = input.partMessages.map((row) => row.id)
+      const parts = ids.length
+        ? tx.select().from(PartTable).where(inArray(PartTable.message_id, ids)).orderBy(PartTable.message_id, PartTable.id).all()
+        : []
+      const visible = input.includeHidden ? parts : parts.filter((row) => !row.data.hidden)
+      const messages = input.messages.map((row) => ({ ...row, cold_key: row.cold_key ? Buffer.from(row.cold_key) : null }))
+      const jobs = prepareDecodeJobs(tx, [
+        ...messages.map((row) => ({ owner: "message" as const, cold_ref: row.cold_ref, cold_key: row.cold_key })),
+        ...visible.map((row) => ({ owner: "part" as const, cold_ref: row.cold_ref, cold_key: row.cold_key })),
+      ])
+      return { messages, parts: visible, jobs }
+    }, { behavior: "deferred" }))
+    // 热消息无解码任务，保持同步清理路径；同栈中断的 finalizer 不能为一个空结果挂起。
+    const decoded = snapshot.jobs.length ? yield* Effect.promise(() => decodeColdPayloads(snapshot.jobs)) : []
+    const messageLegacy = new Map<string, Envelope>()
+    const partLegacy = new Map<string, Envelope>()
+    const messagePacks = new Map<string, Map<string, Record<string, Json>>>()
+    const partPacks = new Map<string, Map<string, Record<string, Json>>>()
+    for (const result of decoded) {
+      const legacy = result.owner === "message" ? messageLegacy : partLegacy
+      const packs = result.owner === "message" ? messagePacks : partPacks
+      if (result.envelope) legacy.set(result.hash, result.envelope)
+      if (result.entries) packs.set(result.hash, new Map(result.entries))
+    }
+    return {
+      messages: restoreInspectedMessageRows(snapshot.messages, messageLegacy, messagePacks),
+      parts: restoreInspectedPartRows(snapshot.parts, partLegacy, partPacks),
     }
   })
 }

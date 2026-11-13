@@ -1095,18 +1095,42 @@ export function splitPacks<T extends { entry: PackEntry }>(owner: OwnerKind, ite
   return chunks
 }
 
+export type ColdPayloadWire = {
+  hash: string
+  kind: string
+  codec: string
+  payload: Uint8Array
+  raw_bytes: number
+  compressed_bytes: number
+}
+
+export type ColdDecodeJob = { owner: OwnerKind; payload: ColdPayloadWire }
+export type ColdDecodeResult = {
+  hash: string
+  owner: OwnerKind
+  envelope?: Envelope
+  entries?: Array<readonly [string, Record<string, Json>]>
+}
+
+export function decodeEnvelopePayload(owner: OwnerKind, payload: ColdPayloadWire) {
+  if (payload.kind !== owner || payload.codec !== "zstd") {
+    throw new CorruptionError({ message: "Cold payload kind or codec is invalid", hash: payload.hash })
+  }
+  return parseEnvelope(owner, checkedRaw(owner, payload), payload.hash)
+}
+
+function decodeReadJob(job: ColdDecodeJob): ColdDecodeResult {
+  if (job.payload.kind === packKind(job.owner)) {
+    return { hash: job.payload.hash, owner: job.owner, entries: [...decodePayload(job.owner, job.payload)] }
+  }
+  return { hash: job.payload.hash, owner: job.owner, envelope: decodeEnvelopePayload(job.owner, job.payload) }
+}
+
 // decodePayload 是 decodePack 的纯字节核心：不触碰 SQLite，worker 与主线程共享同一校验路径。
 // 地址编码与包版本分别校验：改写版本会重建包地址，包内条目的内容身份仍可用于共享。
 export function decodePayload(
   owner: OwnerKind,
-  payload: {
-    hash: string
-    kind: string
-    codec: string
-    payload: Uint8Array
-    raw_bytes: number
-    compressed_bytes: number
-  },
+  payload: ColdPayloadWire,
 ) {
   if (payload.kind !== packKind(owner) || payload.codec !== "zstd") {
     throw new CorruptionError({ message: "Cold pack kind or codec is invalid", hash: payload.hash })
@@ -1360,6 +1384,8 @@ type PackCallMap = {
   recode: [Parameters<typeof recodeFrame>[0], Uint8Array]
   // 显式释放的是本次扫描句柄，同内容的另一份在飞扫描保持独立。
   drop: [{ handle: number }, void]
+  // 普通请求只读恢复不复用维护执行器及其源包缓存。
+  decode: [ColdDecodeJob, ColdDecodeResult]
 }
 
 // 执行器只属于一次维护，句柄因此隔离数据库与资格快照；同 hash 的两次 scan 不共享可变缓存。
@@ -1429,6 +1455,99 @@ export function createPackEncoder() {
   return { call, close }
 }
 
+const COLD_READER_SIZE = Math.min(4, Math.max(1, os.cpus().length - 1))
+const COLD_READER_PENDING = COLD_READER_SIZE * 2
+
+type ColdReaderReply = {
+  id: number
+  result?: ColdDecodeResult
+  error?: string
+  tag?: "corruption" | "codec"
+  hash?: string
+}
+
+function createColdReader() {
+  const workers: Worker[] = []
+  const pending = new Map<number, { resolve(value: ColdDecodeResult): void; reject(error: Error): void }>()
+  let sequence = 0
+  let closed: Error | undefined
+
+  const close = (error: Error) => {
+    if (closed) return
+    closed = error
+    for (const job of pending.values()) job.reject(error)
+    pending.clear()
+    for (const worker of workers) void worker.terminate()
+  }
+
+  const execute = (job: ColdDecodeJob): Promise<ColdDecodeResult> => {
+    if (closed) return Promise.reject(closed)
+    if (!workers.length) {
+      for (let index = 0; index < COLD_READER_SIZE; index++) {
+        const worker = new Worker(packWorkerUrl(), { workerData: PACK_WORKER_ID })
+        // 空闲读取池不阻止 CLI/测试进程退出，请求仍由显式 Promise 结算。
+        worker.unref()
+        worker.on("message", (message: ColdReaderReply) => {
+          const job = pending.get(message.id)
+          if (!job) return
+          pending.delete(message.id)
+          if (message.error === undefined) return job.resolve(message.result as ColdDecodeResult)
+          if (message.tag === "corruption") {
+            return job.reject(new CorruptionError({ message: message.error, hash: message.hash }))
+          }
+          if (message.tag === "codec") return job.reject(new CodecUnavailableError({ message: message.error }))
+          job.reject(new Error(message.error))
+        })
+        worker.on("error", () => close(new Error("Cold reader worker crashed")))
+        worker.on("exit", () => { if (!closed) close(new Error("Cold reader worker exited")) })
+        workers.push(worker)
+      }
+    }
+    const id = ++sequence
+    const worker = workers[id % workers.length]
+    const transferred = transferCopy(job.payload.payload)
+    return new Promise<ColdDecodeResult>((resolve, reject) => {
+      pending.set(id, { resolve, reject })
+      try {
+        worker.postMessage({ id, op: "decode", input: {
+          owner: job.owner,
+          payload: { ...job.payload, payload: transferred.copy },
+        } }, [transferred.buffer])
+      } catch (error) {
+        close(error instanceof Error ? error : new Error(String(error)))
+      }
+    })
+  }
+
+  return { execute, close }
+}
+
+let coldReader: ReturnType<typeof createColdReader> | undefined
+let coldReadChain: Promise<void> = Promise.resolve()
+
+export function decodeColdPayloads(jobs: ColdDecodeJob[]) {
+  if (jobs.length === 0) return Promise.resolve([])
+  const reader = coldReader ??= createColdReader()
+  const run = async () => {
+    const results: ColdDecodeResult[] = []
+    // 批量 admission 串行进入读取池，每批最多 COLD_READER_PENDING 个在飞 RPC。
+    for (let offset = 0; offset < jobs.length; offset += COLD_READER_PENDING) {
+      results.push(...await Promise.all(jobs.slice(offset, offset + COLD_READER_PENDING).map((job) => reader.execute(job))))
+    }
+    return results
+  }
+  const result = coldReadChain.then(run, run)
+  coldReadChain = result.then(() => undefined, () => undefined)
+  return result.catch((error) => {
+    // 数据损坏属于当前请求；线程或协议故障则关闭池，下次请求延迟重建。
+    if (!(error instanceof CorruptionError) && !(error instanceof CodecUnavailableError)) {
+      reader.close(error instanceof Error ? error : new Error(String(error)))
+      if (coldReader === reader) coldReader = undefined
+    }
+    throw error
+  })
+}
+
 // bun:sqlite 返回的 Buffer 视图底层 buffer 可能大于视图；传输前按视图精确拷贝，避免泄露无关内存块。
 export function transferCopy(view: Uint8Array) {
   const copy = new Uint8Array(view)
@@ -1494,12 +1613,21 @@ if (workerData === PACK_WORKER_ID && parentPort) {
         port.postMessage({ id, result: undefined })
         return
       }
+      if (op === "decode") {
+        port.postMessage({ id, result: decodeReadJob(input) })
+        return
+      }
       // 同步编码完成后才回传，线程预算保持在该 RPC 的生命周期内。
       const result = replyBytes(recodeFrame(input, message.threads))
       port.postMessage({ id, result }, [result.buffer])
     } catch (error) {
       // 存储提交依赖成功回复；编码错误通过同一个请求号交回维护流程。
-      port.postMessage({ id, error: error instanceof Error ? error.message : String(error) })
+      port.postMessage({
+        id,
+        error: error instanceof Error ? error.message : String(error),
+        tag: error instanceof CorruptionError ? "corruption" : error instanceof CodecUnavailableError ? "codec" : undefined,
+        hash: error instanceof CorruptionError ? error.hash : undefined,
+      })
     }
   })
 }

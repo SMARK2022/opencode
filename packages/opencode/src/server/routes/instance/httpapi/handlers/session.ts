@@ -202,8 +202,33 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         })
       }
       yield* requireSession(ctx.params.sessionID)
-      if (ctx.query.limit === undefined || ctx.query.limit === 0) {
+      if (ctx.query.limit === 0) {
         return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+      }
+      if (ctx.query.limit === undefined) {
+        const boundaries = yield* MessageV2.pageBoundaries(ctx.params.sessionID)
+        let first = true
+        const pages = Stream.fromIterable(boundaries.reverse()).pipe(
+          Stream.mapEffect((before, index) => Effect.gen(function* () {
+            if (index > 0) yield* Effect.promise(() => Bun.sleep(0))
+            return yield* MessageV2.page({ sessionID: ctx.params.sessionID, limit: 50, before }).pipe(
+              Effect.provideService(Database.Service, database),
+              Effect.orDie,
+            )
+          })),
+          Stream.map((page) => {
+            const content = JSON.stringify(page.items).slice(1, -1)
+            if (!content) return ""
+            const prefix = first ? "" : ","
+            first = false
+            return prefix + content
+          }),
+          Stream.filter((content) => content.length > 0),
+        )
+        return HttpServerResponse.stream(
+          Stream.make("[").pipe(Stream.concat(pages), Stream.concat(Stream.make("]")), Stream.encodeText),
+          { contentType: "application/json" },
+        )
       }
 
       const request = yield* HttpServerRequest.HttpServerRequest
@@ -703,7 +728,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("children", children)
       .handle("todo", todo)
       .handle("diff", diff)
-      .handle("messages", messages)
+      .handleRaw("messages", messages)
       .handle("message", message)
       .handleRaw("create", createRaw)
       .handle("remove", remove)

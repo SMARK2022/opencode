@@ -6,7 +6,6 @@ import { Effect } from "effect"
 import { sql } from "drizzle-orm"
 import { effectCmd } from "../effect-cmd"
 import path from "path"
-import { randomUUID } from "crypto"
 // #493：ColdStorage 运行时位于 core——CLI 只渲染 task/report JSON，不复制状态机。
 import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
 import { ColdMaintain } from "@opencode-ai/core/storage/cold-maintain"
@@ -18,6 +17,7 @@ import { createInterface } from "readline"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "@opencode-ai/core/global"
 import { UI } from "../ui"
+import { MaintenanceExecutor } from "../maintenance"
 
 
 class MaintenanceUnavailableError extends Error {}
@@ -490,46 +490,7 @@ async function runVacuum(db: Database.Interface, pageSize: number, human: boolea
   return result
 }
 
-function maintain(database: Database.Interface, prepared: ColdMaintain.PreparedMaintenance, runtime: ColdMaintain.MaintenanceRuntime = { checkpoint: async () => {} }) {
-  // CLI 与 worker 共用 cold 算法，SQL 批次预约同一连接，文件 lease/checkpoint 不占用连接。
-  return ColdMaintain.maintain(database.sync, prepared, { ...runtime, run: (body) => Effect.runPromise(Database.withSync(database, body)) })
-}
-
-async function runOffline(db: Database.Interface, prepared: ColdMaintain.PreparedMaintenance, onTask?: (task: ColdMaintain.MaintenanceTask) => void) {
-  if (prepared.type === "immediate") {
-    if (prepared.request.operation !== "vacuum") return maintain(db, prepared)
-    const existing = await ServerLock.findNonterminalMaintenanceTask()
-    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
-    // vacuum 没有可恢复 cursor，但仍持有同一 maintenance lease，防止与 daemon/offline task 并行写入。
-    // pseudo taskID 只标识 lease owner，不创建会误导 status/resume 的持久 task record。
-    const lease = await ServerLock.acquireMaintenanceLease({ taskID: `vacuum_${randomUUID()}`, dbPath: Database.path() })
-    try {
-      return await maintain(db, prepared, { lease, checkpoint: async () => {} })
-    } finally {
-      await lease.release()
-    }
-  }
-  const existing = await ServerLock.findNonterminalMaintenanceTask()
-  if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
-  // lease owner 先于 queued record 可见，status 不会把仍在启动的 offline task 误判为 interrupted。
-  // queued 仍在第一批 DB transaction 前原子落盘；其后 crash 可由 cursor/owner reconcile 恢复。
-  const lease = await ServerLock.acquireMaintenanceLease(prepared.task)
-  try {
-    await ServerLock.writeMaintenanceTask(prepared.task)
-    return await maintain(db, prepared, {
-      task: prepared.task,
-      lease,
-      checkpoint: async (task) => {
-        // #535：UI 只能观察已经原子持久化的 checkpoint；先画进度会让屏幕领先可恢复 cursor。
-        await ServerLock.writeMaintenanceTask(task)
-        // completed 等 encoder/lease 收尾后由 runOffline result 统一送入，定时器不能看到提前终态。
-        if (task.status !== "completed") onTask?.(task)
-      },
-    })
-  } finally {
-    await lease.release()
-  }
-}
+const runOffline = MaintenanceExecutor.runOffline
 
 // 执行域只在命令开始时选择一次：live daemon 只走 control，daemon 缺席才走同一 maintain 的 offline 入口。
 // 两个域都先调用 prepareMaintenance，保证默认值、写授权、task 分类和错误类型完全一致。
@@ -722,17 +683,8 @@ async function executeResume(db: Database.Interface, taskID: string) {
   if (task.status !== "interrupted") throw new ColdStorage.ValidationError({ message: `Maintenance task is ${task.status}` })
   const prepared = ColdMaintain.prepareMaintenance(task.args)
   if (prepared.type !== "task") throw new ColdStorage.ValidationError({ message: "Task is not resumable" })
-  const lease = await ServerLock.acquireMaintenanceLease(task)
-  try {
-    const result = await maintain(db, prepared, {
-      task,
-      lease,
-      checkpoint: (next) => ServerLock.writeMaintenanceTask(next),
-    })
-    printMaintenance(result.type === "task" ? result.task : result)
-  } finally {
-    await lease.release()
-  }
+  const result = await runOffline(db, prepared, undefined, { task })
+  printMaintenance(result.type === "task" ? result.task : result)
 }
 
 const maintenanceDB = Effect.fn("Cli.db.maintenanceDB")(function* () {

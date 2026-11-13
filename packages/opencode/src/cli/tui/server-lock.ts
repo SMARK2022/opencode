@@ -183,12 +183,19 @@ export async function ping(port: number, credentials?: ServerAuth.Credentials) {
       // 500ms deadline 覆盖响应与 body；超时或 401 均不授权清理存活 owner。
       signal: AbortSignal.timeout(500),
     })
-    // 健康 JSON 与当前版本均匹配才可复用，不能接受任意监听者的 200。
-    if (!resp.ok) return false
-    const body = await resp.json()
-    return body?.healthy === true && body.version === InstallationVersion
-  } catch {
-    return false
+    if (resp.status === 401 || resp.status === 403) return "unauthorized" as const
+    if (!resp.ok) return "unreachable" as const
+    const body: unknown = await resp.json()
+    if (typeof body !== "object" || body === null) return "mismatch" as const
+    if (!("healthy" in body) || body.healthy !== true || !("version" in body) || body.version !== InstallationVersion) {
+      return "mismatch" as const
+    }
+    return "ok" as const
+  } catch (error) {
+    // 超时单独分类，discovery 只对可能恢复的繁忙等待做退避，确定性错误立即失败。
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return "timeout" as const
+    if (error instanceof SyntaxError) return "mismatch" as const
+    return "unreachable" as const
   }
 }
 
@@ -378,6 +385,7 @@ export async function findNonterminalMaintenanceTask(dbPath = Database.path()) {
 }
 
 export type MaintenanceLease = {
+  taskID: string
   token: string
   assertOwned: () => void
   release: () => Promise<void>
@@ -466,16 +474,22 @@ export async function acquireMaintenanceLease(
     }
   }
   const lease: MaintenanceLease = {
+    taskID: task.taskID,
     token,
     assertOwned,
-    release: async () => {
-      const ownerRaw = await Bun.file(path.join(lockDir, "owner.json")).text().catch(() => undefined)
-      if (!ownerRaw) return
-      if (maintenanceOwner(ownerRaw).token !== token) return
-      await rm(lockDir, { recursive: true, force: true })
-    },
+    release: () => releaseMaintenanceLease(task, token),
   }
   return lease
+}
+
+export async function releaseMaintenanceLease(task: Pick<MaintenanceTask, "taskID" | "dbPath">, token: string) {
+  const lockDir = path.join(maintenanceRoot(task.dbPath), "lock")
+  const ownerRaw = await Bun.file(path.join(lockDir, "owner.json")).text().catch(() => undefined)
+  if (!ownerRaw) return
+  const owner = maintenanceOwner(ownerRaw)
+  // 仅 Worker 异常退出后的监督清理使用已报告 token，不能删除替代 owner 的 lease。
+  if (owner.token !== token || owner.taskID !== task.taskID) return
+  await rm(lockDir, { recursive: true, force: true })
 }
 
 
