@@ -40,7 +40,7 @@ type ReadTextPageOptions = {
   auxiliaryFromStart?: boolean
   // outline 只消费 callback，不复制扫描文本到 raw，避免第二份 3000 行缓冲。
   captureRaw?: boolean
-  // page 使用固定 16 KiB；outline 传 Infinity 仅关闭返回窗口限制，仍受共享物理预算约束。
+  // page 默认 16 KiB，首行可超出以保证分页推进；outline 传 Infinity 仅关闭返回窗口限制，仍受共享物理预算约束。
   contentBytesLimit?: number
   onLine?: (line: string, lineNumber: number) => boolean | void
 }
@@ -146,8 +146,8 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
       return
     }
 
-    // 16 KiB 按最终 join 语义累计：后续行还要计一个换行分隔字节。
-    if (contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
+    // 首行完整返回以保证分页推进；后续行按 join 后的字节数决定是否留到下一页。
+    if (returnedLines > 0 && contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
       cut = true
       enterAuxiliary(chunkSize, true)
       resetLine()
@@ -175,7 +175,7 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
       // 增量字节数避免每个字符重复编码整行，否则超长行会退化为平方复杂度。
       const candidateBytes = lineEncodedBytes + characterBytes
       const separatorBytes = returnedLines > 0 ? 1 : 0
-      if (contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
+      if (returnedLines > 0 && contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
         cut = true
         enterAuxiliary(chunkSize)
       }

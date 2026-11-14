@@ -2651,6 +2651,7 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(0)
+        expect(result.program?.value).toMatchObject({ content: "", exit: 0 })
         expect(result.output).toContain("(no output)")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
@@ -2696,6 +2697,7 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(7)
+        expect(result.program?.value).toMatchObject({ content: "plain output\n", exit: 7 })
         expect(result.output).toContain("plain output")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7"',

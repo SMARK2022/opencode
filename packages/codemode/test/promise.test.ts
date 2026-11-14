@@ -1208,7 +1208,7 @@ describe("async standard-library callbacks and iteration", () => {
   })
 
   // 内建令牌沿用函数的不透明边界，别名和集合回调只能返回受监管的 Promise。
-  test("sleep aliases and callbacks retain callable identity without exposing global methods", async () => {
+  test("sleep aliases and callbacks retain callable identity without exposing host properties", async () => {
     expect(
       await value(`const pause = sleep; const box = { pause };
     await box.pause(0.25); await Promise.all([0, 0].map(pause));
@@ -1216,11 +1216,10 @@ describe("async standard-library callbacks and iteration", () => {
     async function nested() { await pause(0); return 3; }
     return [typeof pause, await nested(), await pause(0)];`),
     ).toEqual(["function", 3, null])
-    // sleep可当回调传递但不暴露宿主函数属性；Math.abs的反例保留原有全局方法不可提取的限制。
+    // 内建可当回调传递，但不能借此读取宿主函数属性。
     for (const code of [
       "return sleep.name",
       "return sleep.constructor",
-      "return [1].map(Math.abs)",
       "return sleep.call(null, 0)",
     ]) {
       expect((await run(code)).ok).toBe(false)

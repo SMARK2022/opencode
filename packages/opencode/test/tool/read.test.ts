@@ -433,11 +433,11 @@ describe("tool.read truncation", () => {
       expect(changed.output).not.toContain("<stub")
       expect(changed.output).toContain("line truncated to 2000 chars")
       expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain('status="stub_same_range_visible"')
-      // 字节预算省略的正文仍不构成完整版本证明。
+      // 超过字节窗口的首行现在完整返回，同样可以证明已读取版本。
       yield* put(target, "x".repeat(24 * 1024 + 1))
       const partial = yield* exec(dir, request)
       expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
-        .not.toContain('<stub status=')
+        .toContain('<stub status=')
     }),
   )
 
@@ -601,28 +601,25 @@ describe("tool.read truncation", () => {
     }),
   )
 
-  // #515：无分隔符的百万字节行必须只产生一条观察到的下界，不能等待整行结束。
-  it.instance("bounds an oversized unterminated line without assembling it", () =>
+  // 超长首行完整返回；后续页必须继续前进。
+  it.instance("returns an oversized line and advances to the following page", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const filePath = path.join(test.directory, "oversized-unterminated.txt")
-      yield* put(filePath, "x".repeat(1024 * 1024))
+      yield* put(filePath, "prefix\n" + "界".repeat(400_000) + "\ntail")
 
       const page = yield* Effect.promise(() =>
         readTextPage(filePath, {
           limit: 200,
-          offset: 1,
+          offset: 2,
           budget: createAuxiliaryBudget(),
         }),
       )
 
-      expect(page.raw).toEqual([])
-      expect(page.count).toBe(1)
-      expect(page.cut).toBe(true)
+      expect(page.raw).toEqual(["界".repeat(400_000)])
       expect(page.more).toBe(true)
-      // 同时锁住物理流上界和“不会组装任意完整超长行”的实现责任。
-      expect(page.postWindowBytes).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
-      expect(page.physicalBytesRead).toBeLessThanOrEqual(256 * 1024 + 16 * 1024)
+      const next = yield* run({ filePath, offset: page.offset + page.raw.length })
+      expect(next.program?.value).toMatchObject({ content: "tail", truncated: false })
     }),
   )
 

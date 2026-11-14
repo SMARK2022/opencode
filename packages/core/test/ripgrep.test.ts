@@ -145,6 +145,22 @@ describe("Ripgrep", () => {
     ),
   )
 
+  it.live("retains matches around a JSON record larger than 64 KiB", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
+        yield* Effect.promise(() => Bun.write(path.join(tmp.path, "long.txt"),
+          "needle before\nneedle " + "x".repeat(70_000) + "\nneedle after\n"))
+        const matches = yield* (yield* Ripgrep.Service).grep({ cwd: tmp.path, pattern: "needle", limit: 10 })
+        expect(matches).toHaveLength(3)
+        expect(matches.map((match) => match.line)).toEqual([1, 2, 3])
+        expect(matches[0]?.text).toBe("needle before\n")
+        expect(matches[2]?.text).toBe("needle after\n")
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("never includes git metadata", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

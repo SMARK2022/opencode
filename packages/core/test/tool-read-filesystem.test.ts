@@ -45,10 +45,10 @@ describe("ReadToolFileSystem", () => {
       yield* data.files.writeFileString(plain, "alpha\r\n\rbravo\ncharlie")
       expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt", { limit: 20 }))
         .toMatchObject({ content: "alpha\n\nbravo\ncharlie", truncated: false, read: { total: 4, totalExact: true } })
-      // 单行超过正文预算也必须有界停止；不能为了等换行组装整份文件。
+      // 超过正文预算的首行完整交付，避免空页和不推进的 next。
       yield* data.files.writeFileString(plain, "x".repeat(1024 * 1024))
       expect(yield* ReadToolFileSystem.read(data.fs, plain, "boundaries.txt"))
-        .toMatchObject({ content: "", truncated: true, read: { returned: 0, total: 1, totalExact: false, cut: true } })
+        .toMatchObject({ content: "x".repeat(1024 * 1024), truncated: false, read: { returned: 1, total: 1, totalExact: true, cut: false } })
       const firstLine = "a".repeat(16 * 1024 - 4) + "\u{1F600}"
       yield* data.files.writeFileString(plain, `\uFEFF${firstLine}\nbeta`)
       const unicode = yield* Effect.promise(() => ReadLines.readTextPage(plain, { offset: 1, limit: 20, contentBytesLimit: Infinity }))

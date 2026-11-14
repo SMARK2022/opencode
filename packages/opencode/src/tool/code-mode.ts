@@ -8,6 +8,10 @@ import type { PermissionPrecheck } from "@/permission/precheck"
 import { MAX_RESPONSE_SIZE } from "./webfetch"
 import { ExecuteEnvironments } from "./execute-environments"
 
+// 预跑与真实执行各自使用同一上限，计数仍由各次 CodeMode 根执行拥有。
+const MAX_TOOL_CALLS = 1024
+const MAX_LOOP_ITERATIONS = 100_000
+
 // JSON 决定缺省值；显式环境变量仍通过宿主的 ConfigProvider 解码和覆盖。
 export const configuration = (config: ConfigV1.Info["codemode"]) =>
   Config.all({
@@ -236,6 +240,7 @@ export const CodeModeTool = Tool.define(
     const init: Tool.DefWithoutID<typeof Parameters, Metadata> = {
       // 宿主才拥有环境句柄；共享库说明仍适用于无 Session 的一次性执行。
       description: `${CodeMode.description}
+Limits: ${MAX_TOOL_CALLS} tool calls and ${MAX_LOOP_ITERATIONS} total explicit loop iterations per execution.
 State: reuse the returned environmentID to inspect or continue saved variables, functions and closures; omit it for a fresh environment. Schema-less MCP object/array JSON text becomes data; use String(value) for its original text.`,
       parameters: Parameters,
       execute: withEnvironment(function* (params, ctx, lease, host) {
@@ -289,7 +294,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           tools,
           environment: lease.environment,
           // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
-          limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
+          limits: { timeoutMs: params.timeout ?? 600000, maxToolCalls: MAX_TOOL_CALLS, maxLoopIterations: MAX_LOOP_ITERATIONS, maxLogBytes: outputLimits.maxBytes },
           fetch: host.fetch,
           waitForTimeout: host.waitForTimeout,
           onToolCallStart: ({ index, name, input }) =>
@@ -349,7 +354,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             snapshotEnvironment: true,
             // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
             sleep: () => Effect.void,
-            limits: { timeoutMs: 500, maxToolCalls: 1024, maxLogBytes: outputLimits.maxBytes },
+            limits: { timeoutMs: 500, maxToolCalls: MAX_TOOL_CALLS, maxLoopIterations: MAX_LOOP_ITERATIONS, maxLogBytes: outputLimits.maxBytes },
             // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
             fetch: host.fetch
               ? (url, init) =>
