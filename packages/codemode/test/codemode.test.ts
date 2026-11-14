@@ -1654,6 +1654,7 @@ describe("CodeMode public contract", () => {
       RangeError,
     )
     expect(() => CodeMode.execute({ code: "return 1", limits: { maxToolCalls: -1 } })).toThrow(RangeError)
+    expect(() => CodeMode.execute({ code: "return 1", limits: { maxLoopIterations: -1 } })).toThrow(RangeError)
     expect(() => CodeMode.execute({ code: "return 1", limits: { maxOutputBytes: -1 } })).toThrow(RangeError)
     // 日志留存预算独立于结果预算；无日志脚本也应在构造执行时拒绝无效配置。
     expect(() => CodeMode.execute({ code: "return 1", limits: { maxLogBytes: -1 } })).toThrow(RangeError)
@@ -1685,6 +1686,41 @@ describe("CodeMode public contract", () => {
     const result = await Effect.runPromise(CodeMode.execute({ tools, code: source, limits: { maxToolCalls: 0 } }))
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.kind).toBe("ToolCallLimitExceeded")
+  })
+
+  test("loop budgets count body entries across loop forms and reset per execution", async () => {
+    for (const code of [
+      "for (let i = 0; i < 3; i++) console.log(i)",
+      "let i = 0; while (i < 3) console.log(i++)",
+      "let i = 0; do { console.log(i++) } while (i < 3)",
+      "for (const i of [0, 1, 2]) console.log(i)",
+      "for await (const i of [0, 1, 2]) console.log(i)",
+      "for (const i in {a: 0, b: 1, c: 2}) console.log(i)",
+    ]) {
+      const runtime = CodeMode.make({ limits: { maxLoopIterations: 3 } })
+      for (let run = 0; run < 2; run++) expect(await Effect.runPromise(runtime.execute(code))).toMatchObject({ ok: true })
+      const result = await Effect.runPromise(CodeMode.execute({ code, limits: { maxLoopIterations: 2 } }))
+      expect(result).toMatchObject({ ok: false, error: { kind: "LoopIterationLimitExceeded" } })
+      expect(result.logs).toHaveLength(2)
+    }
+    for (const code of [
+      "for (let i=0; i<2; i++) { for (let j=0; j<2; j++) continue }",
+      "async function f() { for (let i=0; i<2; i++) { await sleep(0); } } await Promise.all([f(), f()])",
+    ]) expect(await Effect.runPromise(CodeMode.execute({ code, limits: { maxLoopIterations: 3 } })))
+      .toMatchObject({ ok: false, error: { kind: "LoopIterationLimitExceeded" } })
+    expect(await Effect.runPromise(CodeMode.execute({ code: "while(false) {}", limits: { maxLoopIterations: 0 } })))
+      .toMatchObject({ ok: true })
+  })
+
+  test("parallel tool admission cannot exceed the shared tool-call budget", async () => {
+    let called = 0
+    const count = Tool.make({ description: "count", input: Schema.Struct({}), output: Schema.Number,
+      run: () => Effect.sync(() => ++called) })
+    const result = await Effect.runPromise(CodeMode.execute({ tools: { count }, limits: { maxToolCalls: 2 },
+      code: "await Promise.all([tools.count({}), tools.count({}), tools.count({})])" }))
+    expect(result).toMatchObject({ ok: false, error: { kind: "ToolCallLimitExceeded" } })
+    expect(result.toolCalls).toHaveLength(2)
+    expect(called).toBe(2)
   })
 
   test("timeoutMs and maxToolCalls have no defaults: absent means unlimited", async () => {
@@ -2908,5 +2944,54 @@ describe("CodeMode retained environments", () => {
         expect(yield* CodeMode.execute({ environment, code: "return count;" })).toMatchObject({ value: 1 })
       }).pipe(Effect.provide(TestClock.layer())),
     )
+  })
+})
+
+describe("builtin callbacks and array construction", () => {
+  const execute = (code: string) => Effect.runPromise(CodeMode.make({ tools: {} }).execute(code))
+
+  test("uses sandbox builtins as collection, sort, promise and replacement callbacks", async () => {
+    expect(await execute(`return {
+      floor: [1.8, 2.2].map(Math.floor), json: ['{"n":1}'].map(JSON.parse),
+      keys: [{a: 1}, {b: 2}].map(Object.keys), finite: [1, Infinity].filter(Number.isFinite),
+      sort: [3, -1, 2].sort(Array.of), replace: "a1b2".replace(/\\d/g, Math.floor),
+      promised: await Promise.resolve(2.8).then(Math.floor)
+    }`)).toMatchObject({ ok: true, value: {
+      floor: [1, 2], json: [{ n: 1 }], keys: [["a"], ["b"]], finite: [1],
+      sort: [3, -1, 2], replace: "a1b2", promised: 2,
+    } })
+  })
+
+  test("constructs numeric lengths and element lists, preserving sparse callback behavior", async () => {
+    expect(await execute(`const sparse = Array(3); sparse[2] = 4;
+      return { empty: Array(), filled: new Array(3).fill(2), one: Array("3"), many: Array(1, 2),
+        holes: Object.keys(Array(3).map(() => 1)), sortedHoles: Object.keys(Array(3).sort(Array.of)), denseSorted: Object.keys(Array(3).toSorted()), filtered: sparse.filter(Boolean),
+        reduced: sparse.reduce((a, b) => a + b), right: sparse.reduceRight((a, b) => a + b),
+        every: Array(3).every(() => false), some: Array(3).some(() => true) }`)).toMatchObject({
+      ok: true, value: { empty: [], filled: [2, 2, 2], one: ["3"], many: [1, 2],
+        holes: [], sortedHoles: [], denseSorted: ["0", "1", "2"], filtered: [4], reduced: 4, right: 4, every: true, some: false },
+    })
+    expect(await execute('try { Array(-1) } catch (e) { return e.name }')).toMatchObject({ ok: true, value: "RangeError" })
+  })
+
+  test("sparse callback scans honor the existing execution timeout", async () => {
+    for (const method of ["map", "flatMap", "filter", "some", "every", "forEach", "reduce", "reduceRight"]) {
+      for (const initial of method.startsWith("reduce") ? ["", ", 0"] : [""]) {
+        expect(await Effect.runPromise(CodeMode.execute({
+          code: `return Array(1_000_000).${method}(() => 0${initial})`, limits: { timeoutMs: 10 },
+        }))).toMatchObject({ ok: false, error: { kind: "TimeoutExceeded" } })
+      }
+    }
+  })
+
+  test("Array.from maps values and indices including array-like holes and undefined mapper", async () => {
+    expect(await execute(`return {
+      indices: Array.from({length: 3}, (_, i) => i), floor: Array.from([1.8, 2.2], Math.floor),
+      text: Array.from("ab", (v, i) => v + i), set: Array.from(new Set([2, 3]), v => v * 2),
+      plain: Array.from([1, 2], undefined), args: Array.from([5], (...args) => args.length)
+    }`)).toMatchObject({ ok: true, value: {
+      indices: [0, 1, 2], floor: [1, 2], text: ["a0", "b1"], set: [4, 6], plain: [1, 2], args: [2],
+    } })
+    expect(await execute('return Array.from([], 1)')).toMatchObject({ ok: false })
   })
 })

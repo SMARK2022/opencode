@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test"
 import Http from "node:http"
+import { AsyncLocalStorage } from "node:async_hooks"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "path"
@@ -302,7 +303,11 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
   const requests: { url: string; cookie: string | null; signal: AbortSignal | null | undefined }[] = []
   // 记录原始 URL，额外 session 刷新或绕路请求不能被重定向偷偷掩盖。
   // fetch 返回只表示响应头可用，正文是否结束仍由生产解析阶段决定。
+  const scope = new AsyncLocalStorage<boolean>()
+  const originalFetch = NetworkProxy.fetch
   const fetch = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+    // provider 状态的后台 HEAD 不属于语音调用；链内额外 URL 仍完整记录，不能按目标 URL 过滤。
+    if (!scope.getStore()) return originalFetch(input, init)
     requests.push({ url: String(input), cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
     const response = await globalThis.fetch(url, init)
     // 只发布响应头就绪，不预读正文，否则会把生产解析阶段的超时缺陷藏到 fixture 里。
@@ -311,8 +316,8 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
   })
   const target = { config, key: "chatgpt", interpreter: process.execPath, script, environment: { FIXTURE_URL: url } }
   return {
-    config, file, target, requests, headers: headers.promise,
-    run: (signal = new AbortController().signal) => TuiControl.transcribeVoiceFile(file, target, signal),
+    config, file, target, requests, scope, headers: headers.promise,
+    run: (signal = new AbortController().signal) => scope.run(true, () => TuiControl.transcribeVoiceFile(file, target, signal)),
     commands: () => Bun.file(log).text(),
     async [Symbol.asyncDispose]() {
       fetch.mockRestore()
@@ -324,6 +329,19 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
 }
 
 describe("backend Cookie attempts", () => {
+  test("isolates background probes without hiding extra voice requests", async () => {
+    await using tmp = await tmpdir()
+    await using fixture = await backendFixture(tmp.path, () => Response.json({ text: "fixture transcript" }))
+    const background = await NetworkProxy.fetch(fixture.target.environment.FIXTURE_URL, { method: "HEAD" })
+    expect(background.status).toBe(200)
+    expect(fixture.requests).toEqual([])
+    await fixture.scope.run(true, async () => {
+      const response = await NetworkProxy.fetch("https://chatgpt.com/unexpected-session-refresh")
+      await response.text()
+    })
+    expect(fixture.requests.map((request) => request.url)).toEqual(["https://chatgpt.com/unexpected-session-refresh"])
+  })
+
   // Cookie-only 429属于匿名额度，成功浏览器返回的实际Bearer必须在下一轮直接复用。
   // 429直接进入浏览器；401/403先读取profile，Cookie-only额度拒绝后仍须提交同一份账户快照。
   test.each([429, 401, 403])("reuses the browser account snapshot after HTTP %i recovery", async (status) => {

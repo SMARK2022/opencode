@@ -66,9 +66,13 @@ it.instance("repository GitHub tools return their fixed business contracts", () 
   const instance = yield* TestInstance
   const directory = path.join(instance.directory, ".opencode", "tool")
   yield* Effect.promise(() => fs.mkdir(directory, {recursive:true}))
-  // 与生产一样动态加载实际模块，避免把项目局部旧插件类型带入应用编译上下文。
-  for (const name of ["github-pr-search", "github-triage"]) yield* Effect.promise(() => fs.writeFile(path.join(directory, `${name}.ts`),
-    `export { default } from ${JSON.stringify(pathToFileURL(path.resolve(import.meta.dir, `../../../../.opencode/tool/${name}.ts`)).href)};`))
+  // 加载实际工具源码，但使用 workspace SDK，避免共享 .opencode/node_modules 的后台安装竞态。
+  const pluginTool = pathToFileURL(path.resolve(import.meta.dir, "../../../plugin/src/tool.ts")).href
+  for (const name of ["github-pr-search", "github-triage"]) {
+    const source = yield* Effect.promise(() => fs.readFile(path.resolve(import.meta.dir, `../../../../.opencode/tool/${name}.ts`), "utf8"))
+    yield* Effect.promise(() => fs.writeFile(path.join(directory, `${name}.ts`),
+      source.replace('from "@opencode-ai/plugin"', `from ${JSON.stringify(pluginTool)}`)))
+  }
   const registry = yield* ToolRegistry.Service
   const entries = yield* registry.all()
   const search = entries.find((tool) => tool.id === "github-pr-search")

@@ -21,10 +21,9 @@ export const mathMethods = new Set([
 
 export const invokeMathMethod = (name: string, args: Array<unknown>, node: AstNode): number => {
   if (!mathMethods.has(name)) throw new InterpreterRuntimeError(`Math.${name} is not available in CodeMode.`, node)
-  const nums = args.map((arg) => {
-    if (typeof arg !== "number") throw new InterpreterRuntimeError(`Math.${name} expects number arguments.`, node)
-    return arg
-  })
+  // Fixed-arity builtins ignore callback index/array arguments, as native JS does.
+  const input = name === "max" || name === "min" || name === "hypot" ? args : args.slice(0, name === "pow" ? 2 : 1)
+  const nums = input.map(coerceToNumber)
   const [a = Number.NaN, b = Number.NaN] = nums
   switch (name) {
     case "max":
@@ -63,3 +62,5 @@ export const invokeMathMethod = (name: string, args: Array<unknown>, node: AstNo
   throw new InterpreterRuntimeError(`Math.${name} is not available in CodeMode.`, node)
 }
 import { type AstNode, InterpreterRuntimeError } from "../interpreter/model.js"
+
+import { coerceToNumber } from "./value.js"

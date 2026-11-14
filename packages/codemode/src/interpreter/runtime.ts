@@ -608,14 +608,6 @@ const invokeArrayStatic = (name: string, args: Array<unknown>, node: AstNode): u
     case "of":
       return [...args]
     case "from": {
-      if (args.length > 1) {
-        throw new InterpreterRuntimeError(
-          "Array.from(...) does not support a map function in CodeMode; call .map() on the result instead.",
-          node,
-          "UnsupportedSyntax",
-          [supportedSyntaxMessage],
-        )
-      }
       // Map/Set materialize directly (the data checkpoint would serialize them to {}).
       if (args[0] instanceof SandboxMap)
         return Array.from((args[0] as SandboxMap).map.entries(), ([key, item]) => [key, item])
@@ -623,7 +615,7 @@ const invokeArrayStatic = (name: string, args: Array<unknown>, node: AstNode): u
       if (args[0] instanceof SandboxURLSearchParams) {
         return Array.from(args[0].params.entries(), ([key, value]) => [key, value])
       }
-      const source = boundedData(args[0], "Array.from input")
+      const source = args[0]
       if (typeof source === "string") return Array.from(source)
       if (Array.isArray(source)) return [...source]
       if (
@@ -697,6 +689,7 @@ type Execution<R> = {
   invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>
   toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>
   log: (message: string) => void
+  enterLoop: (node: AstNode) => void
   scope: Scope.Scope
   // 清单只供终态回执和释放 Fiber 引用使用；真正取消与等待仍由根 Scope 负责。
   promises: Array<SandboxPromise>
@@ -1036,6 +1029,7 @@ class Interpreter<R> {
     const self = this
     return Effect.gen(function* () {
       while (yield* self.evaluateExpression(testNode)) {
+        self.execution.enterLoop(node)
         const result = yield* self.evaluateStatement(bodyNode)
 
         if (result.kind === "continue") {
@@ -1066,6 +1060,7 @@ class Interpreter<R> {
     const self = this
     return Effect.gen(function* () {
       do {
+        self.execution.enterLoop(node)
         const result = yield* self.evaluateStatement(bodyNode)
 
         if (result.kind === "continue") {
@@ -1112,6 +1107,7 @@ class Interpreter<R> {
           : []
 
       while (testNode ? yield* self.evaluateExpression(testNode) : true) {
+        self.execution.enterLoop(node)
         let iterationScope: Map<string, Binding> | undefined
         if (perIterationBindings.length > 0) {
           iterationScope = new Map(
@@ -1200,6 +1196,7 @@ class Interpreter<R> {
         // 异步迭代的每次 next（包括空集合与终止）都沿既有 await 调度让出。
         if (getBoolean(node, "await")) yield* Effect.yieldNow
         if (next.done) break
+        self.execution.enterLoop(node)
         // 只等待产出值本身；Map 键值对不会递归等待。
         const value =
           getBoolean(node, "await") && next.value instanceof SandboxPromise
@@ -1302,6 +1299,7 @@ class Interpreter<R> {
       }
 
       for (const key of keys) {
+        self.execution.enterLoop(node)
         if (declaration) {
           self.pushScope()
           yield* self.declarePattern(declaration.pattern, key, declaration.mutable, left)
@@ -1594,6 +1592,9 @@ class Interpreter<R> {
         return createErrorValue(name, arg === undefined ? "" : coerceToString(arg))
       })
     }
+    if (name === "Array") {
+      return Effect.map(self.evaluateCallArguments(argNodes), (args) => self.constructArray(args))
+    }
     if (valueConstructors.has(name)) {
       return Effect.gen(function* () {
         const args = yield* self.evaluateCallArguments(argNodes)
@@ -1614,6 +1615,14 @@ class Interpreter<R> {
       })
     }
     throw unsupportedSyntax("NewExpression", node)
+  }
+
+  private constructArray(args: Array<unknown>): Array<unknown> {
+    if (args.length !== 1 || typeof args[0] !== "number") return [...args]
+    const length = args[0]
+    if (!Number.isInteger(length) || length < 0 || length > 0xffffffff)
+      throw new ProgramThrow(createErrorValue("RangeError", "Invalid array length"))
+    return new Array<unknown>(length)
   }
 
   private constructDate(args: Array<unknown>): SandboxDate {
@@ -2018,29 +2027,48 @@ class Interpreter<R> {
 
       const args = yield* self.evaluateCallArguments(argNodes)
 
+      if (typeofValue(callable) === "function") return yield* self.invokeCallable(callable, args, node)
+      // 保留首次求值的 receiver；诊断只显示有限键名，不读取值或重复执行表达式。
+      const [value, label] =
+        isRecord(reference) && "target" in reference ? [reference.target, "receiver"] : [callable, "value"]
+      throw new InterpreterRuntimeError(
+        `Value is not callable in CodeMode. Actual ${label}: ${describeValueShape(value)}.`,
+        callee,
+      )
+    })
+  }
+
+  private invokeCallable(callable: unknown, args: Array<unknown>, node: AstNode): Effect.Effect<unknown, unknown, R> {
+    return Effect.gen({ self: this }, function* () {
       if (callable instanceof ToolReference) {
-        if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", callee)
+        if (callable.path.length === 0) throw new InterpreterRuntimeError("The tools root is not callable.", node)
         // 发现只读取内存目录，直接交付值；仍经过原工具校验、预算和观察hooks。
         if (callable.path.length === 2 && callable.path[0] === "$codemode" && callable.path[1] === "search")
-          return yield* self.execution.invokeTool(callable.path, args)
+          return yield* this.execution.invokeTool(callable.path, args)
         // An un-awaited tool call is a first-class promise value; the call itself starts now.
-        return yield* self.createToolCallPromise(callable.path, args)
+        return yield* this.createToolCallPromise(callable.path, args)
       }
       if (callable instanceof PromiseMethodReference) {
-        return yield* self.invokePromiseMethod(callable, args, node)
+        return yield* this.invokePromiseMethod(callable, args, node)
       }
       if (callable instanceof CodeModeFunction) {
-        return yield* self.invokeFunction(callable, args)
+        return yield* this.invokeFunction(callable, args)
       }
       if (callable instanceof IntrinsicReference) {
-        return yield* self.invokeIntrinsic(callable, args, node)
+        return yield* this.invokeIntrinsic(callable, args, node)
       }
+      if (callable instanceof GlobalNamespace && callable.name === "Array") return this.constructArray(args)
       if (callable instanceof GlobalMethodReference) {
+        if (callable.namespace === "Array" && callable.name === "from" && args[1] !== undefined) {
+          const apply = this.applyCollectionCallback(args[1], "Array.from", node)
+          const items = invokeArrayStatic("from", args, node) as Array<unknown>
+          return yield* Effect.forEach(items, (item, index) => apply([item, index]))
+        }
         // 令牌不捕获旧执行器；跨单元别名始终在当前根作用域登记计时器。
-        if (callable.namespace === "$builtin") return yield* self.invokeSleep(args, node)
-        if (callable.namespace === "console") return self.invokeConsole(callable.name, args, node)
+        if (callable.namespace === "$builtin") return yield* this.invokeSleep(args, node)
+        if (callable.namespace === "console") return this.invokeConsole(callable.name, args, node)
         if (callable.namespace === "Object" && args[0] instanceof ToolReference) {
-          return self.invokeObjectMethodOnTools(callable.name, args[0] as ToolReference, node)
+          return this.invokeObjectMethodOnTools(callable.name, args[0] as ToolReference, node)
         }
         return boundedData(invokeGlobalMethod(callable, args, node), `${callable.namespace}.${callable.name} result`)
       }
@@ -2054,13 +2082,7 @@ class Interpreter<R> {
       if (callable instanceof ErrorConstructorReference) {
         return createErrorValue(callable.name, args[0] === undefined ? "" : coerceToString(args[0]))
       }
-      // 保留首次求值的 receiver；诊断只显示有限键名，不读取值或重复执行表达式。
-      const [value, label] =
-        isRecord(reference) && "target" in reference ? [reference.target, "receiver"] : [callable, "value"]
-      throw new InterpreterRuntimeError(
-        `Value is not callable in CodeMode. Actual ${label}: ${describeValueShape(value)}.`,
-        callee,
-      )
+      throw new InterpreterRuntimeError("Value is not callable in CodeMode.", node)
     })
   }
 
@@ -2372,7 +2394,7 @@ class Interpreter<R> {
     if (typeof ref.receiver === "string") {
       if (
         (ref.name === "replace" || ref.name === "replaceAll") &&
-        (args[1] instanceof CodeModeFunction || args[1] instanceof CoercionFunction || args[1] instanceof UriFunction)
+        typeofValue(args[1]) === "function"
       ) {
         return this.invokeStringReplacer(ref.receiver, ref.name, args, node)
       }
@@ -2480,23 +2502,10 @@ class Interpreter<R> {
     name: string,
     node: AstNode,
   ): (args: Array<unknown>) => Effect.Effect<unknown, unknown, R> {
-    if (
-      !(callback instanceof CodeModeFunction) &&
-      !(callback instanceof CoercionFunction) &&
-      !(callback instanceof UriFunction) &&
-      // 仅放行 sleep 令牌；其他全局方法继续遵守原来的回调白名单。
-      !(callback instanceof GlobalMethodReference && callback.namespace === "$builtin" && callback.name === "sleep")
-    ) {
+    if (typeofValue(callback) !== "function" || callback instanceof ToolReference) {
       throw new InterpreterRuntimeError(`${name} expects a function callback.`, node)
     }
-    return (callbackArgs) =>
-      callback instanceof GlobalMethodReference
-        ? this.invokeSleep(callbackArgs, node)
-        : callback instanceof CoercionFunction
-          ? Effect.succeed(invokeCoercion(callback, callbackArgs, node))
-          : callback instanceof UriFunction
-            ? Effect.succeed(invokeUriFunction(callback, callbackArgs, node))
-            : this.invokeFunction(callback, callbackArgs)
+    return (callbackArgs) => this.invokeCallable(callback, callbackArgs, node)
   }
 
   private invokeMapMethod(
@@ -2699,8 +2708,9 @@ class Interpreter<R> {
       case "reverse":
         return Effect.succeed([...target].reverse())
       case "sort":
-      case "toSorted":
         return this.sortArray(target, args[0], node)
+      case "toSorted":
+        return this.sortArray([...target], args[0], node)
       case "toReversed":
         return Effect.succeed([...target].reverse())
       case "with": {
@@ -2767,18 +2777,26 @@ class Interpreter<R> {
     return Effect.gen(function* () {
       // Iterate a snapshot taken at call time so a callback that mutates the array can't
       // self-extend the loop - matching JS, where elements appended during iteration are not visited.
+      // 空槽也让出调度：没有回调执行时，仍须响应既有根超时和取消。
       const items = target.slice()
       switch (name) {
         case "map": {
-          const values: Array<unknown> = []
-          for (const [index, item] of items.entries()) values.push(yield* apply([item, index, items]))
+          const values = new Array<unknown>(items.length)
+          for (const [index, item] of items.entries()) {
+            if (index in items) values[index] = yield* apply([item, index, items])
+            else yield* Effect.yieldNow
+          }
           return values
         }
         case "flatMap": {
           const values: Array<unknown> = []
           for (const [index, item] of items.entries()) {
+            if (!(index in items)) {
+              yield* Effect.yieldNow
+              continue
+            }
             const mapped = yield* apply([item, index, items])
-            if (Array.isArray(mapped)) values.push(...mapped)
+            if (Array.isArray(mapped)) values.push(...mapped.filter(() => true))
             else values.push(mapped)
           }
           return values
@@ -2786,6 +2804,10 @@ class Interpreter<R> {
         case "filter": {
           const values: Array<unknown> = []
           for (const [index, item] of items.entries()) {
+            if (!(index in items)) {
+              yield* Effect.yieldNow
+              continue
+            }
             if (yield* apply([item, index, items])) values.push(item)
           }
           return values
@@ -2802,16 +2824,27 @@ class Interpreter<R> {
           return -1
         case "some":
           for (const [index, item] of items.entries()) {
+            if (!(index in items)) {
+              yield* Effect.yieldNow
+              continue
+            }
             if (yield* apply([item, index, items])) return true
           }
           return false
         case "every":
           for (const [index, item] of items.entries()) {
+            if (!(index in items)) {
+              yield* Effect.yieldNow
+              continue
+            }
             if (!(yield* apply([item, index, items]))) return false
           }
           return true
         case "forEach":
-          for (const [index, item] of items.entries()) yield* apply([item, index, items])
+          for (const [index, item] of items.entries()) {
+            if (index in items) yield* apply([item, index, items])
+            else yield* Effect.yieldNow
+          }
           return undefined
         case "reduce": {
           let accumulator: unknown
@@ -2820,13 +2853,18 @@ class Interpreter<R> {
             accumulator = args[1]
             start = 0
           } else {
-            if (items.length === 0)
+            start = 0
+            while (start < items.length && !(start in items)) {
+              yield* Effect.yieldNow
+              start += 1
+            }
+            if (start === items.length)
               throw new InterpreterRuntimeError("Array.reduce of an empty array with no initial value.", node)
-            accumulator = items[0]
-            start = 1
+            accumulator = items[start++]
           }
           for (let index = start; index < items.length; index += 1) {
-            accumulator = yield* apply([accumulator, items[index], index, items])
+            if (index in items) accumulator = yield* apply([accumulator, items[index], index, items])
+            else yield* Effect.yieldNow
           }
           return accumulator
         }
@@ -2837,13 +2875,18 @@ class Interpreter<R> {
             accumulator = args[1]
             start = items.length - 1
           } else {
-            if (items.length === 0)
+            start = items.length - 1
+            while (start >= 0 && !(start in items)) {
+              yield* Effect.yieldNow
+              start -= 1
+            }
+            if (start < 0)
               throw new InterpreterRuntimeError("Array.reduceRight of an empty array with no initial value.", node)
-            accumulator = items[items.length - 1]
-            start = items.length - 2
+            accumulator = items[start--]
           }
           for (let index = start; index >= 0; index -= 1) {
-            accumulator = yield* apply([accumulator, items[index], index, items])
+            if (index in items) accumulator = yield* apply([accumulator, items[index], index, items])
+            else yield* Effect.yieldNow
           }
           return accumulator
         }
@@ -2867,19 +2910,16 @@ class Interpreter<R> {
     comparator: unknown,
     node: AstNode,
   ): Effect.Effect<Array<unknown>, unknown, R> {
-    if (comparator !== undefined && !(comparator instanceof CodeModeFunction)) {
-      throw new InterpreterRuntimeError("Array.sort expects an arrow function comparator.", node)
-    }
-    if (!(comparator instanceof CodeModeFunction)) {
+    const apply = comparator === undefined ? undefined : this.applyCollectionCallback(comparator, "Array.sort", node)
+    if (!apply) {
       return Effect.sync(() =>
-        [...target].sort((a, b) => {
+        target.slice().sort((a, b) => {
           const left = coerceToString(a)
           const right = coerceToString(b)
           return left < right ? -1 : left > right ? 1 : 0
         }),
       )
     }
-    const self = this
     const mergeSort = (items: Array<unknown>): Effect.Effect<Array<unknown>, unknown, R> => {
       if (items.length <= 1) return Effect.succeed(items)
       const midpoint = Math.floor(items.length / 2)
@@ -2892,7 +2932,7 @@ class Interpreter<R> {
         while (leftIndex < left.length && rightIndex < right.length) {
           // Coerce the comparator's result like JS ToNumber (data objects -> NaN, never a host
           // crash) and treat NaN as 0 - the spec's "no consistent order" -> keep the left element.
-          const order = coerceToNumber(yield* self.invokeFunction(comparator, [left[leftIndex], right[rightIndex]]))
+          const order = coerceToNumber(yield* apply([left[leftIndex], right[rightIndex]]))
           if (Number.isNaN(order) || order <= 0) merged.push(left[leftIndex++])
           else merged.push(right[rightIndex++])
         }
@@ -2901,8 +2941,12 @@ class Interpreter<R> {
     }
     // Per spec, undefined elements sort to the end and the comparator is never called on them.
     const defined = target.filter((item) => item !== undefined)
-    const undefinedCount = target.length - defined.length
-    return Effect.map(mergeSort(defined), (items) => [...items, ...Array(undefinedCount).fill(undefined)])
+    const undefinedCount = target.filter((item) => item === undefined).length
+    return Effect.map(mergeSort(defined), (items) => {
+      const result = [...items, ...Array(undefinedCount).fill(undefined)]
+      result.length = target.length
+      return result
+    })
   }
 
   private evaluateObjectExpression(node: AstNode): Effect.Effect<Record<string, unknown>, unknown, R> {
@@ -3495,12 +3539,23 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     const program = parseProgram(options.code, typescript)
     const promises: Array<SandboxPromise> = []
     let unobservedFailure = false
+    // 所有嵌套、函数与并行帧共享本次根执行计数；复用环境不会复用预算。
+    let loopIterations = 0
     // 正常 return 也关闭仍在运行的生产者；已完成的宿主副作用保持原样。
     const value = yield* Effect.scopedWith((scope) =>
       Interpreter.make(
         typescript,
         {
           invokeTool: tools.invoke,
+          enterLoop: (node) => {
+            if (limits.maxLoopIterations === undefined) return
+            if (loopIterations >= limits.maxLoopIterations)
+              throw new InterpreterRuntimeError(
+                `Execution exceeded its total loop-iteration limit of ${limits.maxLoopIterations}. Split the work across Execute calls.`,
+                node, "LoopIterationLimitExceeded",
+              )
+            loopIterations++
+          },
           toolKeys: tools.keys,
           log,
           scope,

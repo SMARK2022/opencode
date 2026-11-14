@@ -2265,11 +2265,13 @@ it.instance("final Execute receipt budgets actual image omission before clipping
   expect((yield* finalModelReceipt(messages)).value).toBe(parent.state.output)
 }))
 
-it.instance("final Execute failure bounds original diagnostics and provider error text", () => Effect.gen(function* () {
+it.instance("final Execute failure preserves displayed output and errors without exposing undisplayed tool results", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  yield* Effect.promise(() => Bun.write(path.join(instance.directory, "hidden.txt"), "UNDISPLAYED_TOOL_BODY"))
   const observed = yield* observeFinalReceipt()
   const fixture = yield* resolveTools()
   yield* fixture.processor.process({ user: fixture.user, sessionID: fixture.session.id, model: provider.model,
-    agent: fixture.agent, system: ['console.log("CAPTURED_LOG"); throw new Error("ERROR_HEAD" + "x".repeat(60_000) + "ERROR_TAIL");'],
+    agent: fixture.agent, system: ['await tools.$opencode.read("hidden.txt"); console.log("CAPTURED_LOG"); throw new Error("ERROR_HEAD" + "x".repeat(60_000) + "ERROR_TAIL");'],
     messages: [], tools: fixture.tools })
   const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
   const parent = messages.flatMap((message) => message.parts)
@@ -2283,6 +2285,7 @@ it.instance("final Execute failure bounds original diagnostics and provider erro
   expect(full).toContain("ERROR_HEAD")
   expect(full).toContain("ERROR_TAIL")
   expect(full).toContain("CAPTURED_LOG")
+  expect(full).not.toContain("UNDISPLAYED_TOOL_BODY")
 }))
 
 it.instance("final Execute long success includes real elapsed notice in one saved receipt", () => Effect.gen(function* () {

@@ -469,12 +469,12 @@ describe("code mode host fixtures", () => {
       }),
     )
 
-    testEffect(harness()).effect("preview caps total calls while review retains unique tool inputs", () =>
+    testEffect(harness()).effect("preview and execution each cap total calls while review retains unique inputs", () =>
       Effect.gen(function* () {
         const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
         const reviewed: unknown[] = []
         let invoked = 0
-        // 第 1024 次的新参数仍被记录，第 1025 次只在真实执行出现；重复调用同样耗费预算。
+        // 第1024次仍接纳，第1025次不得调用宿主；预跑与真实执行使用独立计数。
         const result = yield* tool.execute(
           {
             code: "for (let i = 0; i < 1023; i++) await tools.host.check({a:1}); await tools.host.check({a:2}); await tools.host.check({a:3}); return 7",
@@ -495,14 +495,15 @@ describe("code mode host fixtures", () => {
                 }),
             },
           },
-        )
+        ).pipe(Effect.exit)
         expect(reviewed).toEqual([
           { tool: "check", input: { a: 1 } },
           { tool: "check", input: { a: 2 } },
         ])
-        // 预跑只限制收集成本，真实执行仍须到达最后一次调用，不能沿用探针计数。
-        expect(invoked).toBe(1025)
-        expect(scriptOutput(result)).toBe("7")
+        // 预跑计数不会消耗真实预算，重复参数调用仍计入1024次总量。
+        expect(invoked).toBe(1024)
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isFailure(result)) expect(String(Cause.squash(result.cause))).toContain("tool-call limit of 1024")
       }),
     )
 
@@ -975,6 +976,14 @@ describe("code mode host fixtures", () => {
       expect(scriptOutput(output)).toBe("12")
       expect(output.metadata.toolCalls.map((c) => c.tool).sort()).toEqual(["echo.one", "echo.two"])
       expect(output.metadata.toolCalls.every((c) => c.status === "completed")).toBe(true)
+    })
+
+    test("the host loop budget preserves logs and reports the configured total", async () => {
+      const tool = await build({})
+      const error = await failure(tool.execute({ code: 'console.log("before loop"); while (true) {}' }, ctx))
+      expect(error.message).toContain("loop-iteration limit of 100000")
+      expect(error.message).toContain("before loop")
+      expect(tool.description).toContain("1024 tool calls and 100000 total explicit loop iterations")
     })
 
     test("a program failure fails the tool with a readable error", async () => {

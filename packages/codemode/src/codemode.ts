@@ -18,6 +18,8 @@ export type ExecutionLimits = {
   readonly timeoutMs?: number
   /** Maximum number of tool calls admitted by the runtime. No default: absent means unlimited. */
   readonly maxToolCalls?: number
+  /** Total explicit loop-body entries across this execution. Absent means unlimited. */
+  readonly maxLoopIterations?: number
   /** Maximum UTF-8 bytes of model-facing output. No default: absent means no truncation. */
   readonly maxOutputBytes?: number
   /** 日志按 UTF-8 字节限制留存；业务返回值仍受独立的 maxOutputBytes 控制。 */
@@ -39,6 +41,7 @@ type ToolTree<R = never> = {
 export type ResolvedExecutionLimits = {
   readonly timeoutMs: number | undefined
   readonly maxToolCalls: number | undefined
+  readonly maxLoopIterations: number | undefined
   readonly maxOutputBytes: number | undefined
   readonly maxLogBytes: number | undefined
 }
@@ -89,6 +92,7 @@ export const DiagnosticKind = Schema.Literals([
   "InvalidToolOutput",
   "InvalidDataValue",
   "ToolCallLimitExceeded",
+  "LoopIterationLimitExceeded",
   "TimeoutExceeded",
   "ToolFailure",
   "ExecutionFailure",
@@ -156,6 +160,7 @@ const resolveExecutionLimits = (limits?: ExecutionLimits): ResolvedExecutionLimi
   // Effect 的计时器只支持有符号32位毫秒；超界不能悄悄变成无期限执行。
   timeoutMs: validateLimit("timeoutMs", limits?.timeoutMs, 1, 2_147_483_647),
   maxToolCalls: validateLimit("maxToolCalls", limits?.maxToolCalls, 0),
+  maxLoopIterations: validateLimit("maxLoopIterations", limits?.maxLoopIterations, 0),
   maxOutputBytes: validateLimit("maxOutputBytes", limits?.maxOutputBytes, 0),
   // 零预算表示只记录省略数；不能按真值把它当成无限额。
   maxLogBytes: validateLimit("maxLogBytes", limits?.maxLogBytes, 0),

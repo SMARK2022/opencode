@@ -131,6 +131,7 @@ export type DiagnosticKind =
   | "InvalidToolOutput"
   | "InvalidDataValue"
   | "ToolCallLimitExceeded"
+  | "LoopIterationLimitExceeded"
   | "TimeoutExceeded"
   | "ToolFailure"
   | "ExecutionFailure"
@@ -139,7 +140,7 @@ export const OptionalShortCircuit: unique symbol = Symbol("codemode.optional-sho
 
 // 诊断与实际调用面一致，不能再把已支持的链式方法说成禁用。
 export const supportedSyntaxMessage =
-  "Supported orchestration syntax: tools.* calls (they return promises - resolve them with await), data literals, destructuring, optional chaining, template literals, conditionals, switch, loops (incl. for...of and for...in over object/array/tools keys), arrow functions, spread, try/catch, array methods (map/filter/find/findIndex/some/every/reduce/flatMap/forEach/sort/slice/concat/indexOf/lastIndexOf/at/flat/reverse/includes/join), string methods (incl. match/matchAll/replace/split with regular expressions), Date/RegExp/Map/Set/URL/URLSearchParams, URI encoding helpers, Object/Math/JSON helpers, captured console.log/warn/error/dir/table, and Promise.all/allSettled/race/resolve/reject over arrays mixing promises and plain values for parallel tool calls (Promise .then/.catch/.finally accept collection callbacks and adopt returned promises)."
+  "Supported orchestration syntax: tools.* calls (they return promises - resolve them with await), data literals, destructuring, optional chaining, template literals, conditionals, switch, loops (incl. for...of and for...in over object/array/tools keys), arrow functions, supported builtins as callbacks, spread, try/catch, Array construction and Array.from mapping, array methods (map/filter/find/findIndex/some/every/reduce/flatMap/forEach/sort/slice/concat/indexOf/lastIndexOf/at/flat/reverse/includes/join), string methods (incl. match/matchAll/replace/split with regular expressions), Date/RegExp/Map/Set/URL/URLSearchParams, URI encoding helpers, Object/Math/JSON helpers, captured console.log/warn/error/dir/table, and Promise.all/allSettled/race/resolve/reject over arrays mixing promises and plain values for parallel tool calls (Promise .then/.catch/.finally accept collection callbacks and adopt returned promises)."
 
 export class InterpreterRuntimeError extends Error {
   readonly node?: AstNode
