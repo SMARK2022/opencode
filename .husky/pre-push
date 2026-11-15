@@ -1,35 +1,8 @@
 #!/bin/sh
 set -e
 
-# #119：Windows Git Bash 可能缺少 Bun PATH，优先补上用户安装目录
-if ! command -v bun >/dev/null 2>&1 && [ -d "$HOME/.bun/bin" ]; then
-  PATH="$HOME/.bun/bin:$PATH"
-  export PATH
-fi
-
-# #119：仍找不到 bun 则明确失败，避免后续脚本抛难读错误
-if ! command -v bun >/dev/null 2>&1; then
-  echo "bun: command not found. Add ~/.bun/bin to PATH or install bun." >&2
-  exit 127
-fi
-
-# Check if bun version matches package.json
-# keep in sync with packages/script/src/index.ts semver qualifier
-bun -e '
-import { semver } from "bun";
-const pkg = await Bun.file("package.json").json();
-const expectedBunVersion = pkg.packageManager?.split("@")[1];
-if (!expectedBunVersion) {
-  throw new Error("packageManager field not found in root package.json");
-}
-const expectedBunVersionRange = `^${expectedBunVersion}`;
-if (!semver.satisfies(process.versions.bun, expectedBunVersionRange)) {
-  throw new Error(`This script requires bun@${expectedBunVersionRange}, but you are using bun@${process.versions.bun}`);
-}
-if (process.versions.bun !== expectedBunVersion) {
-  console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expectedBunVersion}`);
-}
-'
+# 提交与推送共用安装和 lockfile 校验，避免两条检查链漂移。
+. "$(dirname "$0")/pre-commit"
 bun typecheck
 
 # 子模块指针可达性校验：父仓库推送前，指针必须已存在于子模块远端分支历史。

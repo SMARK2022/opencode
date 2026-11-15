@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+
+# Windows Git Bash 复用 Bun 的用户安装目录，依赖尚未安装时也能启动检查。
+if ! command -v bun >/dev/null 2>&1 && [ -d "$HOME/.bun/bin" ]; then
+  PATH="$HOME/.bun/bin:$PATH"
+  export PATH
+fi
+if ! command -v bun >/dev/null 2>&1; then
+  echo "bun: command not found. Add ~/.bun/bin to PATH or install bun." >&2
+  exit 127
+fi
+
+bun -e '
+import { semver } from "bun";
+const pkg = await Bun.file("package.json").json();
+const expected = pkg.packageManager?.split("@")[1];
+if (!expected) throw new Error("packageManager field not found in root package.json");
+if (!semver.satisfies(process.versions.bun, `^${expected}`)) {
+  throw new Error(`This script requires bun@^${expected}, but you are using bun@${process.versions.bun}`);
+}
+if (process.versions.bun !== expected) {
+  console.warn(`Warning: Bun version ${process.versions.bun} differs from expected ${expected}`);
+}
+'
+
+# 提交校验 index，推送校验 HEAD；安装所用依赖文件必须就是即将发布的版本。
+dependency_base=
+case "$0" in */pre-push|pre-push) dependency_base=HEAD ;; esac
+if ! git diff --quiet $dependency_base -- package.json bun.lock bunfig.toml ':(glob)packages/**/package.json' patches; then
+  echo "Dependency files have uncommitted changes. Stage them before commit; commit them before push." >&2
+  exit 1
+fi
+
+# 补齐锁定的依赖并执行安装脚本；安装期间复用现有 Husky 配置，不重复写 Git 配置。
+if ! HUSKY=0 bun install --frozen-lockfile; then
+  echo "Dependency install failed. Run bun install, review package.json/bun.lock, then stage the resulting changes." >&2
+  exit 1
+fi
+
+bun -e '
+import { parse, printParseErrorCode } from "jsonc-parser";
+const errors = [];
+parse(await Bun.file("bun.lock").text(), errors, { allowTrailingComma: true, disallowComments: true });
+if (errors.length) {
+  throw new Error(`bun.lock is not compatible with Turbo: ${printParseErrorCode(errors[0].error)}. Regenerate the lockfile with bun install and remove manual comments.`);
+}
+'
