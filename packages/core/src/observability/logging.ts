@@ -98,12 +98,12 @@ export async function cleanupDaemonNative(dir = Global.Path.log) {
       names.map(async (name) => {
         const full = path.join(native, name)
         const file = path.join(full, "lifecycle.json")
-        const record = await Bun.file(file)
-          .json()
-          .then(decode)
+        const record = await fs.promises
+          .readFile(file, "utf8")
+          .then((text) => decode(JSON.parse(text)))
           .catch(() => undefined)
-        // 已有记录暂不可读时无法确认owner死亡，不能按无记录孤儿删除正在更新的证据。
-        if (!record && (await Bun.file(file).exists())) return
+        // Node sidecar与Bun共用清理逻辑；已有记录不可读时保留，避免误删活跃诊断证据。
+        if (!record && (await fs.promises.stat(file).then(() => true).catch(() => false))) return
         // worker或supervisor尚活时均保留；PID复用只会多保留证据，不会误删。
         const active = [record?.workerPID, record?.wrapperPID].some((pid) => {
           if (pid === undefined) return false

@@ -90,6 +90,12 @@ describe("Npm.add", () => {
     })
     await Bun.write(path.join(scoped, "dist", "index.js"), "export const createScoped = () => 'scoped'\n")
 
+    // 覆盖Node日志清理的真实数据条件，同时隔离宿主数据、配置和状态目录。
+    const data = path.join(tmp.path, "data")
+    const native = path.join(data, "opencode", "log", "daemon-native", "node-runtime")
+    await fs.mkdir(native, { recursive: true })
+    await Bun.write(path.join(native, "lifecycle.json"), JSON.stringify({ workerPID: process.pid }))
+
     const proc = Bun.spawn(
       [
         node,
@@ -112,7 +118,13 @@ describe("Npm.add", () => {
       `,
       ],
       {
-        env: { ...process.env, XDG_CACHE_HOME: path.join(tmp.path, "cache") },
+        env: {
+          ...process.env,
+          XDG_CACHE_HOME: path.join(tmp.path, "cache"),
+          XDG_CONFIG_HOME: path.join(tmp.path, "config"),
+          XDG_DATA_HOME: data,
+          XDG_STATE_HOME: path.join(tmp.path, "state"),
+        },
         stdout: "pipe",
         stderr: "pipe",
       },
