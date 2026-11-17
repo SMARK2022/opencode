@@ -1923,6 +1923,7 @@ describe("tui sync part delta coalesce (#186)", () => {
     // 旧版只保存消息tokens和step-start；两次真实挂载都不能依赖新式inputEstimate或上一TUI缓存。
     for (const _ of [0, 1]) {
       const { app, sync } = await mount((url) => {
+        if (url.pathname === "/session") return json([{ id: "ses_1", projectID: "proj_test", directory, path: "packages/tui", time: { created: 1, updated: 2 } }])
         if (url.pathname === "/session/ses_1") return json({
           id: "ses_1", directory, time: { created: 1, updated: 2 }, cost: 0,
           tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -1940,6 +1941,10 @@ describe("tui sync part delta coalesce (#186)", () => {
           session: sync.session.get("ses_1"), last: message, parts: sync.data.part[message.id] ?? [],
         }).request).toEqual(usage.request)
         expect(usage.session).toMatchObject({ input: 777, output: 2, cost: 0 })
+        await sync.session.sync("ses_1", { force: true })
+        await sync.session.refresh()
+        // bulk列表不返回request时，已同步的完整投影仍需保留。
+        expect(sync.session.get("ses_1")?.request?.messageID).toBe("user_1")
         // 原账本的旧记录兼容读取已含消息tokens中的777；同一估算不能再次叠加。
         const footer = sync.session.accounting("ses_1", undefined, "user_1", { input: 777, inputPure: 777, output: 0, cost: 0 })
         expect(footer.request).toMatchObject({ totalInput: 777, totalInputPure: 777, totalOutput: 2, cost: 0 })

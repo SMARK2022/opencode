@@ -1013,6 +1013,10 @@ describe("session.list", () => {
         expect(scan.sessions.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
         const listed = yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", roots: true }))
         expect(listed.find((session) => session.id === cross.id)?.request?.messageID).toBe(msg)
+        const bulk = yield* SessionNs.Service.use((session) => session.list({ search: "alpha beta", roots: true, request: false }))
+        // 显式bulk读取只省略投影，不改变同一搜索的命中集合。
+        expect(bulk.map((session) => session.id)).toEqual(listed.map((session) => session.id))
+        expect(bulk.find((session) => session.id === cross.id)?.request).toBeUndefined()
       }),
     { git: true },
     30_000,

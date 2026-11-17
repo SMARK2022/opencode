@@ -1768,7 +1768,8 @@ it.instance("execute timeout settles real children and preserves completed mutat
           `await tools.$opencode.apply_patch({patchText:${JSON.stringify(first)}});
       await tools.$opencode.bash({command:${JSON.stringify(command)}});
       await tools.$opencode.apply_patch({patchText:${JSON.stringify(later)}});`,
-          "1000",
+          // 宿主冷启动可能超过1秒；5秒仍远短于子进程30秒睡眠，覆盖同一超时清理路径。
+          "5000",
         ],
         messages: [],
         tools: fixture.tools,
@@ -1779,7 +1780,7 @@ it.instance("execute timeout settles real children and preserves completed mutat
       messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "bash" &&
         part.state.status === "running" && String(part.state.metadata?.output).includes("TIMEOUT_READY")) || undefined)),
       "timeout child never started")
-    yield* awaitWithTimeout(Fiber.join(pending), "execute timeout did not settle its parent")
+    yield* awaitWithTimeout(Fiber.join(pending), "execute timeout did not settle its parent", "10 seconds")
     const messages = yield* fixture.sessions.messages({ sessionID: fixture.session.id })
     const parts = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool")
     const parent = parts.find((part) => part.tool === "execute")

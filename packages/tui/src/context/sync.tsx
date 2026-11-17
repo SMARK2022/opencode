@@ -779,7 +779,9 @@ export const {
       const summary = match.found && Object.hasOwn(store.session_diff, current.id)
         ? store.session[match.index].summary
         : undefined
-      const projected = summary ? { ...current, summary } : current
+      // bulk列表允许省略request；保留get或事件已交付的当前请求，避免列表刷新清空侧栏用量。
+      const request = current.request === undefined && match.found ? store.session[match.index].request : current.request
+      const projected = { ...current, request, ...(summary ? { summary } : {}) }
       if (!tracker?.moved) return projected
       return { ...projected, ...tracker.moved, time: { ...projected.time, ...tracker.moved.time } }
     }
@@ -842,13 +844,13 @@ export const {
         return SessionPath.ancestors(value).includes(current) || current.startsWith(value ? `${value}/` : "")
       }
       return sdk.client.session
-        .list(query)
+        .list(query, { headers: { [TUI_VIEWER_HEADER]: TUI_VIEWER } })
         .then((x) => {
           // 未触碰行保留服务端结果；触碰行先完成部分初始化，再按最新 placement 判断成员。
           const infos = (x.data ?? []).flatMap((info) => {
             // 显式删除优先于旧HTTP行，其他placement及实时列表合并仍由原tracker裁决。
             if (deletedSessionIDs.has(info.id)) return []
-            if (!tracker.has(info.id)) return [info]
+            if (!tracker.has(info.id)) return [acceptSession(info)!]
             const current = acceptSession(info, tracker.get(info.id))
             return current && matches(current) ? [current] : []
           })

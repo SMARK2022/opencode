@@ -99,6 +99,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // #544：searchMode 原样透传——缺省/all 保持旧全量搜索；title 供 progressive 首屏
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
+      const request = yield* HttpServerRequest.HttpServerRequest
       return yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : directory,
         scope: ctx.query.scope,
@@ -107,6 +108,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         start: ctx.query.start,
         search: ctx.query.search,
         searchMode: ctx.query.searchMode,
+        request: request.headers[TUI_VIEWER_HEADER] === TUI_VIEWER ? false : undefined,
         limit: ctx.query.limit,
       })
     })

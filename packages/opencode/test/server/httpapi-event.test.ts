@@ -176,6 +176,13 @@ describe("event HttpApi", () => {
     expect(settled.request?.inputEstimate).toEqual({ ...inputEstimate, confirmed: true })
     expect(settled.request?.model?.contextLimit).toBe(8000)
     expect(settled.request).toMatchObject({ input: 0, output: 0, cost: 0, stepInput: 0, stepOutput: 0 })
+    const bulkResponse = yield* requestInDirectory("/session", instance.directory, { headers: { "x-opencode-tui-message-projection": "viewer" } })
+    const bulk = Schema.decodeUnknownSync(Schema.Array(SessionV1.SessionInfo))(yield* bulkResponse.json)
+    expect(bulk.find((item) => item.id === info.id)?.request).toBeUndefined()
+    const fullResponse = yield* requestInDirectory("/session", instance.directory)
+    const full = Schema.decodeUnknownSync(Schema.Array(SessionV1.SessionInfo))(yield* fullResponse.json)
+    // 缺省HTTP响应仍包含完整request，bulk参数只改变显式调用方。
+    expect(full.find((item) => item.id === info.id)?.request?.messageID).toBe(userID)
   }), { git: true, config: { formatter: false, lsp: false } })
 
   it.instance(

@@ -262,6 +262,8 @@ export type ListInput = {
   search?: string
   /** title：首屏子集；all（默认）：完整 title∨content，兼容旧客户端 */
   searchMode?: SearchMode
+  /** bulk列表可省略逐条request投影；缺省保留完整读取合同。 */
+  request?: boolean
   limit?: number
 }
 
@@ -998,7 +1000,7 @@ function* listByProject(
     .limit(limit)
     .all()
     .pipe(
-      Effect.flatMap((rows) => withRequests(database.db, rows)),
+      Effect.flatMap((rows) => input.request === false ? Effect.succeed(rows) : withRequests(database.db, rows)),
       Effect.map((rows) => rows.map(fromRow)),
     ),
   ).pipe(Effect.orDie)

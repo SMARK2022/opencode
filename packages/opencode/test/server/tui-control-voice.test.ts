@@ -302,8 +302,12 @@ const exported = {cookies:[{name:'oai-did',value:stage === 'auth-export' ? 'prof
   const requests: { url: string; cookie: string | null; signal: AbortSignal | null | undefined }[] = []
   // 记录原始 URL，额外 session 刷新或绕路请求不能被重定向偷偷掩盖。
   // fetch 返回只表示响应头可用，正文是否结束仍由生产解析阶段决定。
+  const transport = NetworkProxy.fetch
   const fetch = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
-    requests.push({ url: String(input), cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
+    const inputURL = input instanceof Request ? input.url : String(input)
+    // 只接管语音后端；其他服务延迟发出的网络请求不属于本次取消事务。
+    if (new URL(inputURL).origin !== "https://chatgpt.com") return transport(input, init)
+    requests.push({ url: inputURL, cookie: new Headers(init?.headers).get("cookie"), signal: init?.signal })
     const response = await globalThis.fetch(url, init)
     // 只发布响应头就绪，不预读正文，否则会把生产解析阶段的超时缺陷藏到 fixture 里。
     headers.resolve()

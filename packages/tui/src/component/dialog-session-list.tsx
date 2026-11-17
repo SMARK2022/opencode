@@ -400,7 +400,7 @@ export function DialogSessionList() {
 
   const [browseResults, { refetch: refetchBrowse }] = createResource(
     () => sync.session.query(),
-    (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query) }),
+    (filter) => loadDialogSessionList({ filter, list: (query) => sdk.client.session.list(query, { headers: { "x-opencode-tui-message-projection": "viewer" } }) }),
   )
   // #561：删除后重跑当前 query；必须走 startSearch，才能被 dispose/cleanup 约束
   // browse 侧由调用点 refetchBrowse 负责；此处只重建 search 代，避免双拉。
