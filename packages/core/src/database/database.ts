@@ -11,7 +11,6 @@ import { statSync } from "fs"
 import { DatabaseMigration } from "./migration"
 import { InstallationChannel } from "../installation/version"
 import { makeGlobalNode } from "../effect/app-node"
-import { DatabaseGate } from "./gate"
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type DatabaseShape = Effect.Success<typeof makeDatabase>
@@ -85,8 +84,6 @@ export function checkpoint(db: DatabaseShape) {
 // 同步事务复用 Effect 驱动的连接预约；不跨 await 持有连接，也不重复开启 Effect SQL 事务。
 export function withSync<A>(database: Interface, body: (sync: Sqlite.DrizzleClient) => A) {
   return Effect.scoped(Effect.gen(function* () {
-    const exit = yield* DatabaseGate.enter(database.filename ?? path())
-    yield* Effect.addFinalizer(() => exit)
     yield* database.db.$client.reserve
     return yield* Effect.sync(() => body(database.sync))
   })).pipe(Effect.orDie)

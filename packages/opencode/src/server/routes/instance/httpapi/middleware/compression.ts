@@ -1,6 +1,6 @@
 import { deflate, gzip } from "node:zlib"
 import { promisify } from "node:util"
-import { Effect } from "effect"
+import { Effect, Stream } from "effect"
 import { HttpBody, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 
 // Keep the server's compressible content-type set stable across HTTP backend changes.
@@ -9,7 +9,7 @@ const COMPRESSIBLE_CONTENT_TYPE_REGEX =
 
 const NO_TRANSFORM_REGEX = /(?:^|,)\s*?no-transform\s*?(?:,|$)/i
 
-const STREAMING_PATHS = new Set(["/event", "/global/event"])
+const STREAMING_PATHS = new Set(["/event", "/global/event", "/api/event"])
 const STREAMING_POST_REGEX = /^\/session\/[^/]+\/(?:message|prompt_async)$/
 
 const THRESHOLD_BYTES = 1024
@@ -38,11 +38,11 @@ export const compressionLayer = HttpRouter.middleware<{ handles: unknown }>()((e
 
     if (request.method === "HEAD") return response
     if (response.headers["content-encoding"]) return response
-    if (response.headers["transfer-encoding"]) return response
 
     const body = response.body
-    if (body._tag !== "Uint8Array") return response
-    if (body.body.byteLength < THRESHOLD_BYTES) return response
+    if (body._tag !== "Uint8Array" && body._tag !== "Stream") return response
+    if (body._tag === "Uint8Array" && response.headers["transfer-encoding"]) return response
+    if (body._tag === "Uint8Array" && body.body.byteLength < THRESHOLD_BYTES) return response
 
     const cacheControl = response.headers["cache-control"]
     if (cacheControl && NO_TRANSFORM_REGEX.test(cacheControl)) return response
@@ -57,14 +57,42 @@ export const compressionLayer = HttpRouter.middleware<{ handles: unknown }>()((e
     const encoding = pickEncoding(request.headers["accept-encoding"])
     if (!encoding) return response
 
+    const headers = {
+      ...Object.fromEntries(Object.entries(response.headers).filter(([key]) => key.toLowerCase() !== "content-length")),
+      "content-encoding": encoding,
+    }
+    if (body._tag === "Stream") {
+      // 保留当前请求的 Context/FiberRef；CompressionStream 在流上压缩，不把正文聚合成主线程大 Buffer。
+      const compressed = Stream.unwrap(
+        Effect.gen(function* () {
+          const readable = yield* Stream.toReadableStreamEffect(
+            Stream.map(body.stream, (chunk) =>
+              chunk.buffer instanceof ArrayBuffer
+                ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+                : new Uint8Array(chunk),
+            ),
+          )
+          return Stream.fromReadableStream({
+            evaluate: () => readable.pipeThrough(new CompressionStream(encoding)),
+            onError: (error) => error,
+          })
+        }),
+      )
+      return HttpServerResponse.stream(compressed, {
+        status: response.status,
+        statusText: response.statusText,
+        cookies: response.cookies,
+        contentType,
+        headers,
+      })
+    }
     // zlib 在线程池压缩大响应，主线程可以继续处理 health、SSE 和其他短请求。
     const compressed = yield* Effect.promise(() =>
       encoding === "gzip" ? gzipAsync(body.body) : deflateAsync(body.body),
     )
-    return HttpServerResponse.setHeader(
-      HttpServerResponse.setBody(response, HttpBody.uint8Array(compressed, contentType)),
-      "content-encoding",
-      encoding,
+    return response.pipe(
+      HttpServerResponse.setBody(HttpBody.uint8Array(compressed, contentType)),
+      HttpServerResponse.setHeader("content-encoding", encoding),
     )
   }),
 ).layer

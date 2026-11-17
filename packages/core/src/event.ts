@@ -151,11 +151,12 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Event") {}
 
-export const allBounded = (events: Interface, capacity: number) =>
+export const allBounded = (events: Interface, capacity: number, predicate?: (event: Payload) => boolean) =>
   Effect.gen(function* () {
     const queue = yield* Queue.dropping<Payload, SubscriberOverflowError>(capacity)
     const unsubscribe = yield* events.listen((event) =>
-      Queue.offer(queue, event).pipe(
+      // 目录/工作区过滤必须先于有界入队，其他工作区的突发不能掐断当前连接。
+      predicate && !predicate(event) ? Effect.void : Queue.offer(queue, event).pipe(
         Effect.flatMap((accepted) =>
           accepted ? Effect.void : Queue.fail(queue, new SubscriberOverflowError({ capacity })).pipe(Effect.asVoid),
         ),

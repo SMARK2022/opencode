@@ -1220,29 +1220,33 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
   return { messages, parts, missing: false as const }
 }
 
-export const pageBoundaries = Effect.fn("MessageV2.pageBoundaries")(function* (
-  sessionID: SessionID,
-  opts?: { includeHidden?: boolean; fromMessageID?: MessageID },
-) {
+export const historyAnchor = Effect.fn("MessageV2.historyAnchor")(function* (sessionID: SessionID) {
   const { db } = yield* Database.Service
-  const anchor = opts?.fromMessageID
-    ? yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
-        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, opts.fromMessageID))).get().pipe(Effect.orDie)
-    : undefined
-  const rows = yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+  return yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
+    .where(and(eq(MessageTable.session_id, sessionID), sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`))
+    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(1).get().pipe(Effect.orDie)
+})
+
+export const forwardPage = Effect.fn("MessageV2.forwardPage")(function* (input: {
+  sessionID: SessionID
+  limit: number
+  after?: Cursor
+  through: Cursor
+}) {
+  const { db, sync } = yield* Database.Service
+  const rows = yield* db.select().from(MessageTable)
     .where(and(
-      eq(MessageTable.session_id, sessionID),
-      opts?.fromMessageID ? anchor ? atOrNewer(anchor) : sql`0` : undefined,
-      opts?.includeHidden ? undefined : sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`,
+      eq(MessageTable.session_id, input.sessionID),
+      sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`,
+      input.after ? sql`(${MessageTable.time_created}, ${MessageTable.id}) > (${input.after.time}, ${input.after.id})` : undefined,
+      sql`(${MessageTable.time_created}, ${MessageTable.id}) <= (${input.through.time}, ${input.through.id})`,
     ))
-    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).all().pipe(Effect.orDie)
-  // 仅游标进入响应前的轻量快照；实际正文仍按这些边界逐页读取。
-  const boundaries = [undefined] as (string | undefined)[]
-  for (let index = 50; index < rows.length; index += 50) {
-    const tail = rows[index - 1]
-    if (tail) boundaries.push(cursor.encode({ id: tail.id, time: tail.time }))
-  }
-  return boundaries
+    .orderBy(MessageTable.time_created, MessageTable.id).limit(input.limit + 1).all().pipe(Effect.orDie)
+  const selected = rows.slice(0, input.limit)
+  // 实际读取尾行推进游标；复用原有短预约与冷读，不跨 Worker 等待持有事务。
+  const items = yield* hydrate(db, sync, selected)
+  const tail = selected.at(-1)
+  return { items, cursor: rows.length > input.limit && tail ? { id: tail.id, time: tail.time_created } : undefined }
 })
 
 // #98：stream 默认过滤 hidden；includeHidden 供审计/恢复读取

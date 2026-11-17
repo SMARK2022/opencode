@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { DateTime, Deferred, Effect, Layer, Queue, Schema, Stream } from "effect"
+import { DateTime, Deferred, Effect, Fiber, Layer, Queue, Schema, Stream } from "effect"
 import { Sse } from "effect/unstable/encoding"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -280,6 +280,40 @@ describe("event HttpApi", () => {
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
+
+  it.instance("filters other directories and workspaces before the bounded queue", () => Effect.gen(function* () {
+    const listeners = new Set<EventV2.Subscriber>()
+    const events = {
+      listen: (listener: EventV2.Subscriber) => Effect.sync(() => {
+        listeners.add(listener)
+        return Effect.sync(() => { listeners.delete(listener) })
+      }),
+    } as unknown as EventV2.Interface
+    // 容量刻意设为 1，让任何未过滤的异地事件都能立刻形成可观察溢出。
+    // predicate 同时覆盖 directory 与可选 workspace，未声明 workspace 的兼容事件仍可进入。
+    const input = yield* EventV2.allBounded(events, 1, event =>
+      event.location?.directory === "/current" &&
+      (event.location.workspaceID === undefined || event.location.workspaceID === "ws-current"),
+    )
+    const first = yield* Stream.runHead(input).pipe(Effect.forkScoped)
+    const publish = (id: string, directory: string, workspaceID?: string) => {
+      const event = { id: EventV2.ID.create(), type: "test", data: {}, location: { directory, workspaceID } } as EventV2.Payload
+      // listener 同步执行，排除了网络缓冲和消费者调度偶然吸收事件的干扰。
+      // 同步突发超过容量；过滤前入队会在这里直接失败，过滤后当前帧仍应正常到达。
+      for (const listener of listeners) Effect.runSync(listener(event))
+      return event.id
+    }
+    // 两类无关事件都远超原 256 容量，旧顺序会在当前帧发布前终止流。
+    // 同 directory 但不同 workspace 的事件也必须过滤，不能只修跨目录而遗漏工作区污染。
+    for (let index = 0; index < 256; index++) publish(`other-directory-${index}`, "/other")
+    for (let index = 0; index < 256; index++) publish(`other-workspace-${index}`, "/current", "ws-other")
+    // 当前帧最终到达证明既有容量和溢出策略不变，只把过滤移动到有界队列之前。
+    // 返回 ID 而非只断言流存活，确保实际交付的是本工作区事件而非其他占位帧。
+    const current = publish("current", "/current", "ws-current")
+    const result = yield* Fiber.join(first)
+    expect(result._tag).toBe("Some")
+    expect(result._tag === "Some" && result.value.id).toBe(current)
+  }))
 
   it.instance("terminates an overflowing slow client and reconnects through server.connected", () => Effect.gen(function* () {
     const { directory } = yield* TestInstance

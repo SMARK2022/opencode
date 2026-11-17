@@ -128,10 +128,11 @@ export class EffectSQLiteSession<TRelations extends AnyRelations> extends SQLite
             ? Effect.succeed([undefined, connectionOption.value[0]] as const)
             : Scope.make().pipe(
                 Effect.flatMap((scope) =>
-                  Scope.provide(this.client.reserve, scope).pipe(
+                  Scope.provide(restore(this.client.reserve), scope).pipe(
                     Effect.map((connection) => [scope, connection] as const),
-                    Effect.catch((error) =>
-                      Scope.close(scope, Exit.fail(error)).pipe(Effect.andThen(Effect.fail(error))),
+                    // 排队取消也属于非成功出口；统一关闭内部 Scope 才能释放 Gate 与连接许可。
+                    Effect.onExit((exit) =>
+                      Exit.isSuccess(exit) ? Effect.void : Scope.close(scope, exit),
                     ),
                   ),
                 ),

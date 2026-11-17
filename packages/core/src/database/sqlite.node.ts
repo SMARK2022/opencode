@@ -14,6 +14,7 @@ import type { Connection } from "effect/unstable/sql/SqlConnection"
 import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
 import * as Statement from "effect/unstable/sql/Statement"
 import { Sqlite } from "./sqlite"
+import { DatabaseGate } from "./gate"
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
 
@@ -113,21 +114,24 @@ const make = (options: Config) =>
     })
 
     const semaphore = yield* Semaphore.make(1)
-    const acquirer = semaphore.withPermits(1)(Effect.succeed(connection))
-    const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
+    // Node 与 Bun 共用同一预约顺序，持有期间不允许维护 Worker 或另一事务插入原生连接。
+    const acquirer = Effect.uninterruptibleMask((restore) => {
       const fiber = Fiber.getCurrent()!
       const scope = Context.getUnsafe(fiber.context, Scope.Scope)
-      return Effect.as(
-        Effect.tap(restore(semaphore.take(1)), () => Scope.addFinalizer(scope, semaphore.release(1))),
-        connection,
-      )
+      return Effect.gen(function* () {
+        const exit = yield* restore(DatabaseGate.enter(options.filename))
+        yield* Scope.addFinalizer(scope, exit)
+        yield* restore(semaphore.take(1))
+        yield* Scope.addFinalizer(scope, semaphore.release(1))
+        return connection
+      })
     })
 
     const client = Object.assign(
       (yield* Client.make({
         acquirer,
         compiler,
-        transactionAcquirer,
+        transactionAcquirer: acquirer,
         spanAttributes: [
           ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
           [ATTR_DB_SYSTEM_NAME, "sqlite"],
@@ -137,7 +141,7 @@ const make = (options: Config) =>
       {
         [TypeId]: TypeId,
         config: options,
-        loadExtension: (path: string) => Effect.flatMap(acquirer, (_) => _.loadExtension(path)),
+        loadExtension: (path: string) => Effect.scoped(Effect.flatMap(acquirer, (_) => _.loadExtension(path))),
       },
     )
 

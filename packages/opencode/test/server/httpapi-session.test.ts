@@ -637,7 +637,17 @@ describe("session HttpApi", () => {
           const message = yield* createTextMessage(session.id, text) // 第二大页提供真实序列化工作段，第三页用于观察 health 是否插队。
           ids.push(message.info.id)
         }
-        return { session, ids }
+        const service = yield* Session.Service
+        const extras: SessionV1.Part[] = [
+          { id: PartID.ascending(), sessionID: session.id, messageID: ids[0], type: "reasoning", text: "wire reasoning", time: { start: 1, end: 2 } },
+          { id: PartID.ascending(), sessionID: session.id, messageID: ids[0], type: "file", mime: "text/plain", filename: "a.txt", url: "file:///tmp/a.txt" },
+          { id: PartID.ascending(), sessionID: session.id, messageID: ids[0], type: "compaction", auto: false },
+          { id: PartID.ascending(), sessionID: session.id, messageID: ids[0], type: "tool", callID: "done", tool: "read", state: { status: "completed", input: {}, output: "ok", title: "done", metadata: {}, time: { start: 1, end: 2 } } },
+          { id: PartID.ascending(), sessionID: session.id, messageID: ids[0], type: "tool", callID: "failed", tool: "read", state: { status: "error", input: {}, error: "boom", time: { start: 1, end: 2 } } },
+        ]
+        // text 之外的 Part 也经过同一 WithParts wire 编码，覆盖完成与错误 Tool 状态。
+        for (const part of extras) yield* service.updatePart(part)
+        return { session, ids, extras }
       }).pipe(Effect.provide(services), provideInstanceEffect(test.directory))
       const app = Server.Default().app // 直接 HTTP handler 与种子共享 memoMap，避免真实网络 chunk 的自然调度掩盖页间让出。
       const response = yield* Effect.promise(() => Promise.resolve(app.request(pathFor(SessionPaths.messages, { sessionID: seeded.session.id }), { headers })))
@@ -645,6 +655,7 @@ describe("session HttpApi", () => {
       const messages = yield* Effect.promise(() => response.json() as Promise<SessionV1.WithParts[]>) // 完整客户端仍按普通 JSON 数组解析，不改变 SDK 合同。
       expect(messages.map((message) => message.info.id)).toEqual(seeded.ids) // 跨页反转必须恢复原始时间顺序且不重排任何消息。
       expect(messages[0]?.parts[0]).toMatchObject({ type: "text", text: "message-0" })
+      expect(messages[0]?.parts.slice(1)).toEqual(seeded.extras)
       expect(messages[50]?.parts[0]).toMatchObject({ type: "text", text: expect.stringContaining("message-50") })
       expect(messages[100]?.parts[0]).toMatchObject({ type: "text", text: "message-100" })
       const zero = yield* Effect.promise(() => Promise.resolve(app.request(`${pathFor(SessionPaths.messages, { sessionID: seeded.session.id })}?limit=0`, { headers })))
@@ -677,6 +688,62 @@ describe("session HttpApi", () => {
       }
       expect((yield* Effect.promise(() => health)).status).toBe(200)
       expect(healthBeforeSecondPage).toBe(true) // 删除 HTTP 页间让出后，第二页会先于并发 health 到达并使本断言变红。
+    }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "keeps a fixed forward boundary when messages arrive during streaming",
+    () => Effect.gen(function* () {
+      const test = yield* TestInstance
+      // 51 条初始消息强制形成两页，第二页只含锚点内的 message-50。
+      // 所有 ID 在请求前固定，最终断言能区分完整初始快照与运行中移动窗口。
+      const headers = { "x-opencode-directory": test.directory }
+      const scope = yield* Scope.Scope
+      const shared = HttpApiApp.createSharedServices()
+      const services = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, scope)
+      const seeded = yield* Effect.gen(function* () {
+        yield* Project.use.fromDirectory(test.directory)
+        const session = yield* createSession({ title: "forward boundary" })
+        const ids = [] as ReturnType<typeof MessageID.ascending>[]
+        for (let index = 0; index < 51; index++) {
+          const message = yield* createTextMessage(session.id, `message-${index}`)
+          ids.push(message.info.id)
+        }
+        return { session, ids }
+      }).pipe(Effect.provide(services), provideInstanceEffect(test.directory))
+      // 请求走真实无上限 HTTP 历史入口，覆盖正向流、WithParts 编码和连接生命周期。
+      // 这里不调用内部 page helper，避免绕过客户端实际接收的 JSON 边界。
+      const app = Server.Default().app
+      const response = yield* Effect.promise(() => Promise.resolve(app.request(pathFor(SessionPaths.messages, { sessionID: seeded.session.id }), { headers })))
+      if (!response.body) throw new Error("streamed response body required")
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let text = ""
+      // 按网络 chunk 持续消费，只有第一页正文已经发出后才允许并发追加。
+      // 这个时序能复现旧移动窗口漏掉初始尾部，而不是只在请求前准备全部数据。
+      let appended = false
+      while (true) {
+        const next = yield* Effect.promise(() => reader.read())
+        if (next.done) break
+        text += decoder.decode(next.value, { stream: true })
+        if (!appended && text.includes("message-0")) {
+          // 第一页已经输出后再追加；固定 through 不能挤掉第二页原有的 message-50。
+          // 5条晚到消息越过锚点，应由既有增量事件同步，不应在本次响应中回溯混入。
+          // 若实现重新查询最新页，新行会改变窗口位置并造成初始 ID 静默缺失。
+          for (let index = 0; index < 5; index++) {
+            yield* createTextMessage(seeded.session.id, `late-message-${index}`).pipe(Effect.provide(services), provideInstanceEffect(test.directory))
+          }
+          appended = true
+        }
+      }
+      text += decoder.decode()
+      expect(appended).toBe(true)
+      // JSON.parse 同时证明并发追加下响应仍合法闭合，没有以截断流代替一致性。
+      // 精确 ID 序列比单纯计数更严格，可识别重复、错位和错误的晚到消息。
+      const messages = JSON.parse(text) as SessionV1.WithParts[]
+      expect(messages.map(message => message.info.id)).toEqual(seeded.ids)
+      expect(messages).toHaveLength(51)
     }),
     { git: true, config: { formatter: false, lsp: false } },
   )

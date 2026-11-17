@@ -38,9 +38,15 @@ function settle(filename: string, state: State) {
     return
   }
   if (state.active.size > 0 || state.queued.length > 0 || state.reservations > 0) return
-  for (const resume of state.parents) resume() // 最后一个持有项释放后统一唤醒父侧等待队列。
-  state.parents.clear()
-  if (state.reservations === 0) states.delete(keyOf(filename))
+  // 同步完成的父请求会嵌套 settle；先消费回调再唤醒，避免同一等待者被重复登记。
+  for (const resume of [...state.parents]) {
+    if (!state.parents.delete(resume)) continue
+    resume()
+  }
+  // 旧 settle 栈帧只能清理自己这一代，不能删除唤醒期间创建的新状态。
+  if (state.active.size === 0 && state.queued.length === 0 && state.parents.size === 0 && state.reservations === 0 && states.get(keyOf(filename)) === state) {
+    states.delete(keyOf(filename))
+  }
 }
 
 export function hold(filename: string, supervisor: string, signal?: AbortSignal): Promise<string> {
@@ -105,17 +111,4 @@ export function releaseSupervisor(filename: string, supervisor: string) {
   state.queued = state.queued.filter((request) => request.supervisor !== supervisor)
   for (const request of queued) request.reject(new Error("Database gate supervisor exited")) // 未确认请求收到失败，避免 Worker 退出后留下悬空 Promise。
   settle(filename, state)
-}
-
-export function wait(filename: string): Effect.Effect<void> {
-  return Effect.callback<void>((resume) => {
-    const state = stateOf(filename)
-    if (state.active.size === 0 && state.queued.length === 0) {
-      if (state.reservations === 0) states.delete(keyOf(filename))
-      return resume(Effect.void)
-    }
-    const ready = () => resume(Effect.void)
-    state.parents.add(ready)
-    return Effect.sync(() => { state.parents.delete(ready) })
-  })
 }

@@ -58,6 +58,7 @@ import * as SessionError from "./session-errors"
 // literal 与 TUI producer 由双端行为测试锁定，避免为四行常量占用用户限定之外的第五个生产文件。
 const TUI_VIEWER_HEADER = "x-opencode-tui-message-projection"
 const TUI_VIEWER = "viewer"
+const encodeMessages = Schema.encodeSync(Schema.Array(SessionV1.WithParts))
 
 const tryParseJson = (text: string) =>
   Effect.try({
@@ -206,25 +207,22 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
       }
       if (ctx.query.limit === undefined) {
-        const boundaries = yield* MessageV2.pageBoundaries(ctx.params.sessionID)
-        let first = true
-        const pages = Stream.fromIterable(boundaries.reverse()).pipe(
-          Stream.mapEffect((before, index) => Effect.gen(function* () {
-            if (index > 0) yield* Effect.promise(() => Bun.sleep(0))
-            return yield* MessageV2.page({ sessionID: ctx.params.sessionID, limit: 50, before }).pipe(
-              Effect.provideService(Database.Service, database),
-              Effect.orDie,
+        const through = yield* MessageV2.historyAnchor(ctx.params.sessionID)
+        const pages = through
+          ? Stream.paginate(
+              undefined as { id: MessageID; time: number } | undefined,
+              (after) => Effect.gen(function* () {
+                if (after) yield* Effect.promise(() => Bun.sleep(0))
+                const page = yield* MessageV2.forwardPage({ sessionID: ctx.params.sessionID, limit: 50, after, through }).pipe(
+                  Effect.provideService(Database.Service, database),
+                  Effect.orDie,
+                )
+                const content = JSON.stringify(encodeMessages(page.items)).slice(1, -1)
+                const prefix = after && content ? "," : ""
+                return [[prefix + content], page.cursor ? Option.some(page.cursor) : Option.none()] as const
+              }),
             )
-          })),
-          Stream.map((page) => {
-            const content = JSON.stringify(page.items).slice(1, -1)
-            if (!content) return ""
-            const prefix = first ? "" : ","
-            first = false
-            return prefix + content
-          }),
-          Stream.filter((content) => content.length > 0),
-        )
+          : Stream.empty
         return HttpServerResponse.stream(
           Stream.make("[").pipe(Stream.concat(pages), Stream.concat(Stream.make("]")), Stream.encodeText),
           { contentType: "application/json" },

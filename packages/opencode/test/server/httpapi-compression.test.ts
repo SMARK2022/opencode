@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { gunzipSync, inflateSync } from "node:zlib"
 import { randomBytes } from "node:crypto"
-import { Effect, Layer } from "effect"
-import { HttpBody, HttpRouter, HttpServer, HttpServerResponse } from "effect/unstable/http"
+import { Effect, Layer, Stream } from "effect"
+import { HttpBody, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { Server } from "../../src/server/server"
 import { compressionLayer } from "../../src/server/routes/instance/httpapi/middleware/compression"
 import { resetDatabase } from "../fixture/db"
@@ -51,17 +51,21 @@ describe("HttpApi compression", () => {
     test("lets the event loop run while compressing a high-entropy body", async () => {
       let heartbeat = false // 定时器在 contentType 读取点排入，直接观察压缩是否让出主线程。
       const { handler, dispose } = HttpRouter.toWebHandler(
-        HttpRouter.use((router) => router.add("GET", "/", () => {
-          const body = HttpBody.uint8Array(randomBytes(4_000_000), "application/json") // 高熵正文避免高压缩率样本掩盖同步 zlib 停顿。
-          // contentType 紧邻压缩执行；此时排入定時器才能准确观察压缩是否让出主线程。
-          Object.defineProperty(body, "contentType", {
-            get() {
-              setTimeout(() => { heartbeat = true }, 0)
-              return "application/json"
-            },
-          })
-          return Effect.succeed(HttpServerResponse.setBody(HttpServerResponse.empty(), body))
-        })).pipe(Layer.provide(compressionLayer), Layer.provide(HttpServer.layerServices)),
+        HttpRouter.use((router) =>
+          router.add("GET", "/", () => {
+            const body = HttpBody.uint8Array(randomBytes(4_000_000), "application/json") // 高熵正文避免高压缩率样本掩盖同步 zlib 停顿。
+            // contentType 紧邻压缩执行；此时排入定時器才能准确观察压缩是否让出主线程。
+            Object.defineProperty(body, "contentType", {
+              get() {
+                setTimeout(() => {
+                  heartbeat = true
+                }, 0)
+                return "application/json"
+              },
+            })
+            return Effect.succeed(HttpServerResponse.setBody(HttpServerResponse.empty(), body))
+          }),
+        ).pipe(Layer.provide(compressionLayer), Layer.provide(HttpServer.layerServices)),
         { disableLogger: true },
       )
       try {
@@ -105,6 +109,93 @@ describe("HttpApi compression", () => {
       // Either absent (transfer-encoding chunked) or matches the compressed length.
       if (declared !== null) expect(Number(declared)).toBe(compressed.byteLength)
     })
+  })
+
+  test("compresses Effect streams as gzip and deflate without losing content or metadata", async () => {
+    const suffix = "context-ok"
+    const payload = randomBytes(16_000_000)
+    const { handler, dispose } = HttpRouter.toWebHandler(
+      HttpRouter.use((router) =>
+        router.add("GET", "/", () =>
+          // HttpServerResponse.stream 要求 R=never；请求派生内容在响应构造边界读取。
+          Effect.map(HttpServerRequest.HttpServerRequest, (request) =>
+            HttpServerResponse.stream(
+              Stream.concat(
+                Stream.make(payload),
+                Stream.make(new TextEncoder().encode(request.headers["x-stream-context"])),
+              ),
+              {
+                status: 207,
+                statusText: "stream",
+                contentType: "application/json",
+                headers: { "content-length": "1", "x-stream-test": "preserved" },
+              },
+            ),
+          ),
+        ),
+      ).pipe(Layer.provide(compressionLayer), Layer.provide(HttpServer.layerServices)),
+      { disableLogger: true },
+    )
+    try {
+      for (const encoding of ["gzip", "deflate"] as const) {
+        let previous = performance.now()
+        let maxGap = 0
+        const timer = setInterval(() => {
+          const now = performance.now()
+          maxGap = Math.max(maxGap, now - previous)
+          previous = now
+        }, 5)
+        try {
+          // 在请求与正文消费全程测最大空窗，不能用提前触发的一次timer证明压缩可让出。
+          await Bun.sleep(10)
+          const response = await handler(
+            new Request("http://localhost/", { headers: { "accept-encoding": encoding, "x-stream-context": suffix } }),
+          )
+          expect(response.status).toBe(207)
+          expect(response.statusText).toBe("stream")
+          expect(response.headers.get("x-stream-test")).toBe("preserved")
+          expect(response.headers.get("content-encoding")).toBe(encoding)
+          expect(response.headers.get("content-length")).not.toBe("1")
+          const bytes = new Uint8Array(await response.arrayBuffer())
+          await Bun.sleep(10)
+          expect(maxGap).toBeLessThan(250)
+          const decoded = encoding === "gzip" ? gunzipSync(bytes) : inflateSync(bytes)
+          expect(decoded.subarray(0, payload.length).equals(payload)).toBe(true)
+          expect(decoded.subarray(payload.length).toString()).toBe(suffix)
+        } finally {
+          clearInterval(timer)
+        }
+      }
+    } finally {
+      await dispose()
+    }
+  }, 20_000)
+
+  test("keeps /api/event streams uncompressed even with a compressible MIME", async () => {
+    // /api/event 即使声明 application/json 也承载实时事件，路径排除必须先于 Stream 压缩。
+    // 只检查 text/event-stream 不足以覆盖该端点，压缩滑动窗口会改变事件到达时机。
+    // 明文 event 正文同时证明响应没有经过“先压缩再绕回”的替代路径。
+    const { handler, dispose } = HttpRouter.toWebHandler(
+      HttpRouter.use((router) =>
+        router.add("GET", "/api/event", () =>
+          Effect.succeed(
+            HttpServerResponse.stream(Stream.make(new TextEncoder().encode("event")), {
+              contentType: "application/json",
+            }),
+          ),
+        ),
+      ).pipe(Layer.provide(compressionLayer), Layer.provide(HttpServer.layerServices)),
+      { disableLogger: true },
+    )
+    try {
+      const response = await handler(
+        new Request("http://localhost/api/event", { headers: { "accept-encoding": "gzip" } }),
+      )
+      expect(response.headers.get("content-encoding")).toBeNull()
+      expect(await response.text()).toBe("event")
+    } finally {
+      await dispose()
+    }
   })
 
   describe("skips", () => {

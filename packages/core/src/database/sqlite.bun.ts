@@ -54,8 +54,8 @@ const make = (options: Config) =>
       ? Statement.defaultTransforms(options.transformResultNames).array
       : undefined
 
-    const run = (query: string, params: ReadonlyArray<unknown> = [], admit = true) => {
-      const execute = Effect.withFiber<Array<Record<string, unknown>>, SqlError>((fiber) => {
+    const run = (query: string, params: ReadonlyArray<unknown> = []) => {
+      return Effect.withFiber<Array<Record<string, unknown>>, SqlError>((fiber) => {
         const statement = native.query(query)
         // @ts-ignore bun-types missing safeIntegers method, fixed in https://github.com/oven-sh/bun/pull/26627
         statement.safeIntegers(Context.get(fiber.context, Client.SafeIntegers))
@@ -69,11 +69,10 @@ const make = (options: Config) =>
           )
         }
       })
-      return admit ? Effect.andThen(DatabaseGate.wait(options.filename), execute) : execute
     }
 
-    const runValues = (query: string, params: ReadonlyArray<unknown> = [], admit = true) => {
-      const execute = Effect.withFiber<Array<unknown[]>, SqlError>((fiber) => {
+    const runValues = (query: string, params: ReadonlyArray<unknown> = []) => {
+      return Effect.withFiber<Array<unknown[]>, SqlError>((fiber) => {
         const statement = native.query(query)
         // @ts-ignore bun-types missing safeIntegers method, fixed in https://github.com/oven-sh/bun/pull/26627
         statement.safeIntegers(Context.get(fiber.context, Client.SafeIntegers))
@@ -87,18 +86,17 @@ const make = (options: Config) =>
           )
         }
       })
-      return admit ? Effect.andThen(DatabaseGate.wait(options.filename), execute) : execute
     }
 
-    const makeConnection = (admit: boolean) => identity<SqliteConnection>({
+    const connection = identity<SqliteConnection>({
       execute(query, params, transformRows) {
-        return transformRows ? Effect.map(run(query, params, admit), transformRows) : run(query, params, admit)
+        return transformRows ? Effect.map(run(query, params), transformRows) : run(query, params)
       },
       executeRaw(query, params) {
-        return run(query, params, admit)
+        return run(query, params)
       },
       executeValues(query, params) {
-        return runValues(query, params, admit)
+        return runValues(query, params)
       },
       executeUnprepared(query, params, transformRows) {
         return this.execute(query, params, transformRows)
@@ -122,13 +120,10 @@ const make = (options: Config) =>
             }),
         }),
     })
-    const connection = makeConnection(true)
-    // 事务预约时已持有父侧许可，内部语句不能再次等待 Worker hold 形成交叉等待。
-    const transactionConnection = makeConnection(false)
 
     const semaphore = yield* Semaphore.make(1)
-    const acquirer = semaphore.withPermits(1)(Effect.succeed(connection))
-    const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
+    // 普通语句与事务都在同一许可内完成 Gate、连接互斥和原生执行，不能先释放信号量再等门禁。
+    const acquirer = Effect.uninterruptibleMask((restore) => {
       const fiber = Fiber.getCurrent()!
       const scope = Context.getUnsafe(fiber.context, Scope.Scope)
       return Effect.gen(function* () {
@@ -136,7 +131,7 @@ const make = (options: Config) =>
         yield* Scope.addFinalizer(scope, exit)
         yield* restore(semaphore.take(1))
         yield* Scope.addFinalizer(scope, semaphore.release(1))
-        return transactionConnection
+        return connection
       })
     })
 
@@ -144,7 +139,7 @@ const make = (options: Config) =>
       (yield* Client.make({
         acquirer,
         compiler,
-        transactionAcquirer,
+        transactionAcquirer: acquirer,
         spanAttributes: [
           ...(options.spanAttributes ? Object.entries(options.spanAttributes) : []),
           [ATTR_DB_SYSTEM_NAME, "sqlite"],
@@ -154,8 +149,8 @@ const make = (options: Config) =>
       {
         [TypeId]: TypeId,
         config: options,
-        export: Effect.flatMap(acquirer, (_) => _.export),
-        loadExtension: (path: string) => Effect.flatMap(acquirer, (_) => _.loadExtension(path)),
+        export: Effect.scoped(Effect.flatMap(acquirer, (_) => _.export)),
+        loadExtension: (path: string) => Effect.scoped(Effect.flatMap(acquirer, (_) => _.loadExtension(path))),
       },
     )
 

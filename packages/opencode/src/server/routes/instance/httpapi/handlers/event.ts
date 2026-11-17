@@ -37,13 +37,11 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
     // 注册先于 server.connected，容量溢出会失败当前响应并触发客户端重连刷新。
-    const input = yield* EventV2.allBounded(events, CLIENT_EVENT_CAPACITY)
+    const input = yield* EventV2.allBounded(events, CLIENT_EVENT_CAPACITY, event =>
+      event.location?.directory === instance.directory &&
+      (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
+    )
     const stream = input.pipe(
-      Stream.filter(
-        (event) =>
-          event.location?.directory === instance.directory &&
-          (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
-      ),
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data, source: event })),
     )
     const compatibility = yield* Queue.dropping<{ id: string; type: string; properties: unknown }, EventV2.SubscriberOverflowError>(CLIENT_EVENT_CAPACITY)

@@ -6,7 +6,7 @@ import { expect, test } from "bun:test"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { eq, sql } from "drizzle-orm"
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core"
-import { Effect } from "effect"
+import { Deferred, Effect, Fiber } from "effect"
 import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
 import { isSqlError } from "effect/unstable/sql/SqlError"
 import { EffectDrizzleSqlite } from "../src"
@@ -128,6 +128,39 @@ test("preserves failed transaction begin errors", async () => {
     holder.close()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test("interrupts queued transaction acquisition and releases its reservation", async () => {
+  await run(
+    Effect.gen(function* () {
+      const db = yield* makeDb
+      // 包装真实 reserve 而不是替换连接实现，事务仍经过生产 acquisition/finalizer。
+      // Deferred 只在许可确实取得后发布，确保后续取消落在排队区间。
+      const reserve = db.$client.reserve
+      const acquired = yield* Deferred.make<void>()
+      const entered = yield* Deferred.make<void>()
+      // 真实连接已取得后再排队，能同时检验取消与内部 Scope 的连接释放。
+      Object.assign(db.$client, { reserve: Effect.gen(function* () {
+        const connection = yield* reserve
+        yield* Deferred.succeed(acquired, undefined)
+        yield* Deferred.await(entered)
+        return connection
+      }) })
+      // 阻塞 reserve 使事务停在 body 之前；executed 可直接识别取消后多执行一步的回归。
+      // 这里不需要 Core Gate，generic adapter 的取消与 Scope 合同必须独立成立。
+      let executed = false
+      const pending = yield* db.transaction(() => Effect.sync(() => { executed = true })).pipe(Effect.forkChild)
+      yield* Deferred.await(acquired)
+      // 中断后恢复原 reserve，后续事务才能区分“许可已释放”与“永久占用”两种结果。
+      // acquisition 的失败出口必须关闭内部 Scope，成功路径仍沿用原事务收尾。
+      yield* Fiber.interrupt(pending)
+      Object.assign(db.$client, { reserve })
+      expect(executed).toBe(false)
+      // 新事务成功插入并可见，证明排队取消没有遗留连接占用，也没有执行被取消的 body。
+      yield* db.transaction((tx) => tx.insert(users).values({ name: "After cancellation" }))
+      expect(yield* db.select().from(users)).toEqual([{ id: 1, name: "After cancellation" }])
+    }),
+  )
 })
 
 test("supports returning and rejects empty update sets", async () => {
