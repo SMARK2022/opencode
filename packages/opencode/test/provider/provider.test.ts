@@ -2672,3 +2672,64 @@ it.effect("opencode loader keeps paid models when auth exists", () =>
     expect(keyedCount).toBeGreaterThan(0)
   }).pipe(provideMultiInstance),
 )
+
+it.instance("provider request byte accounting preserves UTF8 content and stream completion", () => Effect.gen(function* () {
+  const instance = yield* TestInstance
+  const logfile = path.join(instance.directory, "request-bytes.log")
+  let sent = ""
+  // 只替换网络出口，SDK序列化、请求包装和日志计量均沿真实公开路径执行。
+  const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (_url, init) => {
+    sent = String(init?.body)
+    return new Response(
+      'data: {"id":"bytes","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"reply"},"finish_reason":null}]}\n\ndata: [DONE]\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    )
+  })
+  yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
+  yield* Effect.gen(function* () {
+    const provider = yield* Provider.Service
+    const model = yield* provider.getModel(ProviderV2.ID.make("request-bytes"), ModelV2.ID.make("test-model"))
+    const language = yield* provider.getLanguage(model)
+    // 同一输入同时覆盖多字节编码、引号转义和孤立代理项的原生JSON转义。
+    const prompt = '中文😀 "quoted"\\slash\nline\t tab \ud800'
+    const result = yield* Effect.promise(() => language.doStream({
+      prompt: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+    }))
+    const reader = result.stream.getReader()
+    // 真实EOF关闭日志断言窗口；只读到首段会遗漏响应包装的收尾行为。
+    for (;;) {
+      if ((yield* Effect.promise(() => reader.read())).done) break
+    }
+    expect(JSON.parse(sent).messages[0].content).toBe(prompt)
+    let log = ""
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      log = yield* Effect.promise(() => Bun.file(logfile).text())
+      if (log.includes("sse.end")) break
+      yield* Effect.sleep("25 millis")
+    }
+    expect(log).toContain("sse.end")
+    const line = log.split("\n").find((line) => line.includes("fetch.start") && line.includes("bodyBytes="))
+    // 先证明实际日志存在，防止空值转换成数字后让长度断言失去判别力。
+    expect(line).toBeDefined()
+    const observed = Number(line?.match(/bodyBytes=(\d+)/)?.[1])
+    // 独立编码oracle核对真实wire字节数，避免复用生产的无分配长度算法。
+    expect(observed).toBe(new TextEncoder().encode(sent).byteLength)
+  }).pipe(
+    // 必须在getLanguage捕获bridge前安装logger，验证本次请求的日志环境。
+    Effect.provide(Logger.layer([Logging.fileLogger(logfile)]).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie)),
+    Effect.scoped,
+  )
+}), {
+  config: {
+    enabled_providers: ["request-bytes"],
+    provider: {
+      "request-bytes": {
+        npm: "@ai-sdk/openai-compatible",
+        models: { "test-model": { name: "Test" } },
+        // 该地址不提供服务；任何漏过网络mock的调用都会使测试失败。
+        options: { apiKey: "test-key", baseURL: "http://127.0.0.1:9/v1" },
+      },
+    },
+  },
+})
