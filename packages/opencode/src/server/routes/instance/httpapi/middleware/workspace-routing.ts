@@ -220,8 +220,9 @@ function routeHttpApiWorkspace<E>(
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     const sessionID = getWorkspaceRouteSessionID(requestURL(request))
+    // 路由只根据持久化的工作区和目录分流，不能让每个会话请求先为用量统计扫描一遍历史。
     const session = sessionID
-      ? yield* Session.Service.use((svc) => svc.get(sessionID)).pipe(
+      ? yield* Session.Service.use((svc) => svc.get(sessionID, { request: false })).pipe(
           Effect.catchIf(
             (error): error is NotFoundError => NotFoundError.isInstance(error),
             () => Effect.succeed(undefined),

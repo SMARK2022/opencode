@@ -44,7 +44,8 @@ import { isMedia } from "@/util/media"
 import { ensureTaskResumeVisible, formatCompactionClearedNotice, formatExecutionNotice, truncateForCompaction } from "@/util/output-notice"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
-import { Effect, Schema } from "effect"
+import { Context, Effect, Layer, Pool, Schema } from "effect"
+import { parentPort, Worker, workerData } from "node:worker_threads"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -364,7 +365,9 @@ const SNAPSHOT_DUP_COST = 50
 
 export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function* (sessionID: SessionID) {
   const database = yield* Database.Service
-  return yield* Database.withSync(database, (db) => {
+  // 授权原文、问答和历史裁决必须来自同一读快照，避免并发撤回时拼出两个时刻的证据。
+  return yield* database.db.transaction(() => Effect.sync(() => {
+    const db = database.sync
     // 子会话Text已可冷冻，全文授权和首条豁免都从同一只读恢复边界取得原文。
     const readTexts = (rows: (typeof PartTable.$inferSelect)[]) =>
       ColdStorage.inspectPartRows(db, rows).flatMap(row => {
@@ -408,10 +411,8 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
     const qa = readTools(qaRows.slice(0, SNAPSHOT_QA_LIMIT).map(row => row.row))
 
     const decisionRows: ReviewerEvidenceTool[] = []
-    let decisionBefore: { id: PartID; time: number } | undefined
-    // 冷态metadata不在SQL热投影中，分批inspect候选并在真实决定达到配额后停止。
-    while (decisionRows.length <= SNAPSHOT_DECISION_LIMIT) {
-      const rows = db.select({ row: PartTable }).from(PartTable)
+    // 只排序轻量 ID 一次；候选正文按主键分批取，够 60 条真实决定就停止解包。
+    const candidates = db.select({ id: PartTable.id }).from(PartTable)
         .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
         .where(and(eq(PartTable.session_id, sessionID),
           sql`json_extract(${PartTable.data}, '$.type') = 'tool'`,
@@ -419,16 +420,13 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
           or(sql`${PartTable.cold_ref} is not null`,
             sql`json_extract(${PartTable.data}, '$.state.metadata.autoReview.status') in ('allowed', 'denied', 'fallback_user')`,
             sql`json_extract(${PartTable.data}, '$.state.error') like 'The user rejected permission%'`),
-          decisionBefore ? or(lt(PartTable.time_created, decisionBefore.time),
-            and(eq(PartTable.time_created, decisionBefore.time), lt(PartTable.id, decisionBefore.id))) : undefined,
-        )).orderBy(desc(PartTable.time_created), desc(PartTable.id)).limit(64).all()
-      if (!rows.length) break
-      decisionRows.push(...readTools(rows.map(row => row.row)).filter(row =>
+        )).orderBy(desc(PartTable.time_created), desc(PartTable.id)).all()
+    for (let start = 0; start < candidates.length && decisionRows.length <= SNAPSHOT_DECISION_LIMIT; start += 128) {
+      const rows = db.select().from(PartTable).where(inArray(PartTable.id, candidates.slice(start, start + 128).map(row => row.id)))
+        .orderBy(desc(PartTable.time_created), desc(PartTable.id)).all()
+      decisionRows.push(...readTools(rows).filter(row =>
         ["allowed", "denied"].includes(row.autoReviewStatus ?? "") || row.autoReviewStatus === "fallback_user" && row.stateStatus === "completed" || row.error?.startsWith("The user rejected permission"))
         .slice(0, SNAPSHOT_DECISION_LIMIT + 1 - decisionRows.length))
-      const last = rows.at(-1)?.row
-      if (!last || rows.length < 64) break
-      decisionBefore = { id: last.id, time: last.time_created }
     }
     const decisionsOmitted = decisionRows.length > SNAPSHOT_DECISION_LIMIT
     const decisions = decisionRows.slice(0, SNAPSHOT_DECISION_LIMIT).reverse()
@@ -539,8 +537,66 @@ export const reviewerEvidence = Effect.fn("MessageV2.reviewerEvidence")(function
     // synthetic 不排除：GOAL continuation 块是 synthetic user 文本，恰是快照要保留
     // 的授权载体（去重规则在投影层折叠其重复）。空文本无证据价值，在组装时过滤。
     return { user: selected, userOmitted: userOmitted || qaOmitted, tools, decisionsOmitted }
-  })
+  }), { behavior: "deferred" }).pipe(Effect.orDie)
 })
+
+declare const OPENCODE_EVIDENCE_WORKER_PATH: string | undefined
+type EvidenceReply = { evidence: ReviewerEvidence } | { error: string }
+const evidenceRole = "opencode-session-evidence"
+
+// 同一份查询负责热行、冷包和截断规则；线程只接收会话 ID，返回最终证据。
+if (parentPort && workerData?.role === evidenceRole) {
+  const port = parentPort
+  port.on("message", (id: SessionID) => {
+    Effect.runPromise(reviewerEvidence(id).pipe(Effect.provide(Database.layerFromPath(workerData.filename, { readonly: true })))).then(
+      evidence => port.postMessage({ evidence } satisfies EvidenceReply),
+      cause => port.postMessage({ error: errorMessage(cause) } satisfies EvidenceReply),
+    )
+  })
+}
+
+export class EvidenceReader extends Context.Service<EvidenceReader, (id: SessionID) => Effect.Effect<ReviewerEvidence>>()("@opencode/SessionEvidenceReader") {}
+
+export const evidenceReaderLayer = Layer.effect(EvidenceReader, Effect.gen(function* () {
+  const database = yield* Database.Service
+  const local = (id: SessionID) => reviewerEvidence(id).pipe(Effect.provideService(Database.Service, database))
+  const filename = database.filename
+  if (!filename || filename === ":memory:") return local
+  // 每个线程一次只接一份取证以免应答串线；并发上限为二，空闲三十秒后释放线程堆。
+  const pool = yield* Pool.makeWithTTL({
+    min: 0, max: 2, concurrency: 1, timeToLive: "30 seconds",
+    acquire: Effect.acquireRelease(Effect.sync((): { worker?: Worker } => ({})),
+      slot => slot.worker ? Effect.promise(() => slot.worker!.terminate()) : Effect.void),
+  })
+  return (id: SessionID) => Effect.scoped(Effect.gen(function* () {
+    // 已有事务看自己的未提交状态，不把同一事务的读取派给第二条连接。
+    if ((yield* Effect.serviceOption(database.db.$client.transactionService))._tag === "Some") return yield* local(id)
+    const slot = yield* Pool.get(pool)
+    if (!slot.worker) {
+      const entry = typeof OPENCODE_EVIDENCE_WORKER_PATH !== "undefined" ? OPENCODE_EVIDENCE_WORKER_PATH : new URL("./message-v2.ts", import.meta.url)
+      const thread = new Worker(entry, { workerData: { role: evidenceRole, filename } })
+      slot.worker = thread
+      const retire = () => { if (slot.worker === thread) slot.worker = undefined }
+      thread.once("exit", retire).on("error", retire)
+    }
+    const thread = slot.worker
+    return yield* Effect.callback<ReviewerEvidence>(resume => {
+      const clear = () => { thread.off("message", message).off("messageerror", fail).off("error", fail).off("exit", exit) }
+      const fail = (cause: Error) => { clear(); resume(Effect.die(cause)) }
+      const exit = (code: number) => fail(new Error(`Evidence worker exited (${code})`))
+      const message = (reply: EvidenceReply) => {
+        clear()
+        resume("evidence" in reply ? Effect.succeed(reply.evidence) : Effect.die(new Error(reply.error)))
+      }
+      thread.once("message", message).once("messageerror", fail).once("error", fail).once("exit", exit)
+      try { thread.postMessage(id) } catch (cause) { fail(new Error("Evidence dispatch failed", { cause })) }
+      return Effect.sync(clear)
+    }).pipe(
+      // 中断的读取不能将迟到的结果交给下一个请求；归还前先淘汰整个槽位。
+      Effect.onExit(result => result._tag === "Failure" ? Pool.invalidate(pool, slot) : Effect.void),
+    )
+  }))
+}))
 
 // #0500：cancel ownership 只依赖 Message parent/time hot fields。Parts 由 caller 仅为选中的 incomplete assistant
 // 定点 hydrate，已完成 assistant 的冷 Tool history 不会因一次取消操作被扫描并预热。
@@ -1220,11 +1276,20 @@ export function rawForkRows(db: ColdStorage.TxOrDb, input: { sessionID: SessionI
   return { messages, parts, missing: false as const }
 }
 
-export const historyAnchor = Effect.fn("MessageV2.historyAnchor")(function* (sessionID: SessionID) {
+export const historyAnchor = Effect.fn("MessageV2.historyAnchor")(function* (sessionID: SessionID, fromPartTurn?: PartID) {
   const { db } = yield* Database.Service
-  return yield* db.select({ id: MessageTable.id, time: MessageTable.time_created }).from(MessageTable)
-    .where(and(eq(MessageTable.session_id, sessionID), sql`json_extract(${MessageTable.data}, '$.hidden') IS NULL`))
+  const cursor = { id: MessageTable.id, time: MessageTable.time_created }
+  const owner = fromPartTurn ? yield* db.select(cursor).from(PartTable)
+    .innerJoin(MessageTable, eq(MessageTable.id, PartTable.message_id))
+    .where(and(eq(PartTable.id, fromPartTurn), eq(PartTable.session_id, sessionID), eq(MessageTable.session_id, sessionID),
+      sql`json_extract(${PartTable.data}, '$.hidden') is null`, sql`json_extract(${MessageTable.data}, '$.hidden') is null`)).get().pipe(Effect.orDie) : undefined
+  if (fromPartTurn && !owner) return
+  // 同毫秒的消息按 ID 定序，回溯用户回合时不能把目标分片之后的用户消息当作起点。
+  const anchor = yield* db.select(cursor).from(MessageTable)
+    .where(and(eq(MessageTable.session_id, sessionID), sql`json_extract(${MessageTable.data}, '$.hidden') is null`,
+      owner && sql`(${MessageTable.time_created}, ${MessageTable.id}) <= (${owner.time}, ${owner.id}) and json_extract(${MessageTable.data}, '$.role') = 'user'`))
     .orderBy(desc(MessageTable.time_created), desc(MessageTable.id)).limit(1).get().pipe(Effect.orDie)
+  return anchor ?? owner
 })
 
 export const forwardPage = Effect.fn("MessageV2.forwardPage")(function* (input: {
@@ -1709,11 +1774,15 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
     list.push([row.id, row.timeCreated, row.timeUpdated, row.data, row.coldRef, row.coldKey, row.coldStats])
     parts.set(row.messageID, list)
   }
-  return {
-    // boundary 单独比较，row prefix 相同也不能跨 summary/tail 重排复用。
-    boundary: JSON.stringify(boundary ?? null),
-    // key 保存完整 tuple 而非 hash，避免 collision 成为错误 admission。
-    messages: messageRows.map((row) => ({
+  const messages: PromptWindowProof["messages"] = []
+  // 在两条消息之间检查八毫秒的时间预算；短窗口无需等待，长窗口让出主线程时保留原校验键和顺序。
+  let nextYield = performance.now() + 8
+  for (const row of messageRows) {
+    if (performance.now() >= nextYield) {
+      yield* Effect.promise(() => Bun.sleep(0))
+      nextYield = performance.now() + 8
+    }
+    messages.push({
       id: row.id,
       // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
       key: encodeProofKey(JSON.stringify([
@@ -1725,8 +1794,9 @@ export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(functi
         row.coldKey,
         parts.get(row.id) ?? [],
       ])),
-    })),
+    })
   }
+  return { boundary: JSON.stringify(boundary ?? null), messages }
 })
 
 // #557：首个 mismatch 必须 inclusive hydrate，同一 Assistant 新增 Part 才会替换旧版本；

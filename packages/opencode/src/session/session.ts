@@ -397,7 +397,7 @@ export interface Interface {
   }) => Effect.Effect<Info>
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
-  readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
+  readonly get: (id: SessionID, options?: { request?: boolean }) => Effect.Effect<Info, NotFound>
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
   readonly setArchived: (input: { sessionID: SessionID; time?: number }) => Effect.Effect<void>
   readonly setMetadata: (input: typeof SetMetadataInput.Type) => Effect.Effect<void>
@@ -419,7 +419,7 @@ export interface Interface {
   readonly setWorkspace: (input: { sessionID: SessionID; workspaceID: Info["workspaceID"] }) => Effect.Effect<void>
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   // fromMessageID：尾部裁剪读取（0393 revert messages 裁剪优化）
-  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; includeHidden?: boolean }) => Effect.Effect<SessionV1.WithParts[], NotFound>
+  readonly messages: (input: { sessionID: SessionID; limit?: number; fromMessageID?: MessageID; fromPartTurn?: PartID; includeHidden?: boolean }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   // active 只由取消路径提供；普通列表仍返回全部子会话，活动后代的空闲祖先也不会被跳过。
   readonly children: (parentID: SessionID, active?: readonly string[]) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
@@ -520,8 +520,8 @@ const layer: Layer.Layer<
       return result
     })
 
-    const get = Effect.fn("Session.get")(function* (id: SessionID) {
-      const row = yield* db.select(selection(id)).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+    const get = Effect.fn("Session.get")(function* (id: SessionID, options?: { request?: boolean }) {
+      const row = yield* db.select(options?.request === false ? columns : selection(id)).from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
       if (!row) return yield* Effect.fail(new NotFoundError({ message: `Session not found: ${id}` }))
       return fromRow(row)
     })
@@ -855,18 +855,23 @@ const layer: Layer.Layer<
     })
 
     const messages: Interface["messages"] = Effect.fn("Session.messages")(function* (input) {
+      const fromMessageID = input.fromPartTurn
+        ? (yield* MessageV2.historyAnchor(input.sessionID, input.fromPartTurn).pipe(Effect.provideService(Database.Service, database)))?.id
+        : input.fromMessageID
+      // 分片缺失或已隐藏时应返回空范围，不能让下游把空游标解释为读取全部历史。
+      if (input.fromPartTurn && !fromMessageID) return []
       // #493：0 是显式有界空范围而非“未提供”——退化为全量会在 cold session 上触发无意义持久预热。
       if (input.limit !== undefined) {
         // #106：过滤下沉到 MessageV2.page，避免 limit 路径双重 filter
-        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
+        return (yield* MessageV2.page({ sessionID: input.sessionID, limit: input.limit, fromMessageID, includeHidden: input.includeHidden }).pipe(
           Effect.provideService(Database.Service, database),
         )).items
       }
 
       // 无 limit 复用 stream 的隐藏过滤；先确认会话，保留公开列表的 NotFound 语义。
-      yield* get(input.sessionID)
+      yield* get(input.sessionID, { request: false })
       // 把边界交给既有分页查询，不能全量hydrate后再作内存过滤。
-      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID: input.fromMessageID, includeHidden: input.includeHidden }).pipe(
+      const newestFirst = yield* MessageV2.stream(input.sessionID, { fromMessageID, includeHidden: input.includeHidden }).pipe(
         Effect.provideService(Database.Service, database),
       )
       // stream 为 newest-first；Session.messages 契约为 chronological oldest-first

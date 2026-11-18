@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect, Fiber, Layer } from "effect"
+import { Context, Effect, Fiber, Layer } from "effect"
 import { createOpenAI } from "@ai-sdk/openai"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -79,10 +79,15 @@ const emptyReviewerDb = (() => {
     orderBy: () => ({ limit: () => ({ all: () => Effect.succeed([]) }) }),
     get: () => Effect.succeed({ id: SessionID.make("session_parent") }),
   }
-  // 生命周期fixture维持空历史合同，补齐650证据查询需要的预约和同步空链；真实SQLite由独立用例覆盖。
-  const rows = { orderBy: () => ({ limit: () => ({ all: () => [] }) }) }
+  // 这些用例验证审批流的收尾；空历史夹具仍须执行事务体，并区分有无 LIMIT 的两种取证查询。
+  const rows = { orderBy: () => ({ all: () => [], limit: () => ({ all: () => [] }) }) }
   const sync = { select: () => ({ from: () => ({ where: () => rows, innerJoin: () => ({ where: () => rows }) }) }) }
-  return { db: { $client: { reserve: Effect.void }, select: () => ({ from: () => ({ where: () => chain }) }) } as never, sync: sync as never }
+  const db = {
+    $client: { reserve: Effect.void },
+    select: () => ({ from: () => ({ where: () => chain }) }),
+    transaction: <A>(body: () => A) => body(),
+  }
+  return { db: db as never, sync: sync as never }
 })()
 
 // #497：closure 用例的 fixture 注册表——it 实例与 body 共享同一 fixture（单一实例，committed barrier 才可观测）。
@@ -1958,13 +1963,17 @@ describe("permission reviewer evidence", () => {
       expect(result.tools[3].autoReviewRationale).toBe("目标过宽")
       // 同一证据集冷藏后仍逐字相同，inspect不能顺带清除持久cold_ref。
       const database = yield* Database.Service
+      // 用审批服务持有的同一读取器核对归档前后两次结果，防止底层查询正确而服务接线漏掉证据。
+      const readerContext = yield* Layer.build(MessageV2.evidenceReaderLayer)
+      const readEvidence = Context.get(readerContext, MessageV2.EvidenceReader)
+      expect(yield* readEvidence(chat.id)).toEqual(result)
       const refs = yield* Database.withSync(database, db => {
         const rows = db.select().from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
         const results = rows.map(row => ColdStorage.freezeOwner(db, { type: "part", id: row.id, olderThanMs: 0 }))
         expect(results.some(result => result.type === "frozen")).toBe(true)
         return db.select({ id: PartTable.id, ref: PartTable.cold_ref }).from(PartTable).where(eq(PartTable.session_id, chat.id)).all()
       })
-      expect(yield* MessageV2.reviewerEvidence(chat.id)).toEqual(result)
+      expect(yield* readEvidence(chat.id)).toEqual(result)
       expect(yield* Database.withSync(database, db => db.select({ id: PartTable.id, ref: PartTable.cold_ref })
         .from(PartTable).where(eq(PartTable.session_id, chat.id)).all())).toEqual(refs)
     }),

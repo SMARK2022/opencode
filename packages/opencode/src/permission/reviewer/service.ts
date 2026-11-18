@@ -136,6 +136,8 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     // #206：layer 内捕获 Database 服务——review 经 provideService 消化 page 的 DB 需求且不泄漏类型
     const database = yield* Database.Service
+    // 审批策略只消费证据快照，不能为切换执行线程而另写一套可见性或截断规则。
+    const readEvidence = yield* MessageV2.EvidenceReader
     // #208：Session.Service 已在 patch 206 保留——复用为 session 变量避免 Database.Service 泄漏
     const session = yield* Session.Service
     // #208：每父会话一个 Semaphore——并发工具审查复用同一 reviewer transcript
@@ -179,7 +181,7 @@ export const layer = Layer.effect(
           // 调用点提供捕获的Database，不把数据依赖泄漏到review公开接口。
           const transcript: PermissionReviewerPrompt.ReviewerTranscript = input.sessionID
             ? yield* Effect.all([
-                MessageV2.reviewerEvidence(SessionID.make(input.sessionID)),
+                readEvidence(SessionID.make(input.sessionID)),
                 MessageV2.page({ sessionID: SessionID.make(input.sessionID), limit: REVIEWER_MESSAGE_FETCH_LIMIT }),
               ]).pipe(
                 Effect.provideService(Database.Service, database),
@@ -1135,7 +1137,7 @@ export const layer = Layer.effect(
       )
     }
   }),
-)
+).pipe(Layer.provide(MessageV2.evidenceReaderLayer))
 
 function buildMessages(input: { system: string; userItems: readonly PermissionReviewerPrompt.UserPromptItem[] }) {
   // #198：system 消息包含策略模板和输出合约——user 消息包含 transcript 和 approval request

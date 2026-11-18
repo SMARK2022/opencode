@@ -50,11 +50,10 @@ const layer = Layer.effect(
         state.beginRevert(input.sessionID),
         () =>
           Effect.gen(function* () {
-            // 只加载 input.messageID 及之后的尾部消息，避免大 session 全量分页加载。
-            // partID 场景（部分撤回）需要 lastUser，仍加载全部作为安全回退。
+            // 整条撤回从目标消息开始，分片撤回从所属用户回合开始；两者都无需加载更早的历史。
             const all = yield* sessions.messages(
               input.partID
-                ? { sessionID: input.sessionID }
+                ? { sessionID: input.sessionID, fromPartTurn: input.partID }
                 : { sessionID: input.sessionID, fromMessageID: input.messageID },
             ).pipe(Effect.orDie)
             let lastUser: SessionV1.User | undefined

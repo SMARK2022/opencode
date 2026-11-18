@@ -91,8 +91,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     // 泛型透传保持 effect 的 E/R 签名，包装不改变调用方的错误契约
     const inSessionDirectory = <A, E, R>(sessionID: SessionID, effect: Effect.Effect<A, E, R>) =>
       Effect.gen(function* () {
-        // requireSession 在 session 不存在时走 NotFound 契约，包装层不吞错误
-        const info = yield* requireSession(sessionID)
+        // 切换实例只需要会话目录；省略请求统计时仍须保留会话不存在的 NotFound 契约。
+        const info = yield* SessionError.mapStorageNotFound(session.get(sessionID, { request: false }))
         return yield* store.provide({ directory: info.directory }, effect)
       })
 
@@ -369,7 +369,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
       // #132：优先用会话 directory provide；找不到则退回当前实例 cancel
       // #132：abort 不抛 NotFound 以匹配 HTTP 契约
-      const info = yield* session.get(ctx.params.sessionID).pipe(Effect.option)
+      const info = yield* session.get(ctx.params.sessionID, { request: false }).pipe(Effect.option)
       if (info._tag === "Some") {
         yield* store.provide({ directory: info.value.directory }, promptSvc.cancel(ctx.params.sessionID))
       } else {
@@ -455,7 +455,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
       // #153：流式返回的 message 必须来自 session 所属实例，防止跨目录读写
       const message = yield* inSessionDirectory(
         ctx.params.sessionID,
@@ -477,7 +476,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
       // #153：后台 fork 的 Error 事件必须发布到 session 所属实例，订阅方才能收到
       yield* inSessionDirectory(
         ctx.params.sessionID,
@@ -653,7 +651,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     params: { sessionID: SessionID }
     payload: typeof GoalSetPayload.Type
   }) {
-    yield* requireSession(ctx.params.sessionID)
     const goal = yield* inSessionDirectory(ctx.params.sessionID, goalSvc.set(ctx.params.sessionID, {
       objective: ctx.payload.objective,
       status: ctx.payload.status,

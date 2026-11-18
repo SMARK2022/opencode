@@ -24,12 +24,14 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
-const layer = (filename: string) => Layer.effect(
+const layer = (filename: string, readonly: boolean) => Layer.effect(
   Service,
   Effect.gen(function* () {
     const sync = yield* Sqlite.Drizzle
     // 原查询能力显式携带同连接facade，参数式历史读取无需另取全局服务。
     const db = Object.assign(yield* makeDatabase, { sync })
+    // 只读快照的连接只活到本次读取结束；不迁移、不 checkpoint，也不占主连接许可。
+    if (readonly) return { db, sync, filename }
 
     // busy_timeout 必须最先设置，确保后续 PRAGMA 在锁争用时能等待
     yield* db.run("PRAGMA busy_timeout = 30000")
@@ -89,8 +91,12 @@ export function withSync<A>(database: Interface, body: (sync: Sqlite.DrizzleClie
   })).pipe(Effect.orDie)
 }
 
-export function layerFromPath(filename: string) {
-  return layer(filename).pipe(Layer.provide(sqliteLayer({ filename })))
+export function layerFromPath(filename: string, options?: { readonly: true }) {
+  const connection = layer(filename, !!options?.readonly).pipe(Layer.provide(sqliteLayer(options?.readonly
+    ? { filename, readonly: true, readwrite: false, create: false, disableWAL: true }
+    : { filename })))
+  // 隔离整个驱动依赖图，否则共享 MemoMap 可能给快照注入主连接的 Drizzle facade。
+  return options?.readonly ? Layer.fresh(connection) : connection
 }
 
 export function path() {

@@ -306,6 +306,7 @@ for (const item of targets) {
   // 编译资源使用稳定的虚拟入口名；跨包源码路径不能拼入bunfs根，否则..会越出资源目录。
   const voiceWorkerPath = "opencode-voice-recorder-worker.ts"
   const packWorkerPath = "opencode-cold-codec-worker.ts"
+  const evidenceWorkerPath = "opencode-session-evidence-worker.ts"
   const treeSitterWorkerPath = "opentui-tree-sitter-worker.js"
   const bunfsRoot = item.os === "win32" ? "B:/~BUN/root/" : "/$bunfs/root/"
   const sharpFiles = await createSharpNativeFileMap(item)
@@ -334,6 +335,8 @@ for (const item of targets) {
       [voiceWorkerPath]: await Bun.file(path.resolve(dir, "../tui/src/prompt-voice-recorder-worker.ts")).text(),
       // 入口只导入Core模块，不能平铺codec源码而破坏其相邻模块解析。
       [packWorkerPath]: 'import "@opencode-ai/core/storage/cold-codec"',
+      // 安装后的 CLI 没有源码目录，取证线程必须从同一二进制内的入口加载查询。
+      [evidenceWorkerPath]: 'import "@/session/message-v2"',
       [treeSitterWorkerPath]: treeSitterWorker,
       ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
       // 生成模块只保存“目标平台可用的 native 资源表”，避免所有平台二进制都被塞进每个 release exe。
@@ -346,6 +349,7 @@ for (const item of targets) {
       // #558：voice Worker 必须同批编译，compiled 运行时才不会回退 checkout 源码文件。
       voiceWorkerPath,
       packWorkerPath,
+      evidenceWorkerPath,
       treeSitterWorkerPath,
       ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
       // 虚拟模块必须作为 entrypoint 交给 Bun.build，否则 dynamic import 在 compiled exe 内找不到资源映射。
@@ -360,6 +364,7 @@ for (const item of targets) {
       // #558：compiled 只走 bunfs entrypoint；运行时缺失该 define 即安装损坏。
       OPENCODE_VOICE_WORKER_PATH: bunfsRoot + voiceWorkerPath,
       OPENCODE_PACK_WORKER_PATH: bunfsRoot + packWorkerPath,
+      OPENCODE_EVIDENCE_WORKER_PATH: bunfsRoot + evidenceWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
