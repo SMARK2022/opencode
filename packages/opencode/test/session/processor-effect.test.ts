@@ -315,6 +315,60 @@ const boot = Effect.fn("test.boot")(function* () {
   return { processors, session, provider }
 })
 
+it.live("publishes the same accepted text fragments to legacy and v2 consumers", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        // 只替换外部模型边界；真实 processor 与两种事件服务共同处理这次响应。
+        yield* llm.push(reply().text("alpha ").text("$x^2$").stop())
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "stream formula")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const model = yield* provider.getModel(ref.providerID, ref.modelID)
+        const legacy: string[] = []
+        const deltas: string[] = []
+        const ended: string[] = []
+        // 按 Session 过滤，避免共享事件服务的其他会话污染公开输出断言。
+        const off = yield* (yield* Bus.Service).subscribeCallback(MessageV2.Event.PartDelta, (event) => {
+          if (event.properties.sessionID === chat.id) legacy.push(event.properties.delta)
+        })
+        // 订阅释放归测试 scope；即使后续断言失败也不会泄漏到下一例。
+        yield* Effect.addFinalizer(() => Effect.sync(off))
+        const unsubscribe = yield* (yield* EventV2.Service).sync((event) => {
+          if (Schema.is(SessionEvent.Text.Delta)(event) && event.data.sessionID === chat.id) {
+            deltas.push(event.data.delta)
+          }
+          if (Schema.is(SessionEvent.Text.Ended)(event) && event.data.sessionID === chat.id) {
+            ended.push(event.data.text)
+          }
+          return Effect.void
+        })
+        yield* Effect.addFinalizer(() => unsubscribe)
+        // 在 process 之前订阅，捕获真正的流式增量，而不是事后读取最终正文。
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model })
+        yield* handle.process({
+          user: parent,
+          sessionID: chat.id,
+          model,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "stream formula" }],
+          tools: {},
+        })
+        // 两段固定输入独立定义期望，避免用某个通道的结果反推另一个通道。
+        expect(legacy).toEqual(["alpha ", "$x^2$"])
+        // 保留片段边界，防止只在完成时一次性发布完整正文也通过此测试。
+        expect(deltas).toEqual(["alpha ", "$x^2$"])
+        // Ended 承载终值；新增增量不得替换或重复这条既有完成路径。
+        expect(ended).toEqual(["alpha $x^2$"])
+        // 公共 Part 读取同时验证旧会话路径的完整正文仍可恢复。
+        expect(MessageV2.parts(msg.id).some((part) => part.type === "text" && part.text === "alpha $x^2$")).toBe(true)
+      }),
+    { git: true, config: (url) => providerCfg(url) },
+  ),
+)
+
 unavailable.live("omits an image attachment when normalization is unavailable", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

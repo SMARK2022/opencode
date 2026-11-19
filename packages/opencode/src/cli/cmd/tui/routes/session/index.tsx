@@ -1,3 +1,4 @@
+import { mathExtensions, richMarkdown } from "@tui/util/rich-markdown"
 import {
   batch,
   createContext,
@@ -2590,7 +2591,9 @@ function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; me
   const { theme, syntax } = useTheme()
   const streaming = createMemo(() => !props.message.time.completed)
   const content = createMemo(() => props.part.text.trim())
-  const completedKey = createMemo(() => `${ctx.width}\u0000${content()}`)
+  // 已闭合的图跟随实际父容器宽度；改变宽度或结束流式时不重挂 Markdown。
+  const rich = richMarkdown(useRenderer(), () => theme.markdownText)
+  const completedKey = createMemo(() => streaming() ? ctx.width : `${ctx.width}\u0000${content()}`)
   // [local-smark] 渲染熔断：超预算内容在构造 parser-backed Markdown/Code 前
   // 降级纯文本；streaming 与完成态共用同一确定性判定（INV-06/07）。
   // 判定先于 streaming 分支：分类不依赖完成状态，避免同一内容在流式中改变投影。
@@ -2603,21 +2606,22 @@ function TextPart(props: { last: boolean; topMargin: boolean; part: TextPart; me
           <Match when={overBudget()}>
             <text fg={theme.text}>{content()}</text>
           </Match>
-          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
-            <Show keyed when={completedKey()}>
-              {(_key) => (
-                <markdown
-                  syntaxStyle={syntax()}
-                  streaming={false}
-                  internalBlockMode="top-level"
-                  content={content()}
-                  tableOptions={{ style: "grid" }}
-                  conceal={ctx.conceal()}
-                  fg={theme.markdownText}
-                  bg={theme.background}
-                />
-              )}
-            </Show>
+          <Match when={Flag.OPENCODE_EXPERIMENTAL_MARKDOWN}>
+            <markdown
+              syntaxStyle={syntax()}
+              streaming={streaming()}
+              internalBlockMode="top-level"
+              content={
+                // Marked 的 token.raw 使用 LF，输入同样归一化才能沿用 CRLF 消息的稳定前缀。
+                content().replace(/\r\n?/g, "\n")
+              }
+              markdownExtensions={mathExtensions}
+              renderNode={rich}
+              tableOptions={{ style: "grid" }}
+              conceal={ctx.conceal()}
+              fg={theme.markdownText}
+              bg={theme.background}
+            />
           </Match>
           <Match when={!Flag.OPENCODE_EXPERIMENTAL_MARKDOWN && !streaming()}>
             <Show keyed when={completedKey()}>
