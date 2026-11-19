@@ -41,7 +41,11 @@ test("replace slot mounts plugin content once", async () => {
     )
   }
 
-  await testRender(() => <App />)
-
-  expect(mounts).toBe(1)
+  const app = await testRender(() => <App />)
+  try {
+    expect(mounts).toBe(1)
+  } finally {
+    // 该 fixture 拥有 renderer，不能让泄漏的实例延长后续用例的共享解析器寿命。
+    app.renderer.destroy()
+  }
 })

@@ -4716,8 +4716,22 @@ async function withRenderedSession(
     }
     await run(app, events.emit, routeHolder!)
   } finally {
-    app.renderer.destroy()
-    Global.Path.state = previous
+    try {
+      // 最后一个 renderer 会关闭共享解析器，必须先结算仍引用原生缓冲区的高亮任务。
+      await finishHighlighting(app.renderer.root)
+    } finally {
+      // 即使高亮失败，fixture 仍释放 renderer 并恢复全局路径，避免污染下一例。
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  }
+}
+
+async function finishHighlighting(node: Renderable) {
+  // Markdown、diff 等容器把高亮节点藏在子树中，不能只等待根节点。
+  for (const child of node.getChildren()) {
+    if ("highlightingDone" in child) await child.highlightingDone
+    await finishHighlighting(child)
   }
 }
 

@@ -955,6 +955,15 @@ export const layer = Layer.effect(
             }
             ctx.attemptTextChars += value.text.length
             ctx.currentText.text += value.text
+            // 片段已通过累计预算，与 Started/Ended 使用同一 v2 生命周期。
+            // 直接发布本次增量，旧 PartDelta 和最终完整正文仍由原路径维护。
+            if (!ctx.assistantMessage.summary && flags.experimentalEventSystem) {
+              yield* events.publish(SessionEvent.Text.Delta, {
+                sessionID: ctx.sessionID,
+                delta: value.text,
+                timestamp: DateTime.makeUnsafe(Date.now()),
+              })
+            }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             logFirstDelta("text", ctx.currentText.id, "text", value.text.length)
             yield* session.updatePartDelta({
