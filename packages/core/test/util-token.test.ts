@@ -4,6 +4,44 @@ import { SessionMessage } from "@opencode-ai/schema/session-message"
 import { SessionV1 } from "@opencode-ai/schema/session-v1"
 import { Token } from "../src/util/token"
 
+test("request accounting preserves native JSON string and traversal semantics", () => {
+  const shared = { content: "shared\\text\n" }
+  // 独立原生JSON作为长度oracle，覆盖转义、孤立代理项与重复引用，避免复刻计量算法。
+  const bodies = [
+    { messages: [{ role: "user", content: "引号\"\\\n\t\u0000\ud800😀" }] },
+    { messages: [shared, shared], options: { absent: undefined, number: Infinity } },
+    { messages: ["", null, undefined, , "tail"] },
+    // 包装字符串必须沿JSON原生拆箱，不能把其属性当作新请求正文。
+    { messages: [new String("boxed\n"), new Number(4), new Boolean(false)] },
+    { system: { toJSON: () => "normalized\n" }, messages: [] },
+  ]
+  for (const body of bodies) {
+    const wire = JSON.stringify(body)
+    const result = Token.estimateRequest(body, [], [])
+    expect(result.bodyChars).toBe(wire.length)
+    // 字符桶总和独立对照wire，防止只改bodyChars而遗漏分类或结构字符。
+    const counts = Schema.decodeUnknownSync(SessionMessage.InputBreakdown)(result.inputBreakdown)
+    expect(counts.system + counts.instructions + counts.skills + counts.tools + counts.messages.total).toBe(wire.length)
+    expect(JSON.stringify(body)).toBe(wire)
+  }
+  let reads = 0
+  let conversions = 0
+  const body = {
+    get system() { reads++; return "one read" },
+    messages: [{ toJSON() { conversions++; return { role: "user", content: "one conversion" } } }],
+  }
+  // 先读观察次数再运行oracle，确保验证的是一次估算中的getter/toJSON行为。
+  const result = Token.estimateRequest(body, [])
+  expect(reads).toBe(1)
+  expect(conversions).toBe(1)
+  expect(result.bodyChars).toBe(JSON.stringify(body).length)
+  // 原生拒绝的循环与BigInt仍抛错；优化不得把无法发送的对象计量成成功请求。
+  const cycle: { next?: object } = {}
+  cycle.next = cycle
+  expect(() => Token.estimateRequest(cycle, [])).toThrow(TypeError)
+  expect(() => Token.estimateRequest({ value: 1n }, [])).toThrow(TypeError)
+})
+
 test("calibrates input density with thresholds, cache-inclusive samples and a shared cutoff", () => {
   expect(Token.charsPerTokenFromHistory([{ bodyChars: 100000, input: 40000 }])).toBe(2.5)
   // 这组普通输入只有30000，结果仍为2.5才证明缓存读写也进入了输入侧样本分母。

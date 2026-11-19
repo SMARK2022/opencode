@@ -109,7 +109,9 @@ function errorFields(error: unknown) {
   // #240：体积探测只取已知形状——避免对大响应体做昂贵序列化
 function bodyBytes(body: unknown) {
   // 只度量已缓冲的 body；流与表单不读取——诊断不得消费或复制 provider 请求
-  if (typeof body === "string") return new TextEncoder().encode(body).byteLength
+  // 只求UTF8长度，避免在实际发送前为日志再分配一份完整正文缓冲。
+  // 两种API对孤立代理项都按UTF8替换字符计数，保留原有字节日志合同。
+  if (typeof body === "string") return Buffer.byteLength(body, "utf8")
   if (body instanceof Uint8Array) return body.byteLength
   return undefined
 }

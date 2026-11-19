@@ -124,6 +124,7 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
   // 媒体沿同一个 JSON visitor 统计；getter、toJSON 与原 provider body 仍只观察一次。
   const media = AttachmentToken.estimateAttachment({})
   // 唯一 stringify 的 visitor 同时计数，既不重跑 Schema parser，也不按子树再次序列化。
+  let removedChars = 0
   const bodyChars = JSON.stringify(body, function(this: object, key: string, value: unknown) {
     const parent = nodes.get(this)
     // 对象的 undefined/function/symbol 不上 wire；数组同值是 null，必须沿 JSON 的两种规则计数。
@@ -232,8 +233,13 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
     if (value !== null && typeof value === "object") nodes.set(value, { bucket, section, role, entries: 0, media: binary || parent?.media, literal,
       mime: key === "image" && "format" in value ? `image/${value.format}` : key === "document" && "format" in value ? value.format === "pdf" ? "application/pdf" : "application/octet-stream" : mime,
     })
+    // 分类已使用原字符串；只缩短计量中间结果，省去正文字符再补回精确JSON长度。
+    if (typeof value === "string") {
+      removedChars += chars - 2
+      return ""
+    }
     return value
-  }).length
+  }).length + removedChars
   // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
   counts.messages.total = counts.messages.userText + counts.messages.assistantText + counts.messages.reasoning + counts.messages.toolInput + counts.messages.toolOutput + counts.messages.attachments
   // 正文包含系统、普通消息、工具定义/结果和选项；reasoning从其中分出并使用自己的密度。
