@@ -9,6 +9,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 
 declare const OPENCODE_COMPILED: boolean | undefined
+declare const OPENCODE_SHARP_MANIFEST: string
 type EmbeddedSharp = { target: string; version: string; addon: string | null; files: Record<string, string> }
 
 export const make = Effect.gen(function* () {
@@ -99,8 +100,7 @@ export const make = Effect.gen(function* () {
 
 async function prepareCompiledSharp() {
   // 虚拟模块与构建入口成对；不猜测开发机node_modules路径或临时切换第二后端。
-  // @ts-expect-error generated at build time
-  const embedded = (await import("opencode-sharp.gen.ts")).default as EmbeddedSharp
+  const embedded = (await import(OPENCODE_SHARP_MANIFEST)).default as EmbeddedSharp
   if (!embedded.addon) throw new Error(`Sharp is unavailable for ${embedded.target}`)
   const root = path.join(Global.Path.cache, "native", "sharp", embedded.version, embedded.target)
   await Promise.all(Object.entries(embedded.files).map(async ([relative, source]) => {

@@ -9,6 +9,7 @@ describe("legacy public event schemas", () => {
   test("owns all SessionV1 definitions", () => {
     expect(SessionV1.Event.Definitions.map((event) => event.type)).toEqual([
       "session.created",
+      "session.forked",
       "session.updated",
       "session.deleted",
       "message.updated",
@@ -16,12 +17,15 @@ describe("legacy public event schemas", () => {
       "message.part.updated",
       "message.part.removed",
       "message.part.delta",
+      "message.part.progress",
       "session.diff",
       "session.error",
     ])
     const durable = SessionV1.Event.Definitions.filter((event) => event.durable !== undefined)
-    expect(durable).toHaveLength(7)
-    expect(durable.every((event) => event.durable?.aggregate === "sessionID")).toBe(true)
+    expect(durable).toHaveLength(8)
+    // 复制记录归入新会话；其余持久事件仍归入各自的 sessionID。
+    expect(durable.find((event) => event.type === "session.forked")?.durable?.aggregate).toBe("targetSessionID")
+    expect(durable.filter((event) => event.durable?.aggregate === "sessionID")).toHaveLength(7)
     expect(durable.every((event) => event.durable?.version === 1)).toBe(true)
   })
 

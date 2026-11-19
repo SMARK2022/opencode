@@ -75,7 +75,7 @@ console.log(JSON.stringify({ mime: result.mime, width: metadata.width, height: m
       compile: { target: target as Bun.Build.CompileTarget, outfile, autoloadBunfig: false, autoloadDotenv: false },
       files: { "opencode-sharp.gen.ts": files, "opencode-sharp-smoke.gen.ts": source },
       entrypoints: ["opencode-sharp-smoke.gen.ts", "opencode-sharp.gen.ts"],
-      define: { OPENCODE_COMPILED: "true", OPENCODE_VERSION: JSON.stringify(version) },
+      define: { OPENCODE_COMPILED: "true", OPENCODE_SHARP_MANIFEST: JSON.stringify("opencode-sharp.gen.ts"), OPENCODE_VERSION: JSON.stringify(version) },
     })
     if (!result.success) throw new AggregateError(result.logs, "Failed to build compiled Sharp smoke")
     const run = async () => {
