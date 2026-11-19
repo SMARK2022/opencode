@@ -5,6 +5,8 @@ set -e
 . "$(dirname "$0")/pre-commit"
 bun typecheck
 
+bun script/guard/gate.ts push
+
 # 子模块指针可达性校验：父仓库推送前，指针必须已存在于子模块远端分支历史。
 # 合同：指针 == 远端 tip 直接放行；非 tip 时在本地子模块仓库 fetch 后做祖先校验；
 # 两者都不满足则拒绝——否则 CI 的 submodule checkout 会报 not our ref（2026-09-06 事故）。

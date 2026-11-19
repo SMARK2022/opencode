@@ -1,0 +1,3 @@
+#!/bin/sh
+# guard：暂存区的规则检查 + 改动规模。放在 commit-msg 是因为要读提交信息里的放行标记
+bun script/guard/gate.ts commit --message "$1"

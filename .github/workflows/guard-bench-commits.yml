@@ -1,0 +1,135 @@
+name: guard-bench-commits
+# 对任意一批历史提交跑性能基准（并顺带记录各提交的规则存量），结果写进看板。
+# 每个提交默认与它的第一父提交比较；填写 base 时全部与同一个提交比较。
+# 基准脚本与预算一律用当前 dev1-smark 上的版本，保证同一把尺子。
+# 早于某个场景所需接口的旧提交会记为“未完成”，不影响其他提交。
+run-name: bench ${{ inputs.commits }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commits:
+        description: "提交列表（空格分隔的 SHA/引用）或范围 A..B（按第一父链展开，最多 20 个）"
+        required: true
+      base:
+        description: "统一对比基准（留空 = 各自的父提交）"
+        default: ""
+      scenarios:
+        description: "只跑这些场景，逗号分隔：list,open,stream,abort（留空 = 全部）"
+        default: ""
+      rounds:
+        description: "每个场景的 A/B 轮数（越多越稳，越慢）"
+        default: "5"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+
+jobs:
+  plan:
+    name: 展开提交
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - id: list
+        env:
+          COMMITS: ${{ inputs.commits }}
+        run: bun script/guard/ci.ts commits "$COMMITS" --max 20
+
+  bench:
+    name: bench ${{ matrix.sha }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        sha: ${{ fromJSON(needs.plan.outputs.list) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: dev1-smark
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-bun
+      - name: A/B 基准
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+          SHA: ${{ matrix.sha }}
+          BASE: ${{ inputs.base }}
+          ONLY: ${{ inputs.scenarios }}
+          ROUNDS: ${{ inputs.rounds }}
+        run: |
+          base=$(git rev-parse "${BASE:-$SHA^}")
+          args=(--head "$SHA" --base "$base" --rounds "${ROUNDS:-5}" --json "bench-$SHA.json" --markdown "$GITHUB_STEP_SUMMARY")
+          [ -n "$ONLY" ] && args+=(--only "$ONLY")
+          # 1 = 有退化（照样记录）；2 = 无法完成（结果里带 error，看板显示“未完成”）
+          bun script/guard/bench/opencode.ts "${args[@]}" || [ $? -le 2 ]
+      - name: 该提交的规则存量（按当前规则）
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+          SHA: ${{ matrix.sha }}
+        run: bun script/guard/check.ts . --commit "$SHA" --json "guard-$SHA.json" --quiet || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: bench-${{ matrix.sha }}
+          path: "*-${{ matrix.sha }}.json"
+          if-no-files-found: ignore
+          retention-days: 30
+
+  publish:
+    name: 写入看板
+    needs: bench
+    if: always() && needs.bench.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: bench-data-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: dev1-smark
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: 下载各提交结果
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --pattern 'bench-*' -D in
+      - name: 合并并推送
+        run: |
+          bash script/guard/site.sh prepare "$RUNNER_TEMP/site"
+          shopt -s nullglob
+          benches=(in/*/bench-*.json)
+          [ ${#benches[@]} -gt 0 ] && bun script/guard/report.ts publish --site "$RUNNER_TEMP/site" --bench "${benches[@]}"
+          for f in in/*/guard-*.json; do
+            sha=$(basename "$f" .json); sha=${sha#guard-}
+            bun script/guard/report.ts publish --site "$RUNNER_TEMP/site" --guard "$f" --sha "$sha"
+          done
+          bash script/guard/site.sh push "$RUNNER_TEMP/site" "bench-commits: ${#benches[@]} 个提交"
+          {
+            echo "## 已写入看板"
+            echo
+            echo "| 提交 | 结果 |"
+            echo "|---|---|"
+            for f in "${benches[@]}"; do
+              bun -e '
+                const r = await Bun.file(process.argv[1]).json()
+                const s = r.error ? "⚪ 未完成" : r.regressed ? "🔴 有退化" : "🟢 无退化"
+                console.log(`| \`${r.head.sha.slice(0, 8)}\` ${r.head.subject.replaceAll("|", "\\|")} | ${s} |`)
+              ' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

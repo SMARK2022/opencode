@@ -1,3 +1,10 @@
 # web + desktop packages
 packages/app/      @Hona @Brendonovich
 packages/desktop/  @Hona @Brendonovich
+
+/script/guard/                @SMARK2022
+/.opencode/plugins/guard.ts   @SMARK2022
+/.opencode/policy/            @SMARK2022
+/.github/workflows/           @SMARK2022
+/.github/CODEOWNERS           @SMARK2022
+/.husky/                      @SMARK2022

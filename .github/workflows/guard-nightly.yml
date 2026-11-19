@@ -1,0 +1,89 @@
+name: guard-nightly
+# 每晚一次（也可手动）：
+#   覆盖率图  按测试文件建 行覆盖 → 源码行 的映射，发布到 release「guard-coverage-map」，本地 pre-push 与 preflight 用它选测试
+#   基准趋势  dev1-smark 的 HEAD 对上一次测过的提交做 A/B，结果写进 bench-data 分支（GitHub Pages 看板）
+#   存量趋势  HEAD 的全量规则扫描，存量数写进看板
+# 三平台全量测试已由 test.yml 在每次 push dev1-smark 时运行，这里不重复。
+
+on:
+  schedule:
+    - cron: "17 18 * * *" # UTC 18:17（日本时间 03:17）
+  workflow_dispatch:
+    inputs:
+      coverage:
+        description: "重建覆盖率图"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+
+jobs:
+  coverage-map:
+    name: 覆盖率图
+    if: github.event_name == 'schedule' || inputs.coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write # 上传 release 资产
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: dev1-smark
+      - uses: ./.github/actions/setup-bun
+      - name: 建图（opencode / core / tui）
+        run: |
+          for pkg in opencode core tui; do
+            bun script/guard/select-tests.ts map "packages/$pkg" --out "coverage-map-$pkg.json" --jobs 4
+          done
+      - name: 发布到 release guard-coverage-map
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view guard-coverage-map > /dev/null 2>&1 || gh release create guard-coverage-map \
+            --target dev1-smark --prerelease --title "guard 覆盖率图" \
+            --notes "由 guard-nightly 自动维护，供 script/guard/gate.ts 选择测试。请勿手动编辑。"
+          gh release upload guard-coverage-map coverage-map-*.json --clobber
+
+  trend:
+    name: 基准与存量趋势
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: bench-data-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write # 推送 bench-data 分支
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: dev1-smark
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-bun
+      - name: 检出看板数据
+        run: bash script/guard/site.sh prepare "$RUNNER_TEMP/site"
+      - name: 选择对比基准
+        id: base
+        run: bun script/guard/ci.ts nightly-base "$RUNNER_TEMP/site/data/index.json"
+      - name: A/B 基准
+        if: steps.base.outputs.skip != 'true'
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+        # 退出码 1 只表示有退化：照样记录到看板，不让任务失败
+        run: |
+          bun script/guard/bench/opencode.ts --base "${{ steps.base.outputs.base }}" \
+            --json bench.json --markdown "$GITHUB_STEP_SUMMARY" || [ $? -eq 1 ]
+      - name: 全量规则扫描
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+        run: bun script/guard/check.ts . --json guard.json --quiet || true
+      - name: 写入看板并推送
+        run: |
+          args=(--site "$RUNNER_TEMP/site" --guard guard.json --sha "$(git rev-parse HEAD)")
+          [ -f bench.json ] && args+=(--bench bench.json)
+          bun script/guard/report.ts publish "${args[@]}"
+          bash script/guard/site.sh push "$RUNNER_TEMP/site" "nightly $(git rev-parse --short HEAD)"

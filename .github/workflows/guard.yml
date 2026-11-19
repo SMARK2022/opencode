@@ -1,0 +1,282 @@
+name: guard
+# 机械门禁的 CI 侧。按触发方式分工：
+#   pull_request      第三方 Agent 的 PR 绕过了本地 hook，这里就是它们的 preflight：
+#                     规则检查（用目标分支上的规则与基线）+ 契约测试 + 运行时改动的 A/B 基准 + 置顶评论。
+#                     PR 上的单元测试仍由 test.yml 负责，这里不重复跑。
+#   workflow_dispatch 本地 pre-push 触发的跨平台 preflight（script/guard/preflight.ts）：
+#                     对同一个 SHA 在所选平台上跑 规则 + 选中测试 + 契约。
+#   push dev1-smark   事后告警：规则 + 契约；同一 SHA 已有成功的 guard 运行时跳过。
+# 全量测试、覆盖率图、基准趋势与看板数据在 guard-nightly.yml。
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('preflight {0} · {1}', github.ref_name, inputs.platforms) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
+
+on:
+  pull_request:
+    branches: [dev1-smark]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches: [dev1-smark]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        type: choice
+        options: [preflight]
+        default: preflight
+      platforms:
+        description: "平台，逗号分隔：linux,macos,windows"
+        default: "macos,linux"
+
+concurrency:
+  group: guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
+  # 受保护路径（script/guard、hook、workflow…）的 PR 必须带这个标签，并由 CODEOWNERS 审核
+  GUARD_CHANGE_LABEL: guard-change
+
+jobs:
+  plan:
+    name: 计划
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      base: ${{ steps.mode.outputs.base }}
+      skip: ${{ steps.dedupe.outputs.skip }}
+      runtime: ${{ steps.plan.outputs.runtime }}
+      protected: ${{ steps.plan.outputs.protected }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: 判定模式与比较基准
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$EVENT" in
+            pull_request)      echo "mode=pr" >> "$GITHUB_OUTPUT"; base="origin/$BASE_REF" ;;
+            workflow_dispatch) echo "mode=preflight" >> "$GITHUB_OUTPUT"; base=$(git merge-base origin/dev1-smark HEAD) ;;
+            push)
+              echo "mode=push" >> "$GITHUB_OUTPUT"
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}"; then base="$BEFORE"; else base="HEAD~1"; fi ;;
+          esac
+          echo "base=$(git rev-parse "$base")" >> "$GITHUB_OUTPUT"
+      - name: 改动分类
+        id: plan
+        run: bun script/guard/ci.ts plan --base "${{ steps.mode.outputs.base }}" --platforms "${{ inputs.platforms || 'macos,linux' }}"
+      - name: 同一 SHA 去重（仅 push）
+        id: dedupe
+        if: steps.mode.outputs.mode == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list --workflow guard.yml --commit "$GITHUB_SHA" --status success --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length")
+          echo "skip=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          [ "${n:-0}" -gt 0 ] && echo "::notice::$GITHUB_SHA 已有成功的 guard 运行，跳过重复检查" || true
+
+  rules:
+    name: 规则与契约
+    needs: plan
+    if: needs.plan.outputs.mode != 'preflight' && needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read # 读取 PR 的 approve，用于放行超出改动规模的提交
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-bun
+      # PR 用目标分支上的规则、基线与脚本：PR 自己改 script/guard 不能放宽对自己的检查
+      - name: 准备规则来源
+        id: src
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          dir="$GITHUB_WORKSPACE/script/guard"
+          if [ "$MODE" = pr ]; then
+            mkdir -p "$RUNNER_TEMP/base"
+            if git archive "$BASE" script/guard | tar -x -C "$RUNNER_TEMP/base" 2>/dev/null && [ -f "$RUNNER_TEMP/base/script/guard/check.ts" ]; then
+              dir="$RUNNER_TEMP/base/script/guard"
+            else
+              echo "::warning::目标分支还没有 script/guard，本次使用 PR 自带的规则"
+            fi
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      - name: 受保护路径需要标签
+        if: needs.plan.outputs.mode == 'pr' && needs.plan.outputs.protected == 'true' && !contains(github.event.pull_request.labels.*.name, 'guard-change')
+        run: |
+          echo "::error::此 PR 改动了受保护路径（规则、hook、workflow、预算等）。请维护者确认后加上标签 $GUARD_CHANGE_LABEL，并由 CODEOWNERS 审核。"
+          exit 1
+      - name: 规则检查
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+          MODE: ${{ needs.plan.outputs.mode }}
+          BASE: ${{ needs.plan.outputs.base }}
+          DIR: ${{ steps.src.outputs.dir }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          extra=()
+          if [ "$MODE" = pr ]; then
+            # PR 不认提交信息里的放行标记（第三方 Agent 可以随便写）；超出改动规模时，需要维护者 approve 后点 Re-run
+            extra+=(--baseline "$DIR/baseline.json" --no-trailer)
+            approved=$({ gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
+              --jq '[.[] | select(.state == "APPROVED" and (.author_association == "OWNER" or .author_association == "MEMBER"))] | length' || true; } | awk '{ s += $1 } END { print s + 0 }')
+            [ "${approved:-0}" -gt 0 ] && extra+=(--allow-large)
+          elif git cat-file -e "$BASE:script/guard/baseline.json" 2>/dev/null; then
+            git show "$BASE:script/guard/baseline.json" > "$RUNNER_TEMP/prev-baseline.json"
+            extra+=(--previous-baseline "$RUNNER_TEMP/prev-baseline.json")
+          fi
+          bun "$DIR/check.ts" . --commit HEAD --changed-since "$BASE" "${extra[@]}" \
+            --annotate --diff-base "$BASE" --json guard.json --markdown "$GITHUB_STEP_SUMMARY"
+      - name: 契约与打包边界测试
+        if: success() || failure()
+        run: bun script/guard/gate.ts contracts
+      - name: 上传规则报告
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: guard-report
+          path: guard.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  bench:
+    name: 性能基准
+    needs: plan
+    if: needs.plan.outputs.mode == 'pr' && needs.plan.outputs.runtime == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-bun
+      # 基准脚本与预算同样取自目标分支：PR 不能改自己的考卷
+      - name: 准备基准脚本
+        id: src
+        env:
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          dir="$GITHUB_WORKSPACE/script/guard"
+          mkdir -p "$RUNNER_TEMP/base"
+          if git archive "$BASE" script/guard | tar -x -C "$RUNNER_TEMP/base" 2>/dev/null && [ -f "$RUNNER_TEMP/base/script/guard/bench/opencode.ts" ]; then
+            dir="$RUNNER_TEMP/base/script/guard"
+          else
+            echo "::warning::目标分支还没有基准脚本，本次使用 PR 自带的"
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      - name: A/B 基准（head 对 merge-base）
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+        run: |
+          bun "${{ steps.src.outputs.dir }}/bench/opencode.ts" --base "${{ needs.plan.outputs.base }}" \
+            --json bench.json --markdown "$GITHUB_STEP_SUMMARY"
+      - name: 上传基准结果
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-result
+          path: bench.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  comment:
+    name: PR 评论
+    needs: [plan, rules, bench]
+    if: always() && needs.plan.outputs.mode == 'pr' && needs.rules.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      # 只取目标分支的报告脚本，不执行 PR 里的任何代码（此任务持有写评论的权限）
+      - name: 取目标分支的报告脚本
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.base_ref }}
+          sparse-checkout: script/guard
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: 下载本次结果
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p in
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n guard-report -D in || true
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n bench-result -D in || true
+      - name: 生成并更新置顶评论
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          BENCH_RESULT: ${{ needs.bench.result }}
+        run: |
+          [ -f script/guard/report.ts ] || { echo "目标分支还没有 report.ts，跳过评论"; exit 0; }
+          bench=()
+          if [ -f in/bench.json ]; then bench=(--bench in/bench.json)
+          elif [ "$BENCH_RESULT" = skipped ]; then bench=(--bench none)
+          fi
+          bun script/guard/report.ts comment --guard in/guard.json "${bench[@]}" --out comment.md
+          marker=$(head -1 comment.md)
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.user.type == \"Bot\" and (.body | startswith(\"$marker\"))) | .id" | head -1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@comment.md > /dev/null
+          fi
+
+  preflight:
+    name: preflight / ${{ matrix.os }}
+    needs: plan
+    if: needs.plan.outputs.mode == 'preflight'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-bun
+      # 与本地 pre-push 同一个入口，只是关掉了“再触发 preflight”这一步
+      - name: 规则 + 选中测试 + 契约（${{ matrix.os }}）
+        env:
+          GH_TOKEN: ${{ github.token }} # 只用来下载覆盖率图（release guard-coverage-map）
+          GUARD_PREFLIGHT: "off"
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+        run: bun script/guard/gate.ts push --since "${{ needs.plan.outputs.base }}" --sha HEAD
+
+  cleanup:
+    name: 删除 preflight 临时分支
+    needs: [plan, preflight]
+    if: always() && needs.plan.outputs.mode == 'preflight' && startsWith(github.ref_name, 'preflight/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$GITHUB_REF_NAME" || true
