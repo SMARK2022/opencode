@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenCode 守卫看板</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1f2328; --muted: #656d76; --line: #d8dee4;
+    --accent: #2f6feb; --good: #1a7f37; --bad: #cf222e; --warn: #9a6700; --chip: #eef1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --card: #161b22; --ink: #e6edf3; --muted: #8d96a0; --line: #30363d; --accent: #4493f8; --good: #3fb950; --bad: #f85149; --warn: #d29922; --chip: #21262d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+  main { max-width: 1120px; margin: 0 auto; padding: 28px 20px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: 0.2px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .stat { font-size: 24px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .panel-head h2 { margin: 0; }
+  select { background: var(--chip); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chart { position: relative; height: 280px; }
+  .chart svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart text { fill: var(--muted); font-size: 11px; }
+  .chart .grid { stroke: var(--line); stroke-width: 1; }
+  .chart .series { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+  .chart .pt { cursor: pointer; }
+  .tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12); max-width: 360px; display: none; z-index: 2; }
+  .tip b { display: block; margin-bottom: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; border-top: none; font-size: 12px; }
+  td.num { font-variant-numeric: tabular-nums; }
+  code, .sha { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--chip); margin: 0 4px 4px 0; white-space: nowrap; }
+  .badge.good { color: var(--good); } .badge.bad { color: var(--bad); font-weight: 600; } .badge.none { color: var(--muted); }
+  .subject { max-width: 380px; }
+  .empty { padding: 32px; text-align: center; color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>OpenCode 守卫看板</h1>
+      <div class="muted" id="repo"></div>
+    </div>
+    <div class="muted" id="updated"></div>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>性能趋势</h2>
+      <div class="controls"><select id="scenario"></select><select id="metric"></select></div>
+    </div>
+    <div class="chart" id="perf"></div>
+    <div class="hint">每个点是该提交的 head 中位数；红色点表示与对比基线的 A/B 检验判定为退化。不同运行器之间的绝对值仅供参考，退化以 A/B 判定为准。</div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>存量规则趋势</h2>
+      <div class="controls"><select id="rule"></select></div>
+    </div>
+    <div class="chart" id="debt"></div>
+    <div class="hint">基线只降不升；曲线下降表示存量正在被清理。</div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>提交记录</h2><span class="muted" id="count"></span></div>
+    <div style="overflow-x:auto"><table id="commits"></table></div>
+  </section>
+</main>
+
+<script>
+const LABEL = {
+  wallMs: "场景耗时 (ms)", cpuMs: "CPU 时间 (ms)", startupMs: "启动到就绪 (ms)", maxBlockMs: "最长阻塞 (ms)",
+  p50Ms: "探针 p50 (ms)", p95Ms: "探针 p95 (ms)", p99Ms: "探针 p99 (ms)", probeErrorRate: "探针失败率",
+  maxOutageMs: "最长掉线 (ms)", peakRssMb: "峰值内存 (MB)", rssGrowthMb: "内存增量 (MB)", crashed: "崩溃次数",
+}
+const $ = (id) => document.getElementById(id)
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim()
+const short = (s) => s.slice(0, 8)
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c])
+const day = (iso) => (iso ? iso.slice(0, 10) : "")
+const nice = (v) => { // 坐标轴取整：1/2/5 × 10^k
+  if (v <= 0) return 1
+  const k = 10 ** Math.floor(Math.log10(v)), f = v / k
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * k
+}
+const fmt = (n) => (n == null ? "—" : Math.abs(n) >= 100 || Number.isInteger(n) ? Math.round(n).toLocaleString() : n.toFixed(Math.abs(n) < 1 ? 3 : 1))
+
+// 不依赖任何 CDN 的折线图：SVG + 悬浮提示
+function lineChart(id, labels, values, meta, colorFor) {
+  const box = $(id)
+  const W = box.clientWidth || 800, H = box.clientHeight || 280, L = 56, R = 12, T = 10, B = 26
+  const pts = values.map((v, i) => [i, v]).filter(([, v]) => v != null && Number.isFinite(v))
+  if (!pts.length) { box.innerHTML = `<div class="empty">该选项暂无数据</div>`; return }
+  const max = nice(Math.max(...pts.map(([, v]) => v)) * 1.1), ticks = 4
+  const x = (i) => L + (labels.length === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (labels.length - 1))
+  const y = (v) => T + (H - T - B) * (1 - v / max)
+  const grid = Array.from({ length: ticks + 1 }, (_, k) => {
+    const v = (max * k) / ticks
+    return `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${fmt(v)}</text>`
+  }).join("")
+  const step = Math.max(1, Math.ceil(labels.length / Math.floor((W - L - R) / 70)))
+  const xl = labels.map((l, i) => ((i % step || labels.length - 1 - i < step) && i !== labels.length - 1 ? "" : `<text x="${x(i)}" y="${H - 6}" text-anchor="${labels.length > 1 && i === labels.length - 1 ? "end" : i === 0 && labels.length > 1 ? "start" : "middle"}" style="font-family:ui-monospace,monospace">${esc(l)}</text>`)).join("")
+  const path = pts.map(([i, v], k) => `${k ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("")
+  const dots = pts.map(([i, v]) => `<circle class="pt" data-i="${i}" cx="${x(i)}" cy="${y(v)}" r="4" fill="${colorFor(i)}"/>`).join("")
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}">${grid}${xl}<path class="series" d="${path}"/>${dots}</svg><div class="tip"></div>`
+  const tip = box.querySelector(".tip")
+  box.querySelectorAll(".pt").forEach((c) => {
+    c.onmouseenter = () => {
+      const i = +c.dataset.i
+      tip.innerHTML = `<b>${esc(meta[i].title)}</b>值：${fmt(values[i])}<br>${meta[i].lines.map(esc).join("<br>")}`
+      tip.style.display = "block"
+      const left = Math.min(x(i) + 10, W - tip.offsetWidth - 4)
+      tip.style.left = `${Math.max(0, left)}px`
+      tip.style.top = `${Math.max(0, y(values[i]) - tip.offsetHeight - 10)}px`
+      c.setAttribute("r", 6)
+    }
+    c.onmouseleave = () => { tip.style.display = "none"; c.setAttribute("r", 4) }
+  })
+}
+
+function render(data) {
+  const commits = Object.values(data.commits).sort((a, b) => a.date.localeCompare(b.date))
+  $("repo").innerHTML = data.repository ? `<a href="https://github.com/${esc(data.repository)}">${esc(data.repository)}</a>` : ""
+  $("updated").textContent = data.updatedAt ? `更新于 ${data.updatedAt.replace("T", " ").slice(0, 16)} UTC` : ""
+  const commitUrl = (sha) => (data.repository ? `https://github.com/${data.repository}/commit/${sha}` : "#")
+
+  // 概览卡片
+  const benched = commits.filter((c) => c.bench?.length)
+  const latest = benched.at(-1)
+  const recent = benched.slice(-30)
+  const withDebt = commits.filter((c) => c.debt)
+  const total = (c) => c.debtTotal ?? 0
+  const debtNow = withDebt.at(-1), debtFirst = withDebt[0]
+  const card = (label, value, sub = "") => `<div class="card"><div class="muted">${label}</div><div class="stat">${value}</div><div class="muted">${sub}</div></div>`
+  $("cards").innerHTML = [
+    card("最近一次基准", latest ? `<span class="${latest.bench.at(-1).regressed ? "badge bad" : "badge good"}" style="font-size:14px">${latest.bench.at(-1).regressed ? "有退化" : "无退化"}</span>` : "—", latest ? `<span class="sha">${short(latest.sha)}</span> · ${day(latest.date)}` : "尚无数据"),
+    card("近 30 次基准中的退化", recent.length ? `${recent.filter((c) => c.bench.at(-1).regressed).length} / ${recent.length}` : "—", "按提交计"),
+    card("当前规则错误", debtNow ? debtNow.guardErrors ?? 0 : "—", debtNow ? `<span class="sha">${short(debtNow.sha)}</span>` : ""),
+    card("存量违规（计数类）", debtNow ? total(debtNow).toLocaleString() : "—", debtFirst && debtNow && debtFirst !== debtNow ? `较最早记录 ${total(debtNow) - total(debtFirst) >= 0 ? "+" : ""}${(total(debtNow) - total(debtFirst)).toLocaleString()}` : ""),
+  ].join("")
+
+  // 性能趋势
+  const scenarios = [...new Set(benched.flatMap((c) => Object.keys(c.bench.at(-1).scenarios)))]
+  const metrics = Object.keys(LABEL)
+  if (!$("scenario").options.length) {
+    $("scenario").innerHTML = scenarios.map((s) => `<option>${esc(s)}</option>`).join("")
+    $("metric").innerHTML = metrics.map((m) => `<option value="${m}">${LABEL[m]}</option>`).join("")
+  }
+  const drawPerf = () => {
+    const sc = $("scenario").value, m = $("metric").value
+    const rows = benched.filter((c) => c.bench.at(-1).scenarios[sc])
+    const bad = css("--bad"), accent = css("--accent")
+    lineChart("perf", rows.map((c) => short(c.sha)), rows.map((c) => c.bench.at(-1).scenarios[sc].head[m] ?? null),
+      rows.map((c) => {
+        const b = c.bench.at(-1), s = b.scenarios[sc]
+        return { title: `${short(c.sha)}  ${c.subject}`, lines: [`对比 ${short(b.base)}：${s.base[m] ?? "—"} → ${s.head[m] ?? "—"}`, s.regressed.length ? `退化：${s.regressed.map((x) => LABEL[x] ?? x).join("、")}` : "无退化", `${b.runner.os} · ${day(b.createdAt)}`] }
+      }),
+      (i) => (rows[i].bench.at(-1).scenarios[sc].regressed.includes(m) ? bad : accent))
+  }
+  $("scenario").onchange = $("metric").onchange = drawPerf
+  drawPerf()
+
+  // 存量趋势
+  const rules = [...new Set(withDebt.flatMap((c) => Object.keys(c.debt)))].sort()
+  if (!$("rule").options.length) $("rule").innerHTML = `<option value="*">计数类错误规则合计</option>` + rules.map((r) => `<option>${esc(r)}</option>`).join("")
+  const drawDebt = () => {
+    const r = $("rule").value, accent = css("--accent")
+    lineChart("debt", withDebt.map((c) => short(c.sha)), withDebt.map((c) => (r === "*" ? total(c) : c.debt[r] ?? 0)),
+      withDebt.map((c) => ({ title: `${short(c.sha)}  ${c.subject}`, lines: [`规则错误：${c.guardErrors ?? 0}`, day(c.date)] })), () => accent)
+  }
+  $("rule").onchange = drawDebt
+  drawDebt()
+
+  // 提交记录（新的在前）
+  const list = [...commits].reverse()
+  $("count").textContent = `${list.length} 个提交`
+  if (!list.length) { $("commits").innerHTML = `<tr><td class="empty">还没有数据。运行 nightly 或 bench-commits 工作流后会出现在这里。</td></tr>`; return }
+  $("commits").innerHTML = `<tr><th>日期</th><th>提交</th><th>说明</th><th>性能（对比基线）</th><th>规则错误</th><th></th></tr>` + list.map((c) => {
+    const b = c.bench?.at(-1)
+    const perf = !b ? `<span class="badge none">未测</span>` : b.error ? `<span class="badge none" title="${esc(b.error)}">未完成</span>`
+      : Object.entries(b.scenarios).map(([n, s]) => `<span class="badge ${s.regressed.length ? "bad" : "good"}" title="${esc(s.regressed.map((x) => LABEL[x] ?? x).join("、") || "无退化")}">${esc(n)}${s.regressed.length ? " ✗" : " ✓"}</span>`).join("")
+    return `<tr><td class="num muted">${day(c.date)}</td><td><a class="sha" href="${commitUrl(c.sha)}">${short(c.sha)}</a>${b ? `<div class="muted sha">vs ${short(b.base)}</div>` : ""}</td>
+      <td class="subject">${esc(c.subject)}</td><td>${perf}</td><td class="num">${c.guardErrors ?? "—"}</td><td>${b?.runUrl ? `<a href="${b.runUrl}">运行记录</a>` : ""}</td></tr>`
+  }).join("")
+}
+
+let last
+const load = () => fetch("data/index.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : { commits: {} })).catch(() => ({ commits: {} })).then((d) => render((last = d)))
+load()
+// 主题切换或窗口变宽时重画（SVG 按容器像素绘制）
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => last && render(last))
+let rt
+addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => last && render(last), 150) })
+</script>
+</body>
+</html>
