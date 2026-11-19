@@ -223,9 +223,12 @@ if (tier === "commit") {
   const range = git(repo, "diff", "--name-only", since, sha).out.split("\n").map(posix).filter(Boolean)
   await step("规则检查", `${since}..${sha.slice(0, 8)} · ${range.length} 个文件`, ["bun", path.join(here, "check.ts"), repo, "--commit", sha, "--changed-since", since])
 
-  // 多 Agent 共用工作区：测试跑在工作区上，与 HEAD 不一致的文件要说明
-  const dirty = git(repo, "status", "--porcelain", "--", ...range).out
-  if (dirty) notes.push(`以下待推送文件在工作区还有未提交改动，测试结果对应的是工作区内容：\n${dirty}`)
+  // 测试与契约跑在工作区上：没提交的改动不会随这次 push 上去，却可能让本地通过、CI 失败
+  const pending = git(repo, "status", "--porcelain", "--untracked-files=all", "--", "packages", "package.json", "bun.lock", "patches").out.split("\n").filter(Boolean)
+  if (pending.length) {
+    ui.line("warn", "工作区", `${pending.length} 处未提交改动不在这次 push 里`, "本地测试结果可能与 CI 不同")
+    notes.push(`本地测试跑在工作区上，下面这些改动没有提交，不会随这次 push 上去：\n${pending.slice(0, 20).join("\n")}${pending.length > 20 ? `\n… 另有 ${pending.length - 20} 处` : ""}`)
+  }
 
   let deferred: string[] = []
   if (!failures.length) {
