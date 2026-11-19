@@ -228,7 +228,7 @@ Before stabilizing the client API:
 
 # opencode (SMARK fork)
 
-The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.17-smark`.
+The domain language of opencode — an open-source AI coding agent. This SMARK glossary supplements the upstream Session Runtime definitions above on the v1.18.32 migration baseline. V1-specific terms describe the retained compatibility path; canonical runtime owners span Schema, Core, Protocol, Server and Client. Use these terms in issues, refactor proposals, hypotheses and test names without replacing the native V2 vocabulary above. Current SMARK CLI version: `1.19.18-smark`.
 
 CLI 发布版本以 `packages/opencode/package.json` 与 `bun.lock` 为准；`v1.18.32` 仅表示迁移基线，VS Code 扩展保持独立版本。
 

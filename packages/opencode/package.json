@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "version": "1.19.17-smark",
+  "version": "1.19.18-smark",
   "//": "版本合同：源 1.15.x 版本递增映射目标 1.19.17-smark（#465）",
   "//465-release-note": "#465 源 patch bump 1.15.6→1.15.7 按版本线映射为 1.19.16→1.19.17；禁止回写 1.14/1.15。",
   "//440-release-note": "#440 源 patch bump 1.15.10→1.15.11 按版本线映射为 1.19.15→1.19.16；禁止回写 1.14/1.15。",

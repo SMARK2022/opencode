@@ -12,7 +12,7 @@
   <a href="https://github.com/anomalyco/opencode/tree/dev"><img alt="Upstream dev branch" src="https://img.shields.io/badge/upstream-dev-6b7280?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-ai"><img alt="Upstream npm version" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square&label=upstream%20npm" /></a>
   <a href="https://github.com/SMARK2022/opencode/tree/dev-smark"><img alt="SMARK branch" src="https://img.shields.io/badge/SMARK%20branch-dev--smark-0969da?style=flat-square" /></a>
-  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.19.17-f97316?style=flat-square" /></a>
+  <a href="https://github.com/SMARK2022/opencode/releases"><img alt="Current SMARK version" src="https://img.shields.io/badge/current-1.19.18-f97316?style=flat-square" /></a>
 </p>
 
 <p align="center">
@@ -44,7 +44,7 @@
 > **Back up your `opencode.db` before switching branches.** The SMARK branch carries custom database schema changes and migrations. Before switching from upstream `dev`, the main branch, or another original branch, create a manual backup of your local database. After migration, the database may not migrate or roll back cleanly to upstream or original branches; this project cannot take responsibility for schema-format compatibility issues in your local database context data.
 
 > [!TIP]
-> This is OpenCode's `dev-smark` enhanced branch (current version `1.19.17`, CLI release tag `v1.19.17-smark`), based on upstream `dev`. It focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language intelligence and Notebook integration, network proxy support, and installation experience.
+> This is OpenCode's `dev-smark` enhanced branch (current version `1.19.18`, CLI release tag `v1.19.18-smark`), based on upstream `dev`. It focuses on TUI interaction, session management, token statistics, Windows/PowerShell compatibility, VS Code language intelligence and Notebook integration, network proxy support, and installation experience.
 
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
 
@@ -95,10 +95,10 @@ It only passes `OPENCODE_INSTALL_DIR` to `curl`; the `bash` process that actuall
 
 ```bash
 curl -fsSL https://github.com/SMARK2022/opencode/releases/latest/download/install | \
-  bash -s -- --version 1.19.17-smark
+  bash -s -- --version 1.19.18-smark
 ```
 
-`bash -s --` tells `bash` to read the installer from stdin, and everything after it — `--version 1.19.17-smark` here — is passed through as installer arguments. Both `1.19.17-smark` and the release tag form `v1.19.17-smark` work.
+`bash -s --` tells `bash` to read the installer from stdin, and everything after it — `--version 1.19.18-smark` here — is passed through as installer arguments. Both `1.19.18-smark` and the release tag form `v1.19.18-smark` work.
 
 ### Installer Behavior
 
@@ -253,7 +253,7 @@ The submodule only provides source discovery and provenance; it plays no part in
 
 ### VS Code Language And Notebook Integration
 
-To reuse VS Code language services or work with Notebook tools, install the [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) extension. The repository extension version is `1.19.14`, and SMARK CLI `1.19.17-smark` is the recommended pairing. The two are versioned independently, and Marketplace may still show `1.15.11` until the new build is published. The extension sets up a local authenticated bridge between VS Code and the OpenCode CLI; without it installed or connected, the CLI keeps using its built-in LSP, but VS Code-backed language operations and Notebook tools are unavailable.
+To reuse VS Code language services or work with Notebook tools, install the [SMARK2022.opencode-ide-bridge](https://marketplace.visualstudio.com/items?itemName=SMARK2022.opencode-ide-bridge) extension. The repository extension version is `1.19.14`, and SMARK CLI `1.19.18-smark` is the recommended pairing. The two are versioned independently, and Marketplace may still show `1.15.11` until the new build is published. The extension sets up a local authenticated bridge between VS Code and the OpenCode CLI; without it installed or connected, the CLI keeps using its built-in LSP, but VS Code-backed language operations and Notebook tools are unavailable.
 
 After startup, the extension opens a local bridge on `127.0.0.1:<random port>` and writes a heartbeat manifest to `~/.local/state/opencode/ide/<uuid>.json`. OpenCode automatically picks the matching VS Code bridge by workspace and notebook path. In remote SSH, WSL, or container setups, the CLI must run on the same side that can reach the bridge.
 

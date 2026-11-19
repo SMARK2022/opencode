@@ -570,7 +570,7 @@
     },
     "packages/opencode": {
       "name": "opencode",
-      "version": "1.19.17-smark",
+      "version": "1.19.18-smark",
       "bin": {
         "opencode": "./bin/opencode",
       },

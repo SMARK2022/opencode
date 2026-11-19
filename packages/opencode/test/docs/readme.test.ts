@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import pkg from "../../package.json"
 
 describe("README branch onboarding", () => {
   test("root readmes show migration and branch notices before the screenshot", async () => {
@@ -12,7 +13,7 @@ describe("README branch onboarding", () => {
       expect(tip).toBeGreaterThan(warning)
       expect(screenshot).toBeGreaterThan(tip)
       // 分支身份仍沿用目标发布版本，不能随文案重排退回 source 的旧版本。
-      expect(content.slice(tip, screenshot)).toContain("1.19.17-smark")
+      expect(content.slice(tip, screenshot)).toContain(pkg.version)
     }
   })
 })
