@@ -115,6 +115,11 @@ If a prior finding concerned section A3 and the builder revised A3, the next
 round still audits the original requirement and every relevant changed region,
 not only A3. It does not expand into unrelated unchanged regions.
 
+In every round after the first, apply the policy's Re-audit Rounds rule: read
+the full scope, but block only on unresolved prior findings, defects introduced
+by the Revision Delta, or strict-class consequences. Verify the Revision Delta
+against the plan and repository rather than trusting it.
+
 ## Independent Reconstruction
 
 Before judging the artifact:
@@ -138,6 +143,11 @@ Classify each concern as `observed`, `contracted`, `reachable`, or
 `speculative`.
 
 A blocking finding requires one of the first three classes.
+
+For a `reachable` concern, state what the pre-R1 baseline does on the same
+path. When the change is no worse than the baseline, the concern is outside the
+verbatim requirement, and no strict-class consequence applies, classify it as
+`Follow-up`. Do not add it to the plan's invariants.
 
 Reachable evidence does not require a historical incident. A current executable
 producer-to-consumer path with satisfiable conditions is sufficient when it
@@ -248,11 +258,22 @@ Do not judge completeness by size. A short plan can be complete; a long plan
 can still omit the root cause. A small diff can be insufficient; a large diff
 can be justified by confirmed behavior.
 
+### Revision growth
+
+In later rounds, compare the current revision with the last audited one. When
+new invariants, states, branches, files, or concepts were added mainly to
+resolve a non-strict finding, state whether reverting that growth or a simpler
+route still meets the requirement.
+
 ## Plan-Specific Checks
 
 In plan mode, verify:
 
 - The requirement is quoted without narrowing.
+- Check the whole plan against the original requirement and the pre-R1 baseline.
+  If it omits any required detail of the design, changes, experiment results,
+  acceptance criteria, or verification steps, or contains only a partial summary
+  of those details, identify the affected details and return `BLOCK`.
 - Relevant files and call sites were actually inspected.
 - The supported input domain and reachability are explicit.
 - Invariants have stable IDs.
@@ -263,13 +284,12 @@ In plan mode, verify:
 - Workarounds have explicit deletion or preservation decisions.
 - Forward and reverse traceability are complete.
 - File changes are exact and restrained.
-- TDD slices can fail on current behavior.
+- TDD slices must expose a failure or missing capability in the pre-R1 baseline.
+  If a test asserts only the behavior of an obsolete intermediate revision, return `BLOCK`.
 - Verification commands are concrete and use correct working directories.
 - Key assumptions and explicit plan-stage acceptance criteria are supported by
   inspected evidence and, where needed, executed experiments.
-- The `E`/`C` estimate is feasible and commits implementation to the actual hard
-  minimum; arithmetic or line-scope drift that preserves that minimum is
-  non-blocking.
+- Every revision after R1 records a Revision Delta.
 - Real risks are separated from rejected speculation.
 - Revision metadata and status are internally consistent.
 
@@ -278,7 +298,10 @@ In plan mode, verify:
 In implementation mode, verify:
 
 - Current plan revision equals approved revision.
-- Every diff hunk maps to the approved plan.
+- Compare all task-related worktree changes against the pre-R1 baseline and map
+  each diff hunk to the approved plan. If a task-related change goes beyond that
+  plan, identify the change, return `BLOCK`, and require the builder to remove
+  it. Leave unrelated worktree changes untouched.
 - No material implementation decision exists only in chat.
 - Tests went red for the intended behavior before the fix.
 - Tests observe behavior through the agreed seam.
@@ -289,48 +312,13 @@ In implementation mode, verify:
 - No unauthorized fallback or responsibility leak was introduced.
 - Repository style, types, error handling, and module shape are preserved.
 - Required test, typecheck, lint, build, generation, and migration commands pass.
-- The changed code satisfies the Chinese explanatory-comment gate.
+- Comments follow the policy's Comment Rule.
 
-## Chinese Comment Audit
+## Comment Audit
 
-In plan mode, evaluate whether the implementation commits to the 15 percent
-implementation target. In implementation mode, independently recompute `E`
-and `C` from the actual diff. Do not trust the builder's estimate or the
-canonical plan's recorded arithmetic.
-
-- `E`: substantively added or modified non-blank production, test, and
-  configuration code lines, excluding import-only, formatter-only, generated,
-  and pure-move changes.
-- `C`: nearby Chinese explanatory comment lines that explain rationale,
-  invariants, real boundaries, constant meaning, behavioral test intent,
-  compatibility contracts, or safety constraints.
-
-The audit blocking floor is:
-
-```text
-if E = 0: no E/C blocker
-if E > 0 and C / E < 0.10: blocking
-otherwise: no E/C blocker
-```
-
-A ratio from 10 percent up to but below the 15 percent implementation target
-is a non-blocking quality note. Stale estimates, mismatched plan records,
-rounding differences, and arithmetic discrepancies are non-blocking when the
-auditor has recomputed the actual diff.
-
-Do not count comments that:
-
-- Restate code.
-- Translate identifiers.
-- Repeat test names.
-- Describe obvious control flow.
-- Are concentrated away from the decisions they claim to explain.
-- Split one idea across lines to manipulate the ratio.
-
-Report actual `E`, actual qualifying `C`, excluded-line categories, and the
-calculated ratio. Evaluate the E/C floor after behavioral, regression,
-ownership, test, and verification checks rather than using line arithmetic as
-a substitute for them.
+Do not count comments or compute ratios. Block only a comment that misdescribes
+behavior or justifies a pattern the policy forbids. Report restating comments
+and task-history comments as non-blocking record corrections.
 
 ## Finding Format
 
@@ -348,6 +336,8 @@ Every blocking finding must use:
 - Canonical-plan evidence: section
 - Responsibility owner:
 - Concrete behavioral consequence:
+- Pre-R1 baseline behavior on the same path:
+- Round basis (later rounds): unresolved prior | introduced by delta | strict class
 - Minimal correction direction:
 ```
 
@@ -368,11 +358,12 @@ Use separate sections in this exact order:
 
 1. `Blocking findings`
 2. `Non-blocking findings`
-3. `Rejected speculation`
-4. `Requirement and traceability coverage`
-5. `Primary-path and fallback verdict`
-6. `Code quality and Chinese-comment verdict` for implementation mode
-7. `Release verdict`
+3. `Follow-up`
+4. `Rejected speculation`
+5. `Requirement and traceability coverage`
+6. `Primary-path and fallback verdict`
+7. `Code quality verdict` for implementation mode
+8. `Release verdict`
 
 If no blocking findings exist, write the exact sentence:
 
@@ -391,8 +382,8 @@ Non-blocking record corrections do not prevent approval. In every other case,
 the verdict is `BLOCK`.
 
 Any blocking finding requires revision or rework followed by another full-scope
-audit. Plan audit is limited to 6 rounds; implementation audit is limited to 3
-rounds.
+audit under the policy's Re-audit Rounds rule. Plan audit is limited to 6
+rounds; implementation audit is limited to 3 rounds. (User can request more rounds, but it must be said explicitly.)
 
 At the round limit, preserve unresolved blocking findings as blocking open
 decisions for the user. The release verdict remains `BLOCK`. Do not weaken a

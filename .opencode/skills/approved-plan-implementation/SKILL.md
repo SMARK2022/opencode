@@ -168,36 +168,12 @@ The implementation must remain surgical:
 - Do not swallow errors or convert failure into success.
 - Keep dependency provisioning and cleanup explicit.
 
-## Phase 8: Satisfy the Chinese Comment Gate During Implementation
+## Phase 8: Follow the Comment Rule
 
-Do not postpone comments until the end and then add filler. Add each explanation
-beside the non-obvious decision it protects.
-
-Track:
-
-- `E`: substantively added or modified non-blank production, test, and
-  configuration code lines, excluding import-only, formatter-only, generated,
-  and pure-move changes.
-- `C`: nearby qualifying Chinese explanatory comment lines.
-
-Require:
-
-```text
-if E = 0: C = 0
-if E > 0: C >= max(1, ceil(E * 0.15))
-```
-
-Qualifying comments explain:
-
-- Why a non-obvious branch exists.
-- Which invariant must remain true.
-- Why a constant has its exact value or semantic meaning.
-- Which real seam or compatibility contract is protected.
-- Why a behavioral test proves the required capability.
-- Why a safety or permission decision cannot be relaxed.
-
-Do not count comments that restate code, translate names, repeat test titles,
-describe obvious flow, or split one explanation to game the ratio.
+Follow the policy's Comment Rule. There is no quota. Add a Chinese comment only
+beside a non-obvious invariant, boundary, constant, compatibility or safety
+reason, or test intent. Never use a comment to justify a timer, guard, fallback,
+or other pattern the policy forbids; repair the cause instead.
 
 ## Phase 9: Handle New Facts Without Improvisation
 
@@ -254,7 +230,6 @@ Complete the plan's implementation evidence, including:
 - Verification commands and results.
 - Original feedback-loop result.
 - Actual secondary and replacement path inventory.
-- Actual `E`, qualifying `C`, excluded lines, required count, and ratio.
 - Remaining unverifiable items.
 
 Invoke the configured independent `adversarial-auditor` with only:
@@ -271,7 +246,9 @@ reduced audit scope.
 ## Phase 12: Rework and Re-Audit
 
 Every blocking implementation finding requires rework followed by another
-audit of the complete original requirement and affected interface.
+audit of the complete original requirement and affected interface under the
+policy's Re-audit Rounds rule. Resume the same auditor task when the runtime
+allows, and record what the rework changed in the implementation evidence.
 
 Do not ask the auditor to inspect only the corrected hunk. Do not reduce a
 finding to non-blocking merely to finish.
@@ -295,7 +272,6 @@ Mark the plan `verified` only when:
 - Required repository checks pass.
 - Superseded workarounds are removed.
 - No unapproved fallback or responsibility leak exists.
-- The Chinese explanatory-comment gate passes.
 - An independent full-scope implementation audit states
   `No blocking findings`.
 
@@ -313,7 +289,6 @@ Final reporting must include:
 - Root-cause and approved-route evidence.
 - Removed workarounds.
 - Secondary and replacement path verdict.
-- Actual `E`, `C`, ratio, and representative Chinese comments.
 - Independent audit rounds, findings, and resolutions.
 - Remaining risks or unverifiable items.
 - Why every changed file and production concept was necessary.

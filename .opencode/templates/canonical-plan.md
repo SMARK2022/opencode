@@ -18,6 +18,12 @@ This file is the sole implementation specification for this task. Chat
 summaries, superseded revisions, and builder rationale outside this file are
 not implementation authority.
 
+Aim for at most 1,600 lines for the whole plan, or 800 lines for a simple
+request. The plan must not exceed 2,000 lines. If it is too long, first
+consolidate fully duplicated design sections and trim obsolete design and
+audit details. Preserve implementation details and prefer targeted edits
+over rewriting the whole document.
+
 ## 1. Verbatim Requirement
 
 Quote the user's requirement without rewriting its meaning.
@@ -151,21 +157,20 @@ No production concept may remain unjustified.
 
 Use one confirmed seam and one vertical behavior slice at a time.
 
-| Order | Red behavior | Why current code fails | Minimal green behavior | Regression protected |
+| Order | Red behavior | Why baseline code before R1 fails | Minimal green behavior | Regression protected |
 | --- | --- | --- | --- | --- |
 | 1 |  |  |  |  |
 
 Tests must observe public behavior and use an independent expected value.
+Keep a new regression assertion only if it detects a failure present in the
+pre-R1 baseline. When an intermediate design changes, remove or rewrite the
+assertions specific to it. If a check only distinguishes the final design from
+a discarded candidate, remove the assertion and any test code used only by it.
 
-## 17. Chinese Comment Budget
+## 17. Comments
 
-| Metric | Estimate | Method |
-| --- | --- | --- |
-| Effective changed code lines `E` |  | Exclude imports, formatting, generated files, and pure moves |
-| Required Chinese explanatory comments `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
-
-List the invariants, non-obvious constraints, constants, compatibility reasons,
-test intentions, and safety decisions that require nearby Chinese explanation.
+List only the non-obvious constraints that need a comment under the policy's
+Comment Rule, or write `None`. There is no quota.
 
 ## 18. Verification
 
@@ -198,6 +203,15 @@ in a separate non-blocking subsection.
 
 Use this section only for irreducible product or policy choices.
 
+### Follow-up
+
+Reachable concerns outside this task's acceptance scope. They do not block and
+are not implemented here; the user decides whether each becomes a new task.
+
+| Concern | Evidence | Baseline behavior | Raised in round |
+| --- | --- | --- | --- |
+|  |  |  |  |
+
 ### Rejected Speculation
 
 Record plausible-sounding concerns that were investigated and rejected for lack
@@ -210,13 +224,24 @@ The independent auditor must:
 - Read this exact file and the original requirement.
 - Reconstruct behavior from repository evidence.
 - Treat builder summaries as untrusted.
-- Audit the complete original scope on every round.
+- Audit the complete original scope on every round, applying the policy's
+  Re-audit Rounds rule from the second round onward.
+- Plan audit: return `BLOCK` if the plan omits any design or work detail required
+  to get from the pre-R1 baseline to the target, or provides only a partial summary.
+- Implementation audit: review the full task diff against the same baseline.
+  If any previously implemented detail goes beyond the approved plan, return
+  `BLOCK` and require its removal.
 - Require evidence for every blocking finding.
 - Check both under-design and over-design.
-- Check root-cause repair, fallback, ownership, tests, code quality, and the 15
-  percent Chinese explanatory-comment plan.
+- Check root-cause repair, fallback, ownership, tests, and code quality.
 
-## 22. Plan Audit Record
+## 22. Revision Delta and Plan Audit Record
+
+Add one row per revision after R1. Keep body sections free of revision history.
+
+| Revision | Sections changed | Prior findings and resolution | Invariants, states, concepts, or files added or removed |
+| --- | --- | --- | --- |
+|  |  |  |  |
 
 | Round | Audited revision | Full scope? | Blocking findings | Non-blocking findings | Result | Invocation reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -241,15 +266,6 @@ Complete only after implementation.
 ### Original Feedback-Loop Result
 
 ### Actual Secondary and Replacement Path Inventory
-
-### Chinese Comment Calculation
-
-| Metric | Actual | Exclusions and evidence |
-| --- | --- | --- |
-| Effective changed code lines `E` |  |  |
-| Qualifying Chinese comment lines `C` |  |  |
-| Ratio `C / E` |  | `N/A` when `E = 0` |
-| Required minimum `C` |  | `if E = 0: C = 0`; `if E > 0: C >= max(1, ceil(E * 0.15))` |
 
 ### Remaining Unverified Items
 

@@ -348,6 +348,13 @@ if no convention exists, use `docs/plans/<task-slug>.md`.
 
 The canonical plan, not chat, is the implementation contract.
 
+The whole plan must use the HEAD commit before implementation of R1 for the
+original requirement as its fixed baseline. Describe the full change from that
+baseline to the target, including design decisions, retained work already
+implemented, experiment results, acceptance criteria, and verification steps.
+If the plan omits any still-applicable detail or covers only the changes since
+the most recent intermediate revision, edit the plan accurately and completely.
+
 Required metadata:
 
 - `Status`
@@ -436,6 +443,53 @@ After any blocking finding and revision, the next audit covers the original
 requirement and the complete affected interface again. It must not shrink to
 the recently edited section.
 
+## Requirement Anchoring
+
+The approved revision's verbatim requirement, non-goals, and invariant list are
+the task's acceptance scope. During audit, a new invariant enters the plan only
+when it:
+
+- States behavior required by the verbatim user requirement.
+- Protects existing behavior that the plan or diff would regress relative to
+  the pre-change baseline on the same path.
+- Prevents a crash, hang, data loss, persistence corruption, or permission or
+  security weakening.
+
+Any other reachable concern found during audit is recorded as `Follow-up`. It is
+real, it is outside this task, and the user decides whether it becomes a new
+task. A `Follow-up` does not block, does not enter the invariant list, and must
+not be fixed in passing.
+
+## Re-audit Rounds
+
+The first audit in each mode applies every blocking standard to the whole
+artifact. Every later round remains full-scope: the auditor still reads the
+original requirement, the current revision, and every changed region. Blocking
+in a later round is limited to:
+
+1. A prior blocking finding that the revision did not resolve.
+2. A defect introduced by the revision delta, including states, branches,
+   files, or concepts added to resolve an earlier finding.
+3. A strict-class consequence: the requirement scenario fails, existing
+   behavior regresses relative to the baseline, or a crash, hang, data loss,
+   persistence corruption, or permission or security weakening occurs.
+
+A first-time concern about content that is unchanged since an audited revision
+and outside these classes is recorded as `Non-blocking` or `Follow-up`.
+
+To make the delta auditable, the builder records a Revision Delta for every
+revision after R1: changed sections, each prior finding and its resolution, and
+the invariants, states, concepts, and files added or removed since the last
+audited revision. The delta is an untrusted locator; the auditor verifies it
+against the plan and repository. Later rounds resume the same auditor task when
+the runtime allows, so the auditor retains the previously audited revision. A
+fresh auditor task reads the Revision Delta, the audit record, and the plan
+file's version-control history when available.
+
+When a delta grows the design mainly to resolve a non-strict finding, the
+auditor must state whether reverting that growth or a simpler route meets the
+requirement.
+
 ## Finding Standard
 
 A blocking finding must establish an observed, contracted, or reachable
@@ -449,12 +503,18 @@ executable, no hard threshold demonstrably fails, and no release claim is false.
 Unsupported concerns must be marked `Rejected speculation`, not left as vague
 risk.
 
+A reachable concern that is not observed or contracted must state the baseline
+behavior on the same path. When the change is no worse than the baseline, the
+concern lies outside the requirement, and no strict-class consequence applies,
+it is a `Follow-up`, not a blocking finding.
+
 Finding classes:
 
 - `Blocking`
 - `Non-blocking`
 - `Rejected speculation`
 - `Open decision`
+- `Follow-up`
 - `No blocking findings`
 
 ## Blocking Standards
@@ -477,7 +537,7 @@ The following block plan approval or implementation completion:
 - Tests assert implementation details rather than behavior.
 - Existing tests or safeguards were weakened to make the change pass.
 - Errors are swallowed or converted into success without an explicit contract.
-- Code-quality or Chinese-comment gates below fail.
+- The code-quality gate below fails.
 
 The following do not block unless a repository rule makes them mandatory:
 
@@ -508,58 +568,25 @@ Implementation audit must block when the changed code:
 - Uses a shallow interface that exposes complexity callers should not own.
 - Fails the repository's required tests, typecheck, lint, build, generation, or
   migration verification.
+- Adds a comment that misdescribes behavior, or one that justifies a pattern
+  this policy forbids. A comment never authorizes the pattern it explains.
 
-## Chinese Explanatory Comment Gate
+Where the repository provides mechanical checks (tests, typecheck, lint, guard
+scripts, budgets), their results are authoritative for what they cover. The
+audit verifies that they ran and passed, does not re-derive them by hand, and
+spends its effort on behavior those checks cannot observe.
 
-The 15 percent Chinese explanatory-comment requirement applies to
-implementation.
+## Comment Rule
 
-Define:
+Comments have no quota. Prefer names, types, and behavioral tests over prose.
+Write a comment, in Chinese, only where a reader cannot recover the reason from
+the code: a non-obvious invariant, a real boundary, the meaning of a constant,
+a compatibility or safety reason, or a test intent its name cannot carry.
 
-- `E`: added or substantively modified non-blank code lines in production,
-  tests, and configuration. Exclude import-only changes, formatter-only changes,
-  generated files, and pure file movement.
-- `C`: added or substantively modified Chinese explanatory comment lines that
-  are adjacent to the relevant change and explain rationale, an invariant, a
-  real boundary, a constant's meaning, a test's behavioral intent, a
-  compatibility contract, or a safety constraint.
-
-Required count:
-
-```text
-if E = 0: C = 0
-if E > 0: C >= max(1, ceil(E * 0.15))
-```
-
-Comments do not count merely because they contain Chinese. The following do not
-qualify:
-
-- Restating an assignment, call, condition, or return.
-- Translating an identifier into Chinese.
-- Repeating the test name.
-- Describing obvious control flow.
-- Concentrating unrelated comments at a file or function header.
-- Adding comments to generated files.
-- Splitting one explanation into many short lines to game the ratio.
-
-Qualifying comments explain why the code exists or what future changes must not
-break. Examples:
-
-```ts
-// 保持原始命令参与权限判断，避免规范化结果降低已有 deny 风险。
-```
-
-```ts
-// 该断言锁定用户可观察行为，不依赖内部 helper 的调用次数。
-```
-
-Comments must be distributed near the changed decisions they explain and
-satisfy this requirement even when all tests pass.
-
-The canonical plan must commit to the minimum and provide a feasible `E`/`C`
-estimate. Estimate arithmetic or line-scope drift is non-blocking when it does
-not authorize a lower ratio. The implementation report and auditor must state
-actual values, calculation method, and excluded lines.
+Do not write comments that restate code, translate identifiers, or record task
+history such as issue or PR numbers, plan revisions, invariant IDs, dates,
+incidents, or precedents. History belongs in commit messages and the canonical
+plan.
 
 ## Iteration Limits
 
@@ -589,7 +616,6 @@ Implementation is complete only when:
 - Required repository verification passes.
 - Superseded workarounds are removed.
 - No unauthorized fallback or responsibility leak exists.
-- The Chinese explanatory-comment gate passes.
 - An independent full-scope implementation audit records
   `No blocking findings`.
 - Remaining unverifiable items are reported explicitly.

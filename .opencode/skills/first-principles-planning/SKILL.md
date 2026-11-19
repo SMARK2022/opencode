@@ -270,22 +270,11 @@ List exact verification commands and their working directories. Respect the
 repository rule that tests and typechecks run from package directories when
 required.
 
-## Phase 8: Plan Code Quality and Chinese Comments
+## Phase 8: Plan Code Quality and Comments
 
-Estimate effective changed code lines `E` and the required qualifying Chinese
-explanatory comments:
-
-```text
-if E = 0: C = 0
-if E > 0: C >= max(1, ceil(E * 0.15))
-```
-
-Identify the exact non-obvious invariants, test intentions, constants, real
-boundaries, compatibility reasons, and safety decisions that require nearby
-Chinese explanation.
-
-Do not plan comments that restate assignments or control flow. The ratio is a
-hard gate, but meaningless Chinese text does not count.
+Follow the policy's Comment Rule. There is no comment quota. List only the few
+non-obvious constraints that a reader could not recover from names, types, or
+tests; `None` is a valid answer.
 
 ## Phase 9: Write the Full Plan
 
@@ -301,7 +290,7 @@ Complete every applicable section of the canonical template, including:
 - Forward and reverse traceability.
 - File-level changes.
 - TDD slices.
-- Chinese comment budget.
+- Comments that the Comment Rule requires, if any.
 - Verification commands.
 - Diff budget.
 - Real risks, open decisions, and rejected speculation.
@@ -309,6 +298,10 @@ Complete every applicable section of the canonical template, including:
 
 Use `Not applicable` with a concrete reason when a template section genuinely
 does not apply. Do not silently omit sections.
+
+Write the body for the current revision only. (The current revision means all changes needed from the pre-R1 baseline to the revision planned.) Do not annotate body sections
+with the revision that introduced each item. Record history in the Revision
+Delta and audit record, which every revision after R1 must update.
 
 Set the plan to:
 
@@ -335,7 +328,8 @@ Any blocking finding requires:
 1. A plan revision.
 2. A revision increment.
 3. Cleared approval.
-4. A new audit of the complete original scope.
+4. A new audit of the complete original scope under the policy's Re-audit
+   Rounds rule, resuming the same auditor task when the runtime allows.
 
 If the auditor returns `No blocking findings` for the exact current revision,
 the orchestrating primary agent must copy the verdict and audit metadata into

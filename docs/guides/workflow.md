@@ -10,7 +10,7 @@
 
 - 跨 continuation 保持完整需求、范围和放行标准，不得缩小终态。
 - skills 和文档按阶段即时加载，禁止开局一次性读取全部内容。
-- 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、不自审。
+- 审计材料只由 `adversarial-auditor` subagent 加载；primary agent 不预读、但要自查。
 - 阶段加载的 policy、skill、template、仓库指令和 canonical plan 是权威依据。
 - 门禁未满足时，主动执行最小检查、隔离实验或方案修订；满足后推进下一阶段，避免停在“证据不足”或重复取证。
 - 仅在目标终态被当前证据逐项证明后标记 `complete`。同一真实阻塞在两个连续 eligible GOAL turns 中保持不变且无法继续推进时，才在第二次标记 `blocked`。
@@ -23,6 +23,8 @@
 - 门禁只约束行为、证据、owner 和验证，不规定函数数、文件数或代码结构。采用仓库最自然、内聚且足以承载需求和必要安全性的设计。
 - 每个 production concept 必须映射到用户需求、既有 invariant、仓库规则或真实安全/兼容证据，并说明现有逻辑为何无法承载。diff 大小不能替代完整性判断。
 - 只维护一个 canonical plan；聊天摘要、旧审计和 builder 自述不构成实施授权。
+- Plan 必须以原始需求 R1 实施前的 HEAD 为固定基线，完整写出从该基线到目标所需的设计、改动、实验结果、验收标准和验证步骤，包括此前已经实施且仍保留的部分，不得遗漏任何仍然适用的内容，或只包含最近一个中间版本的变动。
+- 新增的回归断言必须能检出上述基线中实际存在的问题。中间方案修改或撤回时，一并撤回或改写依赖该方案的断言；不得为基线中不存在、仅由中间方案引入的问题保留断言。
 
 ## 阶段 1：构建 Canonical Plan
 
@@ -38,7 +40,7 @@
 - 从当前仓库重新调查，不把旧方案或旧审计当作已确认事实。仓库内只创建或修订 plan，不修改 production、tests、config、migration、generated files 或真实业务数据；在用户许可范围内，可用临时脚本或内存副本进行隔离验证。
 - bug 类任务必须建立并实际运行能够捕获用户原始症状的 red-capable feedback loop。没有该信号时不得仅靠源码阅读猜根因，应继续构建信号或记录真实环境阻塞。
 - 送审前验证方案的关键假设和用户明确的方案验收要求；需要执行才能确认的内容应完成隔离实验，在 plan 中记录结果与验证范围。
-- 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/speculation/audit/comments。
+- 完成 template 各字段：evidence/domain/reachability、invariant/divergence/owner、route/paths/workaround、file/TDD/verification/diff、risks/follow-up/speculation/audit。
 - forward mapping：requirement/invariant -> owner/path/file/test。reverse mapping：concept -> requirement/invariant/safety evidence + 不可复用原因。确认行为没有 executable path、行为测试或明确 unverifiable reason 时不得提交；引用位置、估算和重复证据不构成映射缺失。
 - 完成后设置 `Status: audit-required`、`Approved revision: none`、`Implementation allowed: no`。
 
@@ -60,12 +62,13 @@
 - 收到 blocker 后，先核对其对应的用户需求、必须保持的行为和具体后果，再决定是否修正，不要上来就认为是自己的问题。
 - 若问题由候选设计引出，先评估设计是否是用户要求的，简化或直接改进现有路径能否解决，避免为了保留候选方案逐层追加修补。
 - 若问题本质上是审计员的过度边界审计，复用同一 `task_id`，引用 plan 与仓库证据请 auditor 复查，保留原结论直至复查完成。
-- 复议消息只提供事实和引用，不提供期望 verdict、范围收缩或收敛压力；auditor 的复查结果作为本轮最终 verdict。
-- 用户明确更新需求时，将原文与来源同步到 plan；以更新后的完整需求新建审计任务，延续已有轮次记录。
+- 对 reachable 但不在用户提及内的问题，若改动不比 baseline 差时，请复议并给出改动前 baseline 的行为，让 auditor 按 policy 改判为 `Follow-up`，记入 plan 的 Follow-up 表，不进入 invariant，也不顺手修复。
+- 复议消息提供事实和引用，auditor 的复查结果作为本轮最终 verdict。
+- 用户明确更新需求时，将原文与来源同步到 plan；若方案实质性改变则以更新后的完整需求新建审计任务，延续已有轮次记录。
 
 ### 放行
 
-- 经 policy 证实的 blocking finding 要求修订同一 plan、递增 revision、清空 approval，并按原始需求和完整 affected interface full-scope 重审；non-blocking record correction 不清空 approval 或触发重审。
+- 经 policy 证实的 blocking finding 要求修订同一 plan、递增 revision、填写 Revision Delta、清空 approval，并按原始需求和完整 affected interface full-scope 重审（复用task）；non-blocking record correction 不清空 approval 或触发重审。
 - 最多 6 轮，每轮使用同一材料性标准，不得以轮次、边角问题或“整体无重大问题”诱导 auditor 升降判级。连续调用失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽后 blockers 仍保持 blocking，并作为开放决定交给用户。
 - exact revision 仅在获得 `No blocking findings` 和 `APPROVE` 后，才原样记录 verdict，设置 `Status: approved`、`Approved revision: <current>`、`Implementation allowed: yes`；不得夹带设计修改。
 - `approved-plan-only` 在完成逐项终态审计后标记 GOAL `complete`，不得实施代码。
@@ -80,33 +83,34 @@
 ### TDD 和修改边界
 
 - 实施前重读批准范围；相关 interface、producer/consumer、invariant、owner、tests 或 file plan 漂移时停止并重审，不覆盖、不回退、不夹带无关 worktree 修改。
+- 建议由主 agent 自行实施；若通过 Task 委派 subagent 编辑，主 agent 必须在编辑完成后检查代码质量和风格。
 - 按批准 seam 执行 `red -> minimal approved behavior -> green -> regression`；只执行 approved repair/rollback，保持既有质量和安全约束并删除淘汰 workaround。
 - 必要安全增强必须进入新 revision；禁止无依据的 refactor、fallback、public API、配置和迁移。
 
 ### 注释和验证
 
-- 记录实际 `E/C`：`E` 排除空行、import-only、formatter-only、generated 和 pure-move，必须满足 `E=0 时 C=0`、否则 `C >= max(1, ceil(E * 0.15))`；`C` 只计邻近修改点并解释 invariant、真实边界、常量、测试意图、compatibility 或 safety，复述代码、翻译 identifier、重复测试名、显然流程、集中堆放和拆行凑数不计。
+- 注释按 policy 的 Comment Rule：只在读者无法从命名、类型或测试得知原因处写中文注释；不写复述代码和任务历史（issue/PR 号、revision、INV 编号、日期、事故），不用注释为被禁止的写法辩护。
 - 从最窄测试扩展到适用的 regression、原始 loop 和 package-local checks；遵守工作目录，不跳过或弱化失败，并记录命令、目录、结果和修正。
 
 ## 阶段 4：独立实现审计
 
-- implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、E/C、排除行、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
+- implementation evidence 记录 files/diff、red-green、verification、原始 loop、paths、未验证项。设置 `Status: implementation-audit-required`，未经 revision 不再 material change。
 - primary agent 只发送原始需求、plan/approved revision、repository root、`Audit mode: implementation`、changed files/diff，不发送实现辩护、自评、怀疑点或缩减范围。
 - auditor 自行加载 skill、policy 和仓库证据，按原始需求审计全部实际 diff hunk 及其直接行为路径；触碰文件不等于整个文件进入范围，也不得接受 primary 缩小实际 diff。
-- 复议后仍保留的 blocker 必须返工并 full-scope 重审，最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
-- 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界、workaround 删除和中文注释门禁全部通过，才能原样记录 verdict 并设置 `Status: verified`。
+- 复议后仍保留的 blocker 必须返工并 full-scope 重审（复用task），最多 3 轮。连续失败 3 次后记录 `independent-audit-unavailable`，不得 self-review。轮次用尽仍有 blocker 时标记 `blocked`，不得 `complete`。
+- 只有实际 diff 获得 `No blocking findings` 和 `APPROVE`，且测试、验证、责任边界和 workaround 删除全部通过，才能原样记录 verdict 并设置 `Status: verified`。
 
 ## 可选 Commit
 
 仅当终态是 `verified-implementation-and-commit` 且状态已 verified：
 
-1. 检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
-2. 确定本 GOAL 的完整路径清单并排除 secret、credential。工作区或 index 有无关内容时，使用 `git commit --only -- <本 GOAL 路径...>` 提交相关路径；相关 untracked files 先单独 `git add -- <paths>`，无关 staged/unstaged 内容保持原样。若同一路径混有无关修改，停止并报告。
-3. 不创建空 commit。提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
-4. 不得 amend、不得 `--no-verify`、不得跳过 hook、不得 push。
+1. 按需检查 `git status`、`git diff`、`git diff --cached` 和 `git log --oneline -10`。
+2. 确定本 GOAL 的完整路径清单。工作区或 index 有无关内容时，使用 `git commit --only -- <本 GOAL 路径...>` 提交相关路径；相关 untracked files 先单独 `git add -- <paths>`，无关 staged/unstaged 内容保持原样。若同一路径混有无关修改，停止并报告。
+3. 提交信息使用中文多行格式：`type(scope): 简短中文说明`，type 只取 `fix|feat|refactor|test|chore`，scope 使用受影响模块，后续 1 至 2 段说明原因、行为边界和避免的回归。
+4. 不得 amend、不得 `--no-verify`、不得跳过 hook。
 5. hook 拒绝时修复原因并创建新 commit，不得 amend 失败尝试。commit 成功后检查 `git status` 并报告 commit id。其他目标终态不得 commit。
 
 ## 最终证据
 
-- 报告 plan/revision、核心文件、测试/验证结果、approved-route 证据、删除的 workaround、path verdict、E/C 与代表性注释、全部审计轮次、剩余风险/未验证项及每个改动的必要性。
+- 报告 plan/revision、核心文件、测试/验证结果、approved-route 证据、删除的 workaround、path verdict、Follow-up 清单内容、全部审计轮次、剩余风险/未验证项及每个改动的必要性。
 - token budget、turn 结束、部分成果或总结文本都不能证明完成。仍有 required work 时保持 GOAL active。

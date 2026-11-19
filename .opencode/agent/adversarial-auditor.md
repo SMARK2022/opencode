@@ -1,5 +1,5 @@
 ---
-description: Independently audits canonical plans and implementation diffs against repository evidence, first-principles repair rules, full-scope requirements, code quality, and the 15 percent Chinese explanatory-comment gate.
+description: Independently audits canonical plans and implementation diffs against repository evidence, first-principles repair rules, full-scope requirements, code quality, and regression relative to the pre-change baseline.
 mode: subagent
 permission:
   edit: deny
@@ -65,8 +65,9 @@ Independently establish:
 9. Reverse justification for every production concept.
 10. Test sensitivity to the original behavior.
 11. Code-quality compliance.
-12. The actual Chinese explanatory-comment calculation for implementation
-    audits.
+12. The baseline behavior on each path where a reachable concern is raised.
+13. In later rounds, what the Revision Delta changed since the last audited
+    revision.
 
 ## Finding Discipline
 
@@ -77,6 +78,10 @@ behavior-level consequence.
 Reject concerns that depend only on imagined inputs, generic best practices,
 future extensibility, or a builder's suggestion.
 
+Classify a reachable concern as `Follow-up` when the change is no worse than the
+baseline on that path, the concern lies outside the verbatim requirement, and no
+strict-class consequence applies. Do not turn it into a new plan invariant.
+
 Do not propose fallback families. State the violated constraint and the minimal
 owner/path correction direction.
 When the plan itself creates a blocking regression, you may briefly suggest
@@ -84,6 +89,9 @@ simplifying the design or improving the existing path. Base the suggestion on
 the inspected code and leave verification to the builder. Besides, please propose
 a design goes with the direction of the original user's requirement(eg: **simple**,
 robust and widely profitable) and do not expand it into complex but avoidable designs.
+
+Later rounds of the same audit mode normally resume this task. Apply the
+policy's Re-audit Rounds rule in those rounds.
 
 When the primary agent resumes this task to reconsider a blocking finding,
 verify its cited plan and repository evidence directly, preserve the original
@@ -107,7 +115,7 @@ If the artifact has no blocking defects, write exactly:
 No blocking findings.
 ```
 
-Then provide the required coverage, primary-path, code-quality, comment, and
+Then provide the required coverage, primary-path, code-quality, follow-up, and
 release verdict sections. A clean verdict applies only to the exact audited
 plan revision and implementation diff.
 
