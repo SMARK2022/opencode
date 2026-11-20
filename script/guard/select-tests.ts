@@ -27,17 +27,17 @@ export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
           const test = tests[index]
           const dir = path.join(tmp, String(index))
           const proc = Bun.spawn(
-            [process.execPath, "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + dir, "./" + test],
+            [process.execPath, "test", "--timeout=30000", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + dir, "./" + test],
             {
               cwd: pkgDir,
               stdout: "ignore",
-              stderr: "ignore",
+              stderr: "pipe",
             },
           )
-          const code = await proc.exited
+          const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
           const lcov = Bun.file(path.join(dir, "lcov.info"))
           if (code !== 0 || !(await lcov.exists())) {
-            failures.push(test + "（退出码 " + code + "，需要有效 lcov）")
+            failures.push(test + "（退出码 " + code + "，需要有效 lcov）\n" + err.trim().split("\n").slice(-20).join("\n"))
             continue
           }
           map.tests[pjoin(rel, test)] = parseLcov(await lcov.text(), repo, pkgDir)
@@ -127,12 +127,12 @@ function parseLcov(text: string, repo: string, cwd: string) {
   for (const line of text.split("\n")) {
     if (line.startsWith("SF:")) {
       file = posix(path.relative(repo, path.resolve(cwd, line.slice(3))))
-      if (file.startsWith("../") || path.isAbsolute(file)) throw new Error("覆盖率记录位于仓库外：" + file)
-      out[file] ??= []
+      if (file.startsWith("../") || path.isAbsolute(file)) file = "" // 测试运行时写到临时目录的文件不是仓库源码
+      else out[file] ??= []
     }
-    if (!line.startsWith("DA:")) continue
+    if (!line.startsWith("DA:") || !file) continue
     const [number, hits] = line.slice(3).split(",").map(Number)
-    if (!file || !Number.isSafeInteger(number) || number < 1 || !Number.isFinite(hits) || hits < 0) {
+    if (!Number.isSafeInteger(number) || number < 1 || !Number.isFinite(hits) || hits < 0) {
       throw new Error("无效 lcov 行：" + line)
     }
     if (hits > 0) out[file].push(number)
