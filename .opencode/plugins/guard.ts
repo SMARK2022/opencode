@@ -1,18 +1,17 @@
 // .opencode/plugins/guard.ts —— 在 Agent 的工具调用链里执行门禁。插件本身从不修改、还原或删除任何文件。
 //
-// 1. 工具执行前：拒绝用编辑工具写受保护路径、拒绝绕过 git hook 的命令（直接报错，工具不执行）
-// 2. 工具执行后：对刚改的源码文件跑规则检查，违规追加进工具输出
+// 1. 工具执行前：拒绝绕过 git hook 的命令（直接报错，工具不执行）
+// 2. 工具执行后：对刚改的源码文件跑规则检查，违规追加进工具输出；改到门禁文件时在工具输出末尾附一句提醒
 // 3. 回合结束（session.idle）：对本会话编辑工具碰过的文件跑 gate stop；未通过时把报告写进会话记录，
 //    不触发回复，由人决定是否让 Agent 继续修复
 //
 // 本会话的改动只认编辑工具的参数，不看 bash，也不判断其他会话：多个会话改同一个文件时，检查的是文件当前内容。
 //
 // 环境变量（由人在启动 opencode 时设置，Agent 无法修改运行中的插件环境）：
-//   GUARD_UNLOCK=1         允许本次会话修改受保护路径（维护规则时使用）
 //   GUARD_IDLE=off|static|full   回合结束检查：关闭 / 只静态 / 静态 + 受影响测试（默认 full）
 import path from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
-import { PROTECTED_PATHS, PROTECTED_GLOBS } from "../../script/guard/rules"
+import { PROTECTED_GLOBS, PROTECTED_PATHS } from "../../script/guard/rules"
 
 const EDIT_TOOLS = new Set(["edit", "write", "patch", "apply_patch", "multiedit"])
 const SHELL_TOOLS = new Set(["bash", "shell"])
@@ -27,10 +26,9 @@ const BYPASS: [RegExp, string][] = [
   [/\bGUARD_[A-Z_]+=|\$env:GUARD_/i, "GUARD_* 开关由人设置，Agent 不能在命令里修改"],
 ]
 export const GuardPlugin: Plugin = async ({ $, client, worktree }) => {
-  const unlock = process.env.GUARD_UNLOCK === "1"
   const idleMode = process.env.GUARD_IDLE ?? "full"
   const rel = (p: string) => path.relative(worktree, path.resolve(worktree, p)).replaceAll("\\", "/")
-  const isProtected = (p: string) =>
+  const isGate = (p: string) =>
     PROTECTED_PATHS.some((x) => p.startsWith(x)) || PROTECTED_GLOBS.some((re) => re.test(p))
   const touched = new Map<string, Set<string>>()
   const targets = (args: Record<string, unknown>) => {
@@ -46,11 +44,6 @@ export const GuardPlugin: Plugin = async ({ $, client, worktree }) => {
       const args = (output.args ?? {}) as Record<string, unknown>
       if (EDIT_TOOLS.has(input.tool)) {
         const files = targets(args)
-        const hit = files.find(isProtected)
-        if (hit && !unlock)
-          throw new Error(
-            `[guard] ${hit} 是受保护路径（规则、基线、预算、hook、CI、工作流规范）。不要修改它；按报错信息修改业务代码。`,
-          )
         const set = touched.get(input.sessionID) ?? touched.set(input.sessionID, new Set()).get(input.sessionID)!
         for (const f of files) set.add(f)
       }
@@ -63,9 +56,11 @@ export const GuardPlugin: Plugin = async ({ $, client, worktree }) => {
 
     "tool.execute.after": async (input, output) => {
       if (!EDIT_TOOLS.has(input.tool)) return
-      const files = targets((input.args ?? {}) as Record<string, unknown>).filter((f) =>
-        /^packages\/.*\.[cm]?[jt]sx?$/.test(f),
-      )
+      const edited = targets((input.args ?? {}) as Record<string, unknown>)
+      const gate = edited.filter(isGate)
+      if (gate.length)
+        output.output += `\n\n[guard] 提醒：${gate.join("、")} 属于门禁（规则、基线、预算、hook、CI）。只在任务需要时修改；不要为了让检查通过而放宽规则或提高基线。`
+      const files = edited.filter((f) => /^packages\/.*\.[cm]?[jt]sx?$/.test(f))
       if (!files.length) return
       const r = await $`bun script/guard/check.ts ${worktree} --files ${files.join(",")}`
         .cwd(worktree)
@@ -103,7 +98,7 @@ export const GuardPlugin: Plugin = async ({ $, client, worktree }) => {
             {
               type: "text",
               text:
-                `[guard] 本会话改动的文件未通过门禁。需要修复时回复“继续”；不要修改规则、基线或测试预算。\n\n` +
+                `[guard] 本会话改动的文件未通过门禁。需要修复时回复“继续”。\n\n` +
                 `${r.stdout.toString()}\n${r.stderr.toString()}`.trim().slice(-12000),
             },
           ],

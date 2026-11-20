@@ -82,10 +82,12 @@ jobs:
           bun script/guard/bench/opencode.ts --head HEAD --base "${{ steps.base.outputs.base }}" \
             --json bench.json --markdown "$GITHUB_STEP_SUMMARY" || [ $? -eq 1 ]
       - name: 全量规则扫描
+        if: ${{ !cancelled() }}
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: bun script/guard/check.ts . --json guard.json --quiet || [ $? -eq 1 ]
       - name: 写入看板并推送
+        if: ${{ !cancelled() }} # 基准失败也照样写入看板（失败原因记在数据里）
         run: |
           args=(--site "$RUNNER_TEMP/site" --guard guard.json --sha "$(git rev-parse HEAD)")
           [ -f bench.json ] && args+=(--bench bench.json)

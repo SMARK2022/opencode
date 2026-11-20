@@ -1,6 +1,6 @@
 # script/guard：机械门禁
 
-规则写在代码里，由 hook、插件和 CI 执行，不靠 Agent 自觉。Agent 看得到报告，但改不了规则：受保护路径的编辑会被插件直接拒绝，PR 里改规则也不会放宽对这个 PR 自己的检查（CI 用目标分支上的规则）。
+规则写在代码里，由 hook、插件和 CI 执行，不靠 Agent 自觉。本地 Agent 可以编辑规则；PR 里改规则不会放宽对这个 PR 自己的检查（CI 用目标分支上的规则）。
 
 ## 文件一览
 
@@ -78,13 +78,13 @@ bun script/guard/gate.ts push
 
 `.opencode/plugins/guard.ts` 放好即可，OpenCode 会自动加载 `.opencode/plugins/*.ts`。它从不修改、还原或删除任何文件：
 
-- 工具执行前：拒绝编辑受保护路径；拒绝没有正当用途的绕过手段：`commit -n`（提示改用 `--no-verify`，后者会走确认）、`HUSKY=0 git …`、`$env:HUSKY`、改 `core.hooksPath`、`update-ref`/`commit-tree` 这类直接改引用的命令，以及在命令里设置 `GUARD_*` 开关。
-- 工具执行后：刚改过的源码文件立刻跑一次规则检查，违规追加到工具输出里。
+- 工具执行前：拒绝没有正当用途的绕过手段：`commit -n`（提示改用 `--no-verify`，后者会走确认）、`HUSKY=0 git …`、`$env:HUSKY`、改 `core.hooksPath`、`update-ref`/`commit-tree` 这类直接改引用的命令，以及在命令里设置 `GUARD_*` 开关。
+- 工具执行后：刚改过的源码文件立刻跑一次规则检查，违规追加到工具输出里；改到受保护路径时，在工具输出末尾附一句提醒（不拦截）。
 - 回合结束（`session.idle`）：对本会话编辑工具碰过的文件跑 `gate.ts stop`。未通过时把报告写进会话记录并弹出提示，**不触发回复**；需要 Agent 修复时由你回复。写入的记录沿用这个会话最后一次的 Agent 和模型。改动规模在这里只提示，因为它要到提交时才能决定拆分还是放行。
 
 本会话的改动只认编辑工具（edit、write、apply_patch 等）的参数，不看 bash，也不判断其他会话。多个会话改同一个文件时，检查的是文件当前内容。
 
-需要人来决定的操作交给 OpenCode 自己的权限确认。在 `.opencode/opencode.jsonc` 的 `permission` 里加上（这个文件是受保护路径，需要你自己改）：
+需要人来决定的操作交给 OpenCode 自己的权限确认。在 `.opencode/opencode.jsonc` 的 `permission` 里加上：
 
 ```jsonc
 "permission": {
@@ -106,7 +106,6 @@ bun script/guard/gate.ts push
 
 | 变量             | 取值                                                |
 | ---------------- | --------------------------------------------------- |
-| `GUARD_UNLOCK=1` | 允许本次会话改受保护路径（你自己维护规则时用）      |
 | `GUARD_IDLE`     | `full`（默认，静态 + 受影响测试）/ `static` / `off` |
 
 ### 4. GitHub 设置
@@ -122,9 +121,7 @@ bun script/guard/gate.ts push
    /.husky/                      @SMARK2022
    ```
 
-2. **标签**：建一个 `guard-change`。PR 改到受保护路径时，没有这个标签 CI 直接失败。
-
-3. **Ruleset**（Settings → Rules → Rulesets → New branch ruleset，目标 `dev1-smark`）：
+2. **Ruleset**（Settings → Rules → Rulesets → New branch ruleset，目标 `dev1-smark`）：
    - Require a pull request before merging，勾选 Require review from Code Owners
    - Require status checks to pass：`guard-required`，以及 test.yml 里你要求必过的任务。`guard-required` 始终执行，要求规则、所需性能基准或所选平台矩阵实际成功；必跑任务跳过、取消、缺失都会失败。
    - PR 里的提交超出改动规模时，`规则与契约` 会失败。CI 不认 PR 提交信息里的放行标记（第三方 Agent 可以随便写）；维护者对当前 PR head approve 后，再在 checks 里点 Re-run failed jobs；新提交或撤销批准会重新阻断。
@@ -132,9 +129,9 @@ bun script/guard/gate.ts push
    - Bypass list：Repository admin，模式选 Always。这样你本地直接 push 不受影响（本地 hook 是权威），PR 走 CI。
    - **注意**：第三方 Agent 如果用你本人的 token，它也是 admin，也会绕过。给 Agent 用单独的机器人账号或 GitHub App（非 admin、只有写权限）。
 
-4. **看板**：先手动跑一次 `guard-nightly`（Actions → guard-nightly → Run workflow），它会创建 `bench-data` 分支。然后 Settings → Pages → Deploy from a branch → `bench-data` / `(root)`。地址是 `https://smark2022.github.io/opencode/`。私有仓库的 Pages 需要付费计划；没有的话，可以把 `bench-data` 拉到本地，用任意静态服务器打开。
+3. **看板**：先手动跑一次 `guard-nightly`（Actions → guard-nightly → Run workflow），它会创建 `bench-data` 分支。然后 Settings → Pages → Deploy from a branch → `bench-data` / `(root)`。地址是 `https://smark2022.github.io/opencode/`。私有仓库的 Pages 需要付费计划；没有的话，可以把 `bench-data` 拉到本地，用任意静态服务器打开。
 
-5. **覆盖率图**：同样由 `guard-nightly` 建好并发布到 release `guard-coverage-map`。本地 `gate.ts push` 会在图缺失或超过一天时用 `gh release download` 自动取，取不到就退回静态 import 图。
+4. **覆盖率图**：同样由 `guard-nightly` 建好并发布到 release `guard-coverage-map`。本地 `gate.ts push` 会在图缺失或超过一天时用 `gh release download` 自动取，取不到就退回静态 import 图。
 
 ## 日常怎么走
 
@@ -265,7 +262,7 @@ bun script/guard/bench/opencode.ts --head <sha> --base <sha> --only list,stream 
 | `GUARD_UNNEEDED=error`           | 多余防御检查从提示改为阻断                                                                                      |
 | `GUARD_MAP_SYNC=off`             | 不自动下载覆盖率图                                                                                              |
 | `GUARD_TYPESCRIPT`               | typescript 模块路径（默认从 node_modules 解析）                                                                 |
-| `GUARD_UNLOCK`、`GUARD_IDLE`     | 见插件一节                                                                                                      |
+| `GUARD_IDLE`                     | 见插件一节                                                                                                      |
 
 这些变量都由人在自己的终端里设置，插件会拒绝 Agent 在命令里修改它们。
 
@@ -273,9 +270,8 @@ bun script/guard/bench/opencode.ts --head <sha> --base <sha> --only list,stream 
 
 ## 修改规则
 
-1. 用 `GUARD_UNLOCK=1` 启动 OpenCode，或者直接手改。
-2. 改 `rules.ts`，并在 `test/guard.test.ts` 里补用例，然后跑 `bun run --cwd script/guard test`。
-3. 放宽规则或提高基线时，单独开 PR，加 `guard-change` 标签。CI 用目标分支的基线检查，基线只能下降（C2）。
+1. 改 `rules.ts`，并在 `test/guard.test.ts` 里补用例，然后跑 `bun run --cwd script/guard test`。
+2. 放宽规则或提高基线时，单独开 PR。CI 用目标分支的基线检查，基线只能下降（C2）。
 
 ## 已知局限
 

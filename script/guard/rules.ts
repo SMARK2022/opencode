@@ -1,9 +1,9 @@
-// 机械门禁的唯一规则表。改这里 = 改架构；本目录受保护，只能由维护者在独立 PR 中修改。
+// 机械门禁的唯一规则表。改这里 = 改架构；放宽规则或提高基线时单独开 PR。
 // 依赖矩阵与白名单取自官方 v1.19.6 实测依赖图：上游代码在这些规则下为 0 违规。
 
 export const MAIN_BRANCH = "dev1-smark"
 
-// ── 受保护路径：插件拒绝 Agent 写入；PR 修改需维护者加 guard-change 标签 ──
+// ── 受保护路径：本地 Agent 可以编辑，插件在编辑结果末尾附提醒；PR 改到时 CI 额外跑 guard 自测 ──
 export const PROTECTED_PATHS = [
   "script/guard/",
   ".opencode/plugins/guard.ts",

@@ -102,7 +102,7 @@ async function main() {
   const headDir = headRef ? await worktreeFor(head.sha) : repo
   const baseDir = await worktreeFor(base.sha)
 
-  // ── 模拟 LLM：OpenAI 兼容 SSE，固定速率，两边输入完全一致 ──
+  // ── 模拟 LLM：OpenAI 兼容 SSE，固定速率，两边输入完全一致；每 token 1 字节，正文须低于 processor 的 64 KiB 上限 ──
   let streamStarts = 0
   let activeStreams = 0
   const llm = Bun.serve({
@@ -110,7 +110,7 @@ async function main() {
     async fetch(req) {
       await req.json().catch(() => ({}))
       const chunks = Array.from({ length: Math.ceil(TOKENS / 20) }, (_, i) =>
-        `tok${i} `.repeat(Math.min(20, TOKENS - i * 20)),
+        "x".repeat(Math.min(20, TOKENS - i * 20)),
       )
       streamStarts++
       activeStreams++

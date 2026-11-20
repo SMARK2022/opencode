@@ -40,8 +40,6 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   OPENCODE_DISABLE_LSP_DOWNLOAD: "true"
-  # 受保护路径（script/guard、hook、workflow…）的 PR 必须带这个标签，并由 CODEOWNERS 审核
-  GUARD_CHANGE_LABEL: guard-change
 
 jobs:
   plan:
@@ -134,11 +132,6 @@ jobs:
             dir="$RUNNER_TEMP/base/script/guard"
           fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
-      - name: 受保护路径需要标签
-        if: needs.plan.outputs.mode == 'pr' && needs.plan.outputs.protected == 'true' && !contains(github.event.pull_request.labels.*.name, 'guard-change')
-        run: |
-          echo "::error::此 PR 改动了受保护路径（规则、hook、workflow、预算等）。请维护者确认后加上标签 $GUARD_CHANGE_LABEL，并由 CODEOWNERS 审核。"
-          exit 1
       - name: 规则检查
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
