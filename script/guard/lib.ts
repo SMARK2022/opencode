@@ -3,9 +3,9 @@ import path from "node:path"
 import os from "node:os"
 import { mkdtemp, rm } from "node:fs/promises"
 import { Glob } from "bun"
-import type * as TS from "typescript"
+import type { Node } from "typescript"
 
-export const ts: typeof TS = require(process.env.GUARD_TYPESCRIPT ?? "typescript")
+export const ts: typeof import("typescript") = require(process.env.GUARD_TYPESCRIPT ?? "typescript")
 
 // Windows 上 Glob 与 path.* 返回反斜杠；规则一律按正斜杠书写，所有相对路径先经过这里。
 export const posix = (p: string) => p.replaceAll("\\", "/")
@@ -14,6 +14,12 @@ export const pjoin = (...parts: string[]) => path.posix.normalize(path.posix.joi
 export function git(repo: string, ...args: string[]) {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" })
   return { ok: p.exitCode === 0, out: p.stdout.toString().trim(), err: p.stderr.toString().trim() }
+}
+
+export function gitPath(repo: string, ...parts: string[]) {
+  const result = git(repo, "rev-parse", "--git-path", path.join(...parts))
+  if (!result.ok) throw new Error(`Git 工作区路径读取失败：${result.err}`)
+  return path.resolve(repo, result.out)
 }
 
 // gh 不加 -R 时会优先选 upstream 远端（fork 里它指向官方仓库）；门禁调用 gh 一律指定 origin 对应的仓库
@@ -44,7 +50,7 @@ export async function loadPackages(root: string) {
   const byDir = new Map<string, Pkg>()
   const byName = new Map<string, Pkg>()
   for (const rel of await listFiles(root, "packages/**/package.json")) {
-    const json = await Bun.file(path.join(root, rel)).json().catch(() => undefined)
+    const json = await Bun.file(path.join(root, rel)).json()
     if (!json?.name) continue
     const dir = path.posix.dirname(rel).replace(/^packages\//, "")
     const pkg = { name: json.name as string, dir, json }
@@ -62,9 +68,19 @@ export type ImportRef = { spec: string; line: number; type: boolean; kind: "impo
 export function collectImports(file: string, text: string): ImportRef[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
   const out: ImportRef[] = []
-  const lineOf = (n: TS.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
-  const lit = (n: TS.Node | undefined) => (n && ts.isStringLiteralLike(n) ? n.text : undefined)
-  const visit = (n: TS.Node) => {
+  let checker: import("typescript").TypeChecker | undefined
+  const globalRequire = (node: Node) => {
+    if (!checker) {
+      const options = { noResolve: true, noLib: true, noEmit: true, allowJs: true }
+      const host = ts.createCompilerHost(options)
+      host.getSourceFile = (name) => name === file ? sf : undefined
+      checker = ts.createProgram([file], options, host).getTypeChecker()
+    }
+    return !checker.getSymbolAtLocation(node)
+  }
+  const lineOf = (n: Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
+  const lit = (n: Node | undefined) => (n && ts.isStringLiteralLike(n) ? n.text : undefined)
+  const visit = (n: Node) => {
     if (ts.isImportDeclaration(n)) {
       const spec = lit(n.moduleSpecifier)
       const clause = n.importClause
@@ -79,7 +95,9 @@ export function collectImports(file: string, text: string): ImportRef[] {
       if (spec) out.push({ spec, line: lineOf(n), type: typeOnly, kind: "import" })
     } else if (ts.isExportDeclaration(n) && n.moduleSpecifier) {
       const spec = lit(n.moduleSpecifier)
-      if (spec) out.push({ spec, line: lineOf(n), type: n.isTypeOnly, kind: "export" })
+      const typeOnly = n.isTypeOnly || !!n.exportClause && ts.isNamedExports(n.exportClause) &&
+        n.exportClause.elements.length > 0 && n.exportClause.elements.every((entry) => entry.isTypeOnly)
+      if (spec) out.push({ spec, line: lineOf(n), type: typeOnly, kind: "export" })
     } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
       const spec = lit(n.moduleReference.expression)
       if (spec) out.push({ spec, line: lineOf(n), type: n.isTypeOnly, kind: "require" })
@@ -90,7 +108,8 @@ export function collectImports(file: string, text: string): ImportRef[] {
       const callee = n.expression
       const spec = lit(n.arguments[0])
       if (spec && callee.kind === ts.SyntaxKind.ImportKeyword) out.push({ spec, line: lineOf(n), type: false, kind: "dynamic" })
-      if (spec && ts.isIdentifier(callee) && callee.text === "require") out.push({ spec, line: lineOf(n), type: false, kind: "require" })
+      if (spec && ts.isIdentifier(callee) && callee.text === "require" && globalRequire(callee))
+        out.push({ spec, line: lineOf(n), type: false, kind: "require" })
     }
     ts.forEachChild(n, visit)
   }
@@ -105,23 +124,20 @@ export function isPureForwarder(file: string, text: string) {
 }
 
 // 把 git index（即将提交的内容）导出到临时目录；检查对象与提交内容逐字节一致。
-// 传入 files 时只导出这些路径，外加判定所需的包清单、基线与 workflow。
-export async function exportIndex(repo: string, files?: string[]) {
+// 完整快照保留未改动的消费者，供别名解析、传递依赖和循环检查使用。
+export async function exportIndex(repo: string) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "guard-index-"))
   const cleanup = () => rm(dir, { recursive: true, force: true })
-  const prefix = `--prefix=${posix(dir)}/`
-  if (!files) {
-    const r = git(repo, "checkout-index", "-a", "-f", prefix)
+  try {
+    const conflicts = git(repo, "ls-files", "--unmerged")
+    if (!conflicts.ok || conflicts.out) throw new Error(`Git 暂存区包含未解决冲突：${conflicts.err || conflicts.out}`)
+    const r = git(repo, "checkout-index", "-a", "-f", `--prefix=${posix(dir)}/`)
     if (!r.ok) throw new Error(`git checkout-index 失败：${r.err}`)
     return { dir, cleanup }
+  } catch (error) {
+    await cleanup()
+    throw error
   }
-  const support = git(repo, "ls-files", "--", "packages/**/package.json", "script/guard/baseline.json", ".github/workflows/*").out.split("\n")
-  const wanted = [...new Set([...support, ...files])].filter(Boolean)
-  for (let i = 0; i < wanted.length; i += 200) {
-    const r = git(repo, "checkout-index", "-f", prefix, "--", ...wanted.slice(i, i + 200))
-    if (!r.ok) throw new Error(`git checkout-index 失败：${r.err}`)
-  }
-  return { dir, cleanup }
 }
 
 // 把某个提交的树导出到临时目录（pre-push 检查 HEAD，而不是可能混有其他 Agent 改动的工作区）
@@ -135,5 +151,5 @@ export async function exportCommit(repo: string, ref: string) {
 }
 
 export const isTestFile = (f: string) =>
-  /(^|\/)(test|tests|e2e|test-browser|__tests__|storybook|\.storybook)\//.test(f) || /\.(test|spec|stories)\.[cm]?tsx?$/.test(f)
+  /(^|\/)(test|tests|e2e|test-browser|__tests__|storybook|\.storybook)\//.test(f) || /\.(test|spec|stories)\.[cm]?[jt]sx?$/.test(f)
 export const isSrcFile = (f: string) => /^packages\/.+\/src\//.test(f) && !isTestFile(f)

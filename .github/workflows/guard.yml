@@ -5,9 +5,9 @@ name: guard
 #                     PR 上的单元测试仍由 test.yml 负责，这里不重复跑。
 #   workflow_dispatch 本地 pre-push 触发的跨平台 preflight（script/guard/preflight.ts）：
 #                     对同一个 SHA 在所选平台上跑 规则 + 选中测试 + 契约。
-#   push dev1-smark   事后告警：规则 + 契约；同一 SHA 已有成功的 guard 运行时跳过。
+#   push dev1-smark   事后告警：规则 + 契约。
 # 全量测试、覆盖率图、基准趋势与看板数据在 guard-nightly.yml。
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('preflight {0} · {1}', github.ref_name, inputs.platforms) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('preflight base={0} · {1} · {2}', inputs.base, github.ref_name, inputs.platforms) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
 
 on:
   pull_request:
@@ -25,6 +25,10 @@ on:
       platforms:
         description: "平台，逗号分隔：linux,macos,windows"
         default: "macos,linux"
+      base:
+        description: "本次选测的比较提交（完整 SHA，由 preflight 固定）"
+        required: true
+        type: string
 
 concurrency:
   group: guard-${{ github.event.pull_request.number || github.ref }}
@@ -50,7 +54,7 @@ jobs:
     outputs:
       mode: ${{ steps.mode.outputs.mode }}
       base: ${{ steps.mode.outputs.base }}
-      skip: ${{ steps.dedupe.outputs.skip }}
+      policy: ${{ steps.mode.outputs.policy }}
       runtime: ${{ steps.plan.outputs.runtime }}
       protected: ${{ steps.plan.outputs.protected }}
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -65,32 +69,44 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
+          REQUESTED_BASE: ${{ inputs.base }}
         run: |
           case "$EVENT" in
-            pull_request)      echo "mode=pr" >> "$GITHUB_OUTPUT"; base="origin/$BASE_REF" ;;
-            workflow_dispatch) echo "mode=preflight" >> "$GITHUB_OUTPUT"; base=$(git merge-base origin/dev1-smark HEAD) ;;
+            pull_request)
+              echo "mode=pr" >> "$GITHUB_OUTPUT"
+              policy=$(git rev-parse "origin/$BASE_REF")
+              base=$(git merge-base "$policy" HEAD) ;;
+            workflow_dispatch)
+              echo "mode=preflight" >> "$GITHUB_OUTPUT"
+              base=$(git rev-parse --verify "$REQUESTED_BASE^{commit}")
+              policy=$base ;;
             push)
               echo "mode=push" >> "$GITHUB_OUTPUT"
-              if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}"; then base="$BEFORE"; else base="HEAD~1"; fi ;;
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BEFORE^{commit}"; then base="$BEFORE"; else base="HEAD~1"; fi
+              policy=$base ;;
           esac
           echo "base=$(git rev-parse "$base")" >> "$GITHUB_OUTPUT"
+          echo "policy=$(git rev-parse "$policy")" >> "$GITHUB_OUTPUT"
       - name: 改动分类
         id: plan
-        run: bun script/guard/ci.ts plan --base "${{ steps.mode.outputs.base }}" --platforms "${{ inputs.platforms || 'macos,linux' }}"
-      - name: 同一 SHA 去重（仅 push）
-        id: dedupe
-        if: steps.mode.outputs.mode == 'push'
         env:
-          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          BASE: ${{ steps.mode.outputs.base }}
+          POLICY: ${{ steps.mode.outputs.policy }}
+          PLATFORMS: ${{ inputs.platforms || 'macos,linux' }}
         run: |
-          n=$(gh run list --workflow guard.yml --commit "$GITHUB_SHA" --status success --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length")
-          echo "skip=$([ "${n:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          [ "${n:-0}" -gt 0 ] && echo "::notice::$GITHUB_SHA 已有成功的 guard 运行，跳过重复检查" || true
+          dir=script/guard
+          if [ "$MODE" = pr ]; then
+            mkdir -p "$RUNNER_TEMP/policy"
+            git archive "$POLICY" script/guard | tar -x -C "$RUNNER_TEMP/policy"
+            dir="$RUNNER_TEMP/policy/script/guard"
+          fi
+          bun "$dir/ci.ts" plan --base "$BASE" --platforms "$PLATFORMS"
 
   rules:
     name: 规则与契约
     needs: plan
-    if: needs.plan.outputs.mode != 'preflight' && needs.plan.outputs.skip != 'true'
+    if: needs.plan.outputs.mode != 'preflight'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -101,21 +117,21 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
       # PR 用目标分支上的规则、基线与脚本：PR 自己改 script/guard 不能放宽对自己的检查
       - name: 准备规则来源
         id: src
         env:
           MODE: ${{ needs.plan.outputs.mode }}
-          BASE: ${{ needs.plan.outputs.base }}
+          POLICY: ${{ needs.plan.outputs.policy }}
         run: |
           dir="$GITHUB_WORKSPACE/script/guard"
           if [ "$MODE" = pr ]; then
             mkdir -p "$RUNNER_TEMP/base"
-            if git archive "$BASE" script/guard | tar -x -C "$RUNNER_TEMP/base" 2>/dev/null && [ -f "$RUNNER_TEMP/base/script/guard/check.ts" ]; then
-              dir="$RUNNER_TEMP/base/script/guard"
-            else
-              echo "::warning::目标分支还没有 script/guard，本次使用 PR 自带的规则"
-            fi
+            git archive "$POLICY" script/guard .github/workflows/guard.yml | tar -x -C "$RUNNER_TEMP/base"
+            ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/base/node_modules"
+            dir="$RUNNER_TEMP/base/script/guard"
           fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
       - name: 受保护路径需要标签
@@ -130,24 +146,43 @@ jobs:
           BASE: ${{ needs.plan.outputs.base }}
           DIR: ${{ steps.src.outputs.dir }}
           PR: ${{ github.event.pull_request.number }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           extra=()
           if [ "$MODE" = pr ]; then
             # PR 不认提交信息里的放行标记（第三方 Agent 可以随便写）；超出改动规模时，需要维护者 approve 后点 Re-run
-            extra+=(--baseline "$DIR/baseline.json" --no-trailer)
-            approved=$({ gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate \
-              --jq '[.[] | select(.state == "APPROVED" and (.author_association == "OWNER" or .author_association == "MEMBER"))] | length' || true; } | awk '{ s += $1 } END { print s + 0 }')
+            extra+=(--no-trailer)
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate --slurp > "$RUNNER_TEMP/guard-reviews.json"
+            approved=$(jq --arg head "$PR_HEAD" \
+              '[.[][] | select(.state != "COMMENTED")] | group_by(.user.id) | map(sort_by(.submitted_at) | last) | [.[] | select(.state == "APPROVED" and .commit_id == $head and (.author_association == "OWNER" or .author_association == "MEMBER"))] | length' \
+              "$RUNNER_TEMP/guard-reviews.json")
             [ "${approved:-0}" -gt 0 ] && extra+=(--allow-large)
           elif git cat-file -e "$BASE:script/guard/baseline.json" 2>/dev/null; then
             git show "$BASE:script/guard/baseline.json" > "$RUNNER_TEMP/prev-baseline.json"
             extra+=(--previous-baseline "$RUNNER_TEMP/prev-baseline.json")
           fi
-          bun "$DIR/check.ts" . --commit HEAD --changed-since "$BASE" "${extra[@]}" \
+          bun "$DIR/check.ts" . --commit HEAD --changed-since "$BASE" --baseline "$DIR/baseline.json" "${extra[@]}" \
             --annotate --diff-base "$BASE" --json guard.json --markdown "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = pr ]; then
+            bun "$DIR/check.ts" . --commit HEAD --changed-since "$BASE" \
+              "${extra[@]}" --baseline script/guard/baseline.json --previous-baseline "$DIR/baseline.json" --quiet
+          fi
       - name: 契约与打包边界测试
         if: success() || failure()
-        run: bun script/guard/gate.ts contracts
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+          DIR: ${{ steps.src.outputs.dir }}
+        run: bun "$DIR/gate.ts" contracts
+      - name: 候选规则、自测与基线收紧
+        if: (success() || failure()) && needs.plan.outputs.mode == 'pr' && needs.plan.outputs.protected == 'true'
+        env:
+          GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
+          DIR: ${{ steps.src.outputs.dir }}
+        run: |
+          bun run --cwd script/guard typecheck
+          bun run --cwd script/guard test
+          bun script/guard/check.ts . --commit HEAD --previous-baseline "$DIR/baseline.json" --quiet
       - name: 上传规则报告
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -168,25 +203,24 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
       # 基准脚本与预算同样取自目标分支：PR 不能改自己的考卷
       - name: 准备基准脚本
         id: src
         env:
-          BASE: ${{ needs.plan.outputs.base }}
+          POLICY: ${{ needs.plan.outputs.policy }}
         run: |
           dir="$GITHUB_WORKSPACE/script/guard"
           mkdir -p "$RUNNER_TEMP/base"
-          if git archive "$BASE" script/guard | tar -x -C "$RUNNER_TEMP/base" 2>/dev/null && [ -f "$RUNNER_TEMP/base/script/guard/bench/opencode.ts" ]; then
-            dir="$RUNNER_TEMP/base/script/guard"
-          else
-            echo "::warning::目标分支还没有基准脚本，本次使用 PR 自带的"
-          fi
+          git archive "$POLICY" script/guard | tar -x -C "$RUNNER_TEMP/base"
+          dir="$RUNNER_TEMP/base/script/guard"
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
       - name: A/B 基准（head 对 merge-base）
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: |
-          bun "${{ steps.src.outputs.dir }}/bench/opencode.ts" --base "${{ needs.plan.outputs.base }}" \
+          bun "${{ steps.src.outputs.dir }}/bench/opencode.ts" --head HEAD --base "${{ needs.plan.outputs.base }}" \
             --json bench.json --markdown "$GITHUB_STEP_SUMMARY"
       - name: 上传基准结果
         if: always()
@@ -233,7 +267,7 @@ jobs:
           if [ -f in/bench.json ]; then bench=(--bench in/bench.json)
           elif [ "$BENCH_RESULT" = skipped ]; then bench=(--bench none)
           fi
-          bun script/guard/report.ts comment --guard in/guard.json "${bench[@]}" --out comment.md
+          bun script/guard/report.ts comment --guard in/guard.json "${bench[@]}" --bench-status "$BENCH_RESULT" --out comment.md
           marker=$(head -1 comment.md)
           id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
                  --jq ".[] | select(.user.type == \"Bot\" and (.body | startswith(\"$marker\"))) | .id" | head -1)
@@ -244,7 +278,7 @@ jobs:
           fi
 
   preflight:
-    name: preflight / ${{ matrix.os }}
+    name: preflight / ${{ matrix.os }} / ${{ needs.plan.outputs.base }}
     needs: plan
     if: needs.plan.outputs.mode == 'preflight'
     runs-on: ${{ matrix.runner }}
@@ -260,6 +294,18 @@ jobs:
         with:
           fetch-depth: 0
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
+      # 测试优先使用 PATH 上的 rg；没有时每个测试进程都会去 GitHub 下载，网络抖动会被误判为测试失败
+      - name: 准备 ripgrep
+        run: |
+          command -v rg >/dev/null && exit 0
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get install -y -qq ripgrep ;;
+            macOS) brew install ripgrep ;;
+            Windows) choco install ripgrep --yes --no-progress ;;
+          esac
+          rg --version
       # 与本地 pre-push 同一个入口，只是关掉了“再触发 preflight”这一步
       - name: 规则 + 选中测试 + 契约（${{ matrix.os }}）
         env:
@@ -267,6 +313,36 @@ jobs:
           GUARD_PREFLIGHT: "off"
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: bun script/guard/gate.ts push --since "${{ needs.plan.outputs.base }}" --sha HEAD
+
+  result:
+    name: guard-required
+    needs: [plan, rules, bench, preflight]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 必需任务必须实际通过
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          PLAN: ${{ needs.plan.result }}
+          RULES: ${{ needs.rules.result }}
+          BENCH: ${{ needs.bench.result }}
+          RUNTIME: ${{ needs.plan.outputs.runtime }}
+          PREFLIGHT: ${{ needs.preflight.result }}
+        run: |
+          [ "$PLAN" = success ]
+          case "$MODE" in
+            preflight) [ "$PREFLIGHT" = success ] ;;
+            pr|push)
+              [ "$RULES" = success ]
+              case "$RUNTIME" in true|false) ;; *) exit 1 ;; esac
+              if [ "$MODE" = pr ] && [ "$RUNTIME" = true ]; then
+                [ "$BENCH" = success ]
+              else
+                [ "$BENCH" = skipped ] || [ "$BENCH" = success ]
+              fi ;;
+            *) exit 1 ;;
+          esac
 
   cleanup:
     name: 删除 preflight 临时分支

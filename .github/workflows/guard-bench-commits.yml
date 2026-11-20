@@ -61,6 +61,8 @@ jobs:
           ref: dev1-smark
           fetch-depth: 0
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
       - name: A/B 基准
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
@@ -74,11 +76,12 @@ jobs:
           [ -n "$ONLY" ] && args+=(--only "$ONLY")
           # 1 = 有退化（照样记录）；2 = 无法完成（结果里带 error，看板显示“未完成”）
           bun script/guard/bench/opencode.ts "${args[@]}" || [ $? -le 2 ]
+          test -s "bench-$SHA.json"
       - name: 该提交的规则存量（按当前规则）
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
           SHA: ${{ matrix.sha }}
-        run: bun script/guard/check.ts . --commit "$SHA" --json "guard-$SHA.json" --quiet || true
+        run: bun script/guard/check.ts . --commit "$SHA" --json "guard-$SHA.json" --quiet || [ $? -eq 1 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

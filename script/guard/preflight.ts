@@ -1,112 +1,210 @@
 #!/usr/bin/env bun
-// 跨平台预检：把一个提交（默认 HEAD）交给 GitHub 在 macOS / Linux / Windows 上跑选中的测试。
-// 本地不切分支、不改工作区；远端临时分支 preflight/<sha> 由 workflow 结束时自动删除。结果按 SHA 记录。
-//
-//   bun script/guard/preflight.ts ensure [--sha HEAD] [--platforms …]   已通过 → 0；未开始则启动、或运行中 → 10；失败 → 1 + 日志
-//   bun script/guard/preflight.ts start  [--sha HEAD] [--platforms macos,linux]
-//   bun script/guard/preflight.ts status [--sha HEAD]
-//   bun script/guard/preflight.ts wait   [--sha HEAD]   阻塞等待（手动使用）
-// 退出码 3 = gh 不可用；10 = 等待中（gate 据此拒绝本次 push，但不当作失败）。平台默认取 GUARD_PREFLIGHT_PLATFORMS，未设置时为 macos,linux。
-import path from "node:path"
+// preflight 按实际执行的测试平台判定；每次查询远端最新结果，避免复用已重跑或覆盖不全的成功记录。
 import { git, flag, originRepo } from "./lib"
+import { MAIN_BRANCH } from "./rules"
 
-const args = process.argv.slice(2)
-const cmd = args[0] ?? "ensure"
-const repo = git(process.cwd(), "rev-parse", "--show-toplevel").out || process.cwd()
-const sha = git(repo, "rev-parse", flag(args, "--sha") ?? "HEAD").out
-const branch = `preflight/${sha.slice(0, 12)}`
-const platforms = flag(args, "--platforms") ?? process.env.GUARD_PREFLIGHT_PLATFORMS ?? "macos,linux"
-const stamp = Bun.file(path.join(repo, ".git", "guard", "preflight", sha))
-
-const slug = originRepo(repo)
-const R = slug ? ["-R", slug] : []
-
-function gh(...a: string[]) {
-  const p = Bun.spawnSync(["gh", ...a], { cwd: repo, stdout: "pipe", stderr: "pipe" })
-  return { ok: p.exitCode === 0, out: p.stdout.toString().trim(), err: p.stderr.toString().trim() }
+export type PreflightRun = {
+  databaseId: number
+  status: string
+  conclusion: string | null
+  event: string
+  displayTitle: string
+  url: string
+  createdAt: string
+  updatedAt?: string
+  attempt?: number
+  jobs: {
+    name: string
+    status: string
+    conclusion: string | null
+    steps?: { name: string; conclusion: string | null }[]
+  }[]
 }
 
-if (!Bun.which("gh") || !gh("auth", "status").ok) {
-  console.log("gh 未安装或未登录，无法运行 preflight。")
-  process.exit(3)
+// 门禁本身那一步之外的失败（checkout、安装依赖、下载工具等）视为线上环境问题，自动重跑一次
+export const GATE_STEP = "规则 + 选中测试 + 契约"
+export function environmentFailure(run: PreflightRun) {
+  const failed = run.jobs
+    .filter((job) => job.conclusion === "failure")
+    .flatMap((job) => (job.steps ?? []).filter((step) => step.conclusion === "failure"))
+  return (run.attempt ?? 1) < 2 && failed.length > 0 && failed.every((step) => !step.name.startsWith(GATE_STEP))
+    ? failed[0].name
+    : undefined
 }
 
-type Run = { databaseId: number; status: string; conclusion: string; event: string; url: string; createdAt: string }
-function runs(): Run[] {
-  const r = gh("run", "list", ...R, "--workflow", "guard.yml", "--commit", sha, "--limit", "20", "--json", "databaseId,status,conclusion,event,url,createdAt")
-  return r.ok ? JSON.parse(r.out || "[]") : []
+export function preflightPlatforms(value: string) {
+  const names = [
+    ...new Set(
+      value
+        .split(/[\s,]+/)
+        .map((name) => name.toLowerCase())
+        .filter(Boolean),
+    ),
+  ]
+  if (!names.length || names.some((name) => !["linux", "macos", "windows"].includes(name)))
+    throw new Error(`未知平台：${value || "（空）"}。可选 linux, macos, windows`)
+  return names
 }
-// 只认手动触发（workflow_dispatch）的 guard 运行：PR / push 触发的那次不跑跨平台测试，不能当作 preflight 通过
-function state() {
-  const list = runs().filter((r) => r.event === "workflow_dispatch")
-  const green = list.find((r) => r.conclusion === "success")
-  if (green) return { kind: "green" as const, run: green }
-  const active = list.find((r) => r.status !== "completed")
-  if (active) return { kind: "running" as const, run: active }
-  const failed = list.find((r) => r.status === "completed")
-  if (failed) return { kind: "failed" as const, run: failed }
+
+export function preflightState(runs: PreflightRun[], platforms: string[], base: string) {
+  const ordered = runs
+    .filter(
+      (run) =>
+        run.event === "workflow_dispatch" &&
+        run.displayTitle.startsWith(`preflight base=${base} · `) &&
+        platforms.every((platform) => run.displayTitle.split(" · ").at(-1)?.split(",").includes(platform)),
+    )
+    .sort((a, b) => (b.updatedAt ?? b.createdAt).localeCompare(a.updatedAt ?? a.createdAt))
+  for (const run of ordered) {
+    const jobs = platforms.map((platform) => run.jobs.find((job) => job.name === `preflight / ${platform} / ${base}`))
+    if (run.status !== "completed") return { kind: "running" as const, run }
+    if (
+      run.conclusion === "success" &&
+      jobs.every((job) => job?.status === "completed" && job.conclusion === "success")
+    )
+      return { kind: "green" as const, run }
+    return { kind: "failed" as const, run }
+  }
   return { kind: "none" as const }
 }
 
-function start() {
-  const push = git(repo, "push", "--no-verify", "origin", `${sha}:refs/heads/${branch}`)
-  if (!push.ok) throw new Error(`推送 ${branch} 失败：${push.err}`)
-  const r = gh("workflow", "run", ...R, "guard.yml", "--ref", branch, "-f", "mode=preflight", "-f", `platforms=${platforms}`)
-  // 触发失败时把刚推上去的临时分支删掉，不在远端留垃圾
-  if (!r.ok) git(repo, "push", "--no-verify", "origin", "--delete", branch)
-  // GitHub 只认默认分支上的 workflow 文件：guard.yml 还没合进默认分支时无法手动触发
-  if (!r.ok && /not found on the default branch/.test(r.err))
-    throw new Error(`${slug ?? "仓库"} 的默认分支上还没有 .github/workflows/guard.yml，无法触发 preflight。首次接入这次 push 请用 GUARD_PREFLIGHT=off，guard.yml 进入默认分支后即可使用。`)
-  if (!r.ok) throw new Error(`触发 guard.yml 失败：${r.err}`)
-  console.log(`已启动：分支 ${branch} · 平台 ${platforms}`)
+export function preflightRuns(
+  gh: (...params: string[]) => { ok: boolean; out: string; err: string },
+  slug: string,
+  sha: string,
+) {
+  const result = gh(
+    "run",
+    "list",
+    "-R",
+    slug,
+    "--workflow",
+    "guard.yml",
+    "--commit",
+    sha,
+    "--limit",
+    "20",
+    "--json",
+    "databaseId,status,conclusion,event,displayTitle,url,createdAt,updatedAt,attempt",
+  )
+  if (!result.ok) throw new Error(`查询 preflight 运行失败：${result.err}`)
+  const runs: Omit<PreflightRun, "jobs">[] = JSON.parse(result.out)
+  return runs
+    .filter((run) => run.event === "workflow_dispatch")
+    .map((run) => {
+      const result = gh("run", "view", "-R", slug, String(run.databaseId), "--json", "jobs")
+      if (!result.ok) throw new Error(`查询 preflight 平台结果失败：${result.err}`)
+      const data: { jobs: PreflightRun["jobs"] } = JSON.parse(result.out)
+      if (!Array.isArray(data.jobs)) throw new Error(`preflight ${run.databaseId} 缺少平台结果`)
+      return { ...run, jobs: data.jobs }
+    })
 }
 
-async function report(s: ReturnType<typeof state>) {
-  if (s.kind === "green") {
-    await Bun.write(stamp, String(s.run.databaseId))
-    console.log(`已通过：${s.run.url}`)
-    return 0
+async function main() {
+  const args = process.argv.slice(2)
+  const cmd = args[0] ?? "ensure"
+  if (!["ensure", "start", "status", "wait"].includes(cmd)) throw new Error(`未知命令：${cmd}`)
+  const root = git(process.cwd(), "rev-parse", "--show-toplevel")
+  if (!root.ok) throw new Error(root.err)
+  const repo = root.out
+  const revision = git(repo, "rev-parse", "--verify", `${flag(args, "--sha") ?? "HEAD"}^{commit}`)
+  if (!revision.ok) throw new Error(`无法解析待检提交：${revision.err}`)
+  const sha = revision.out
+  const comparison = git(repo, "rev-parse", "--verify", `${flag(args, "--base") ?? `origin/${MAIN_BRANCH}`}^{commit}`)
+  if (!comparison.ok) throw new Error(`无法解析比较基准：${comparison.err}`)
+  const base = comparison.out
+  const branch = `preflight/${sha.slice(0, 12)}`
+  const platforms = preflightPlatforms(
+    flag(args, "--platforms") ?? process.env.GUARD_PREFLIGHT_PLATFORMS ?? "macos,linux",
+  )
+  const slug = originRepo(repo)
+  if (!slug) throw new Error("origin 必须指向待验证的 GitHub 仓库")
+  const gh = (...params: string[]) => {
+    const proc = Bun.spawnSync(["gh", ...params], { cwd: repo, stdout: "pipe", stderr: "pipe" })
+    return { ok: proc.exitCode === 0, out: proc.stdout.toString().trim(), err: proc.stderr.toString().trim() }
   }
-  if (s.kind === "running") {
-    console.log(`运行中：${s.run.url}`)
-    return 10
+  if (!Bun.which("gh") || !gh("auth", "status").ok) {
+    console.log("gh 未安装或未登录，无法运行 preflight。")
+    return 3
   }
-  if (s.kind === "failed") {
-    console.log(`失败：${s.run.url}\n${gh("run", "view", ...R, String(s.run.databaseId), "--log-failed").out.slice(-12000)}`)
-    console.log("\n修复后提交新的 commit 再 push；如需对同一提交重跑：bun script/guard/preflight.ts start")
+
+  const state = () => preflightState(preflightRuns(gh, slug, sha), platforms, base)
+
+  const start = () => {
+    const push = git(repo, "push", "--no-verify", "origin", `${sha}:refs/heads/${branch}`)
+    if (!push.ok) throw new Error(`推送 ${branch} 失败：${push.err}`)
+    const result = gh(
+      "workflow",
+      "run",
+      "-R",
+      slug,
+      "guard.yml",
+      "--ref",
+      branch,
+      "-f",
+      "mode=preflight",
+      "-f",
+      `platforms=${platforms.join(",")}`,
+      "-f",
+      `base=${base}`,
+    )
+    if (!result.ok) git(repo, "push", "--no-verify", "origin", "--delete", branch)
+    if (!result.ok) throw new Error(`触发 guard.yml 失败：${result.err}`)
+    console.log(`已启动：分支 ${branch} · 比较基准 ${base.slice(0, 12)} · 平台 ${platforms.join(",")}`)
+  }
+
+  const report = (result: ReturnType<typeof state>) => {
+    if (result.kind === "none") {
+      console.log(`尚无覆盖基准 ${base.slice(0, 12)}、平台 ${platforms.join(",")} 的 preflight 结果`)
+      return 10
+    }
+    if (result.kind === "green") {
+      console.log(`已通过（${platforms.join(",")}）：${result.run.url}`)
+      return 0
+    }
+    if (result.kind === "running") {
+      console.log(`运行中：${result.run.url}`)
+      return 10
+    }
+    const environment = environmentFailure(result.run)
+    if (environment && gh("run", "rerun", "-R", slug, String(result.run.databaseId), "--failed").ok) {
+      console.log(`线上环境问题（失败在「${environment}」），已自动重跑一次：${result.run.url}`)
+      return 10
+    }
+    console.log(
+      `失败：${result.run.url}\n${gh("run", "view", "-R", slug, String(result.run.databaseId), "--log-failed").out.slice(-12000)}`,
+    )
+    console.log("修复后提交新版本；重跑当前提交可执行 preflight.ts start")
     return 1
   }
-  return -1
-}
 
-try {
-  if (await stamp.exists() && cmd !== "start") {
-    console.log(`已通过（本地记录）`)
-    process.exit(0)
-  }
   if (cmd === "start") {
     start()
-    process.exit(0)
+    return 10
   }
-  if (cmd === "status") process.exit(Math.max(0, await report(state())))
+  if (cmd === "status") return report(state())
   if (cmd === "wait") {
     for (;;) {
-      const s = state()
-      if (s.kind === "none") throw new Error("该提交没有 preflight 运行，先执行 start")
-      if (s.kind !== "running") process.exit(await report(s))
-      console.log(`等待中…`)
+      const result = state()
+      if (result.kind !== "running") return report(result)
+      console.log("等待中…")
       await Bun.sleep(20_000)
     }
   }
-  // ensure
-  const s = state()
-  if (s.kind === "none") {
-    start()
-    console.log("查看进度：bun script/guard/preflight.ts status")
-    process.exit(10)
+  const result = state()
+  if (result.kind !== "none") return report(result)
+  start()
+  console.log(
+    `查看进度：bun script/guard/preflight.ts status --sha ${sha} --base ${base} --platforms ${platforms.join(",")}`,
+  )
+  return 10
+}
+
+if (import.meta.main) {
+  try {
+    process.exit(await main())
+  } catch (error) {
+    console.error(`[preflight] ${error instanceof Error ? error.message : error}`)
+    process.exit(2)
   }
-  process.exit(await report(s))
-} catch (e) {
-  console.error(`[preflight] ${e instanceof Error ? e.message : e}`)
-  process.exit(2)
 }

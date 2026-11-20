@@ -5,6 +5,7 @@
 //   bun script/guard/report.ts publish --site <bench-data 检出目录> [--bench a.json b.json …] [--guard guard.json --sha <sha>]
 import path from "node:path"
 import type { Verdict } from "./bench/harness"
+import { SCENARIO_BUDGETS } from "./bench/budgets"
 import type { CheckResult } from "./check"
 import { BOUNDARY_RULES, SHAPE_RULES, OTHER_RULES, RATCHETS } from "./rules"
 
@@ -16,7 +17,10 @@ export const SIZE_RULES = new Set(["cc-excess", "depth-excess"])
 // 改动规模类规则：位置就是 key（提交或文件），不带行号
 const SIZE_KEYS = new Set(["change-size", "file-lines", "tiny-module"])
 const ruleInfo = (rule: string) =>
-  BOUNDARY_RULES[rule] ?? SHAPE_RULES[rule] ?? OTHER_RULES[rule] ?? RATCHETS.find((r) => r.id === rule) ?? { level: "error", fix: "" }
+  BOUNDARY_RULES[rule] ??
+  SHAPE_RULES[rule] ??
+  OTHER_RULES[rule] ??
+  RATCHETS.find((r) => r.id === rule) ?? { level: "error", fix: "" }
 
 // ── 规则检查报告 ──
 export function renderMarkdown(r: CheckResult) {
@@ -24,20 +28,28 @@ export function renderMarkdown(r: CheckResult) {
   const warns = r.violations.filter((v) => v.level === "warn")
   const out: string[] = []
   out.push(`## ${errors.length ? "🔴" : "🟢"} Guard 规则检查`)
-  out.push(`\n\`${r.mode}\` · ${r.files} 个文件 · **${errors.length}** 个错误 · ${warns.length} 个提示${r.baselineFound ? "" : " · ⚠️ 未找到基线"}`)
+  out.push(
+    `\n\`${r.mode}\` · ${r.files} 个文件 · **${errors.length}** 个错误 · ${warns.length} 个提示${r.baselineFound ? "" : " · ⚠️ 未找到基线"}`,
+  )
   for (const n of r.notes) out.push(`\n> ${n}`)
   if (r.violations.length) {
     out.push(`\n| 级别 | 规则 | 位置 | 计数 / 允许 |\n|---|---|---|---|`)
     for (const v of [...errors, ...warns].slice(0, 60))
-      out.push(`| ${v.level === "error" ? "错误" : "提示"} | \`${v.rule}\` | \`${(SIZE_KEYS.has(v.rule) ? v.key : `${v.key}:${v.lines[0]}`).replaceAll("|", "\\|")}\` | ${v.count} / ${v.allowed} |`)
+      out.push(
+        `| ${v.level === "error" ? "错误" : "提示"} | \`${v.rule}\` | \`${(SIZE_KEYS.has(v.rule) ? v.key : `${v.key}:${v.lines[0]}`).replaceAll("|", "\\|")}\` | ${v.count} / ${v.allowed} |`,
+      )
     if (r.violations.length > 60) out.push(`\n…另有 ${r.violations.length - 60} 条，见 artifact 中的 guard.json。`)
     out.push(`\n<details><summary>修复方向</summary>\n`)
     for (const rule of new Set(r.violations.map((v) => v.rule))) out.push(`- \`${rule}\`：${ruleInfo(rule).fix}`)
     out.push(`\n</details>`)
   }
-  const debt = Object.entries(r.totals).filter(([, t]) => t.current || t.baseline).sort(([a], [b]) => a.localeCompare(b))
+  const debt = Object.entries(r.totals)
+    .filter(([, t]) => t.current || t.baseline)
+    .sort(([a], [b]) => a.localeCompare(b))
   if (debt.length) {
-    out.push(`\n<details><summary>存量规则计数（当前 / 基线）</summary>\n\n| 规则 | 当前 | 基线 | 变化 |\n|---|--:|--:|--:|`)
+    out.push(
+      `\n<details><summary>存量规则计数（当前 / 基线）</summary>\n\n| 规则 | 当前 | 基线 | 变化 |\n|---|--:|--:|--:|`,
+    )
     for (const [rule, t] of debt) {
       const d = t.current - t.baseline
       out.push(`| \`${rule}\` | ${t.current} | ${t.baseline} | ${d === 0 ? "—" : d > 0 ? `+${d}` : d} |`)
@@ -46,8 +58,6 @@ export function renderMarkdown(r: CheckResult) {
   }
   return out.join("\n") + "\n"
 }
-
-
 
 export type Commit = { sha: string; date: string; subject: string }
 export type BenchResult = {
@@ -58,9 +68,13 @@ export type BenchResult = {
   createdAt: string
   runner: { os: string; cpus: number; ci: boolean }
   runUrl?: string
-  scenarios: Record<string, { verdict: Verdict[]; headMedians: Record<string, number>; baseMedians: Record<string, number>; errors: string[] }>
+  scenarios: Record<
+    string,
+    { verdict: Verdict[]; headMedians: Record<string, number>; baseMedians: Record<string, number>; errors: string[] }
+  >
   regressed: boolean
   error?: string
+  note?: string
 }
 
 export const METRIC_LABEL: Record<string, [string, string]> = {
@@ -77,19 +91,41 @@ export const METRIC_LABEL: Record<string, [string, string]> = {
   rssGrowthMb: ["内存增量", "MB"],
   crashed: ["崩溃次数", ""],
 }
-const fmt = (metric: string, v: number) => (metric === "probeErrorRate" ? `${(v * 100).toFixed(1)}%` : Number.isInteger(v) ? String(v) : v.toFixed(1))
+const fmt = (metric: string, v: number) =>
+  metric === "probeErrorRate" ? `${(v * 100).toFixed(1)}%` : Number.isInteger(v) ? String(v) : v.toFixed(1)
 const short = (sha: string) => sha.slice(0, 8)
 
-export function renderBenchMarkdown(r: BenchResult) {
+function benchError(r: BenchResult) {
+  if (r.error !== undefined) return r.error || "基准运行失败"
+  if (!Object.keys(r.scenarios).length) return "没有完成任何基准场景"
+  for (const [name, scenario] of Object.entries(r.scenarios)) {
+    if (
+      !scenario.verdict.length ||
+      scenario.verdict.some((v) => !Number.isFinite(v.base) || !Number.isFinite(v.head) || !Number.isFinite(v.p))
+    )
+      return `${name} 缺少有效的比较指标`
+    if (scenario.errors.length && !scenario.verdict.some((v) => v.metric === "crashed" && v.regressed))
+      return `${name} 未完成：${scenario.errors.join("；")}`
+  }
+}
+
+export function renderBenchMarkdown(r: BenchResult, status?: string) {
   const out: string[] = []
-  const icon = r.error ? "⚪" : r.regressed ? "🔴" : "🟢"
+  const error = benchError(r) ?? (status && status !== "success" ? `基准任务状态：${status}` : undefined)
+  const regressed = r.regressed || Object.values(r.scenarios).some((s) => s.verdict.some((v) => v.regressed))
+  const icon = error ? "⚪" : regressed ? "🔴" : "🟢"
   out.push(`## ${icon} 性能基准 \`${short(r.head.sha)}\` 对比 \`${short(r.base.sha)}\``)
-  out.push(`\n${r.head.subject} · ${r.rounds} 轮交替 · ${r.runner.os} · ${r.runner.cpus} 核${r.runUrl ? ` · [运行记录](${r.runUrl})` : ""}`)
-  if (r.error) out.push(`\n> 基准未完成：${r.error}`)
+  out.push(
+    `\n${r.head.subject} · ${r.rounds} 轮交替 · ${r.runner.os} · ${r.runner.cpus} 核${r.runUrl ? ` · [运行记录](${r.runUrl})` : ""}`,
+  )
+  if (error) out.push(`\n> 基准未完成：${error}`)
+  if (r.note) out.push(`\n> ${r.note}`)
   const names = Object.keys(r.scenarios)
   if (names.length) {
     const key = ["wallMs", "cpuMs", "maxBlockMs", "probeErrorRate", "peakRssMb"]
-    out.push(`\n| 场景 | ${key.map((m) => METRIC_LABEL[m][0]).join(" | ")} | 结论 |\n|---|${key.map(() => "--:").join("|")}|---|`)
+    out.push(
+      `\n| 场景 | ${key.map((m) => METRIC_LABEL[m][0]).join(" | ")} | 结论 |\n|---|${key.map(() => "--:").join("|")}|---|`,
+    )
     for (const n of names) {
       const s = r.scenarios[n]
       const cell = (m: string) => {
@@ -99,18 +135,24 @@ export function renderBenchMarkdown(r: BenchResult) {
         return `${v.regressed ? "**" : ""}${fmt(m, v.head)}${ratio}${v.regressed ? "**" : ""}`
       }
       const bad = s.verdict.filter((v) => v.regressed).map((v) => METRIC_LABEL[v.metric]?.[0] ?? v.metric)
-      out.push(`| \`${n}\` | ${key.map(cell).join(" | ")} | ${bad.length ? `🔴 ${bad.join("、")}` : "🟢"} |`)
+      out.push(
+        `| \`${n}\` | ${key.map(cell).join(" | ")} | ${bad.length ? `🔴 ${bad.join("、")}` : s.errors.length ? "⚪ 未完成" : "🟢"} |`,
+      )
     }
     out.push(`\n<details><summary>全部指标（中位数，base → head，单侧 Mann-Whitney p 值）</summary>\n`)
     for (const n of names) {
       out.push(`\n**${n}**\n\n| 指标 | base | head | 比例 | p | |\n|---|--:|--:|--:|--:|---|`)
       for (const v of r.scenarios[n].verdict) {
         const [label, unit] = METRIC_LABEL[v.metric] ?? [v.metric, ""]
-        out.push(`| ${label}${unit && unit !== "%" ? ` (${unit})` : ""} | ${fmt(v.metric, v.base)} | ${fmt(v.metric, v.head)} | ${v.ratio ?? "—"} | ${v.p} | ${v.regressed ? "🔴" : ""} |`)
+        out.push(
+          `| ${label}${unit && unit !== "%" ? ` (${unit})` : ""} | ${fmt(v.metric, v.base)} | ${fmt(v.metric, v.head)} | ${v.ratio ?? "—"} | ${v.p} | ${v.regressed ? "🔴" : ""} |`,
+        )
       }
       if (r.scenarios[n].errors.length) out.push(`\n错误：${r.scenarios[n].errors.map((e) => `\`${e}\``).join("；")}`)
     }
-    out.push(`\n判定：中位数变差超过预算比例、超过绝对噪声下限，且 p < 0.05；head 任意一次崩溃直接判退化。\n\n</details>`)
+    out.push(
+      `\n判定：中位数变差超过预算比例、超过绝对噪声下限，且 p < 0.05；head 任意一次崩溃直接判退化。\n\n</details>`,
+    )
   }
   return out.join("\n") + "\n"
 }
@@ -122,10 +164,17 @@ async function comment() {
   const parts = [COMMENT_MARKER]
   const guard = flag(process.argv, "--guard")
   if (guard && (await Bun.file(guard).exists())) parts.push(renderMarkdown(await Bun.file(guard).json()))
-  else if (guard) parts.push("## 🔴 Guard 规则检查\n\n没有产出结果（检查在开始前就失败了，例如受保护路径缺少标签），请看本次运行日志。\n")
+  else if (guard)
+    parts.push(
+      "## 🔴 Guard 规则检查\n\n没有产出结果（检查在开始前就失败了，例如受保护路径缺少标签），请看本次运行日志。\n",
+    )
   const bench = flag(process.argv, "--bench")
-  if (bench && (await Bun.file(bench).exists())) parts.push(renderBenchMarkdown(await Bun.file(bench).json()))
-  else if (bench) parts.push("## ⚪ 性能基准\n\n本次改动没有触及运行时代码，未运行。\n")
+  const status = flag(process.argv, "--bench-status")
+  if (bench && (await Bun.file(bench).exists())) parts.push(renderBenchMarkdown(await Bun.file(bench).json(), status))
+  else if (status === "skipped" || (!status && bench === "none"))
+    parts.push("## ⚪ 性能基准\n\n本次改动没有触及运行时代码，未运行。\n")
+  else if (bench || status)
+    parts.push(`## 🔴 性能基准\n\n基准结果缺失${status ? `（任务状态：${status}）` : ""}，请查看本次运行日志。\n`)
   await Bun.write(flag(process.argv, "--out") ?? "guard-comment.md", parts.join("\n"))
 }
 
@@ -139,8 +188,54 @@ type SiteBench = {
   error?: string
   scenarios: Record<string, { head: Record<string, number>; base: Record<string, number>; regressed: string[] }>
 }
-type SiteCommit = Commit & { bench: SiteBench[]; debt?: Record<string, number>; debtTotal?: number; guardErrors?: number }
+type SiteCommit = Commit & {
+  bench: SiteBench[]
+  debt?: Record<string, number>
+  debtTotal?: number
+  guardErrors?: number
+}
 type Site = { updatedAt: string; repository?: string; commits: Record<string, SiteCommit> }
+
+export function isCompleteBench(value: unknown) {
+  if (!value || typeof value !== "object" || ("error" in value && value.error !== undefined)) return false
+  if (!("scenarios" in value) || !value.scenarios || typeof value.scenarios !== "object") return false
+  const entries = value.scenarios
+  const required = Object.keys(SCENARIO_BUDGETS).filter((name) => name !== "default")
+  if (!required.every((name) => Object.hasOwn(entries, name))) return false
+  const scenarios = Object.values(entries)
+  const metrics = (entry: unknown) =>
+    entry &&
+    typeof entry === "object" &&
+    Object.keys(METRIC_LABEL).every((key) => {
+      const metric: unknown = Reflect.get(entry, key)
+      return (
+        typeof metric === "number" &&
+        Number.isFinite(metric) &&
+        (key === "rssGrowthMb" || metric >= 0) &&
+        (key !== "probeErrorRate" || metric <= 1) &&
+        (key !== "crashed" || metric === 0)
+      )
+    })
+  return (
+    scenarios.length > 0 &&
+    scenarios.every((scenario: unknown) => {
+      if (
+        !scenario ||
+        typeof scenario !== "object" ||
+        !("head" in scenario) ||
+        !("base" in scenario) ||
+        !("regressed" in scenario)
+      )
+        return false
+      return (
+        metrics(scenario.head) &&
+        metrics(scenario.base) &&
+        Array.isArray(scenario.regressed) &&
+        !scenario.regressed.includes("crashed")
+      )
+    })
+  )
+}
 
 async function publish() {
   const site = flag(process.argv, "--site")
@@ -149,7 +244,10 @@ async function publish() {
   const data: Site = (await Bun.file(file).exists()) ? await Bun.file(file).json() : { updatedAt: "", commits: {} }
   const benches: string[] = []
   const i = process.argv.indexOf("--bench")
-  if (i !== -1) for (const a of process.argv.slice(i + 1)) if (!a.startsWith("--")) benches.push(a); else break
+  if (i !== -1)
+    for (const a of process.argv.slice(i + 1))
+      if (!a.startsWith("--")) benches.push(a)
+      else break
   for (const f of benches) {
     if (!(await Bun.file(f).exists())) continue
     const r: BenchResult = await Bun.file(f).json()
@@ -160,10 +258,17 @@ async function publish() {
       createdAt: r.createdAt,
       runUrl: r.runUrl,
       runner: r.runner,
-      regressed: r.regressed,
-      error: r.error,
+      regressed: r.regressed || Object.values(r.scenarios).some((s) => s.verdict.some((v) => v.regressed)),
+      error: benchError(r),
       scenarios: Object.fromEntries(
-        Object.entries(r.scenarios).map(([n, s]) => [n, { head: s.headMedians, base: s.baseMedians, regressed: s.verdict.filter((v) => v.regressed).map((v) => v.metric) }]),
+        Object.entries(r.scenarios).map(([n, s]) => [
+          n,
+          {
+            head: s.headMedians,
+            base: s.baseMedians,
+            regressed: s.verdict.filter((v) => v.regressed).map((v) => v.metric),
+          },
+        ]),
       ),
     })
   }
@@ -174,10 +279,17 @@ async function publish() {
     const g = await Bun.file(guard).json()
     const info = Bun.spawnSync(["git", "show", "-s", "--format=%cI%x00%s", sha]).stdout.toString().trim().split("\0")
     const c = (data.commits[sha] ??= { sha, date: info[0] ?? "", subject: info[1] ?? "", bench: [] })
-    c.debt = Object.fromEntries(Object.entries(g.totals as Record<string, { current: number }>).map(([k, v]) => [k, v.current]))
-    c.debtTotal = Object.entries(c.debt).reduce((s, [k, n]) => (SIZE_RULES.has(k) || ruleInfo(k).level !== "error" ? s : s + n), 0)
+    c.debt = Object.fromEntries(
+      Object.entries(g.totals as Record<string, { current: number }>).map(([k, v]) => [k, v.current]),
+    )
+    c.debtTotal = Object.entries(c.debt).reduce(
+      (s, [k, n]) => (SIZE_RULES.has(k) || ruleInfo(k).level !== "error" ? s : s + n),
+      0,
+    )
     // 没有基线的旧提交（引入 guard 之前）每处存量都会算成错误，没有意义，只记存量
-    c.guardErrors = g.baselineFound ? (g.violations as { level: string }[]).filter((v) => v.level === "error").length : undefined
+    c.guardErrors = g.baselineFound
+      ? (g.violations as { level: string }[]).filter((v) => v.level === "error").length
+      : undefined
   }
   data.updatedAt = new Date().toISOString()
   data.repository = process.env.GITHUB_REPOSITORY ?? data.repository
