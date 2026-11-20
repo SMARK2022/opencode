@@ -1,11 +1,21 @@
 #!/bin/sh
 set -e
 
+# 先保存 Git 提供的引用，后续安装与检查命令不消费 hook 的输入。
+updates=$(cat)
+
 # 提交与推送共用安装和 lockfile 校验，避免两条检查链漂移。
 . "$(dirname "$0")/pre-commit"
 bun typecheck
 
-bun script/guard/gate.ts push
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in
+    ""|0000000000000000000000000000000000000000) continue ;;
+  esac
+  bun script/guard/gate.ts push --sha "$local_sha"
+done <<EOF
+$updates
+EOF
 
 # 子模块指针可达性校验：父仓库推送前，指针必须已存在于子模块远端分支历史。
 # 合同：指针 == 远端 tip 直接放行；非 tip 时在本地子模块仓库 fetch 后做祖先校验；

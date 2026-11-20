@@ -1,118 +1,192 @@
 #!/usr/bin/env bun
-// 基于覆盖率的测试选择（regression test selection）。
-//   建图: bun select-tests.ts map <pkgDir> --out map.json [--jobs 8]
-//         对包内每个测试文件单独跑 bun test --coverage，记录它真正执行过的源码行。
-//   选择: bun select-tests.ts select <pkgDir> --map map.json
-//         用 `git diff -U0 <map.commit>` 的旧行号区间与执行行求交，输出必须运行的测试文件。
-// 选择结果完全由覆盖率和 diff 决定，Agent 无法也无需参与判断。
+// 覆盖率图提供候选测试；图不完整、基线不可用或改动没有覆盖时，必须回到静态依赖图。
 import path from "node:path"
-import { Glob } from "bun"
+import os from "node:os"
+import { mkdtemp, rm } from "node:fs/promises"
 import { ESCALATE_FULL } from "./affected-rules"
-import { posix } from "./lib"
+import { posix, pjoin, git, listFiles, flag } from "./lib"
+import { TEST_FILE } from "./affected"
 
-type CoverageMap = { commit: string; pkg: string; tests: Record<string, Record<string, number[]>> }
+export type CoverageMap = { version: 2; commit: string; pkg: string; tests: Record<string, Record<string, number[]>> }
 
-const [cmd, pkgArg, ...rest] = process.argv.slice(2)
-const opt = (n: string) => {
-  const i = rest.indexOf(n)
-  return i === -1 ? undefined : rest[i + 1]
+export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
+  if (!Number.isSafeInteger(jobs) || jobs < 1) throw new Error("--jobs 必须是正整数")
+  const repo = readGit(pkgDir, "rev-parse", "--show-toplevel")
+  const rel = posix(path.relative(repo, pkgDir))
+  const tests = (await listFiles(pkgDir, "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}")).filter((file) => TEST_FILE.test(file))
+  if (!tests.length) throw new Error("没有发现可建图的测试：" + rel)
+  const map: CoverageMap = { version: 2, commit: readGit(repo, "rev-parse", "HEAD"), pkg: rel, tests: {} }
+  const tmp = await mkdtemp(path.join(os.tmpdir(), "guard-covmap-"))
+  const failures: string[] = []
+  let next = 0
+  try {
+    const workers = await Promise.allSettled(
+      Array.from({ length: Math.min(jobs, tests.length) }, async () => {
+        while (next < tests.length) {
+          const index = next++
+          const test = tests[index]
+          const dir = path.join(tmp, String(index))
+          const proc = Bun.spawn(
+            [process.execPath, "test", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + dir, "./" + test],
+            {
+              cwd: pkgDir,
+              stdout: "ignore",
+              stderr: "ignore",
+            },
+          )
+          const code = await proc.exited
+          const lcov = Bun.file(path.join(dir, "lcov.info"))
+          if (code !== 0 || !(await lcov.exists())) {
+            failures.push(test + "（退出码 " + code + "，需要有效 lcov）")
+            continue
+          }
+          map.tests[pjoin(rel, test)] = parseLcov(await lcov.text(), repo, pkgDir)
+        }
+      }),
+    )
+    for (const worker of workers) if (worker.status === "rejected") failures.push(String(worker.reason))
+    if (failures.length) throw new Error("覆盖率建图失败，禁止发布不完整地图：\n" + failures.join("\n"))
+    await Bun.write(out, JSON.stringify(map))
+    return map
+  } finally {
+    await rm(tmp, { recursive: true, force: true })
+  }
 }
-const pkgDir = path.resolve(pkgArg ?? ".")
-const run = (cwd: string, ...a: string[]) => Bun.spawnSync(a, { cwd }).stdout.toString().trim()
-const repo = run(pkgDir, "git", "rev-parse", "--show-toplevel")
-const rel = (abs: string) => posix(path.relative(repo, abs))
 
-function parseLcov(text: string, cwd: string) {
+export async function selectTests(pkgDir: string, mapFile: string, restrict?: string[]) {
+  const repo = readGit(pkgDir, "rev-parse", "--show-toplevel")
+  const pkg = posix(path.relative(repo, pkgDir))
+  const map: unknown = await Bun.file(mapFile).json()
+  if (!validMap(map, pkg)) return { mode: "stale", reason: "覆盖率图格式或完整性版本不匹配" }
+  if (!git(repo, "cat-file", "-e", map.commit + "^{commit}").ok) return { mode: "stale", reason: "本地没有建图提交" }
+  if (!git(repo, "merge-base", "--is-ancestor", map.commit, "HEAD").ok)
+    return { mode: "stale", reason: "建图提交不在当前历史上" }
+  const changed = [
+    ...new Set([
+      ...readGit(repo, "diff", "--name-only", "-z", "--no-renames", map.commit, "--").split("\0"),
+      ...readGit(repo, "ls-files", "-z", "--others", "--exclude-standard").split("\0"),
+    ]),
+  ]
+    .map(posix)
+    .filter((file) => file && (!restrict || restrict.includes(file)))
+  const escalate = changed.find((file) => ESCALATE_FULL.some((re) => re.test(file)))
+  if (escalate) return { mode: "full", reason: "全局输入改动：" + escalate }
+  const covered = new Set(Object.values(map.tests).flatMap((coverage) => Object.keys(coverage)))
+  const selected = new Set<string>()
+  const unmapped: string[] = []
+  for (const file of changed) {
+    if (file.startsWith(pkg + "/") && TEST_FILE.test(file)) {
+      if (await Bun.file(path.join(repo, file)).exists()) selected.add(file)
+      else unmapped.push(file)
+      continue
+    }
+    if (!covered.has(file)) {
+      unmapped.push(file)
+      continue
+    }
+    const ranges = readGit(
+      repo,
+      "diff",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--no-renames",
+      "--unified=0",
+      map.commit,
+      "--",
+      file,
+    )
+      .split("\n")
+      .flatMap((line) => {
+        const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+/)
+        if (!match) return []
+        const start = Number(match[1])
+        const length = match[2] === undefined ? 1 : Number(match[2])
+        return [[Math.max(1, start - 1), start + Math.max(length, 1)]]
+      })
+    const hits = Object.entries(map.tests).filter(([, coverage]) =>
+      coverage[file]?.some((line) => ranges.some(([start, end]) => line >= start && line <= end)),
+    )
+    if (!hits.length) unmapped.push(file)
+    for (const [test] of hits) {
+      if (await Bun.file(path.join(repo, test)).exists()) selected.add(test)
+      else unmapped.push(file)
+    }
+  }
+  return { mode: "files", tests: [...selected].sort(), unmapped: [...new Set(unmapped)].sort() }
+}
+
+function readGit(repo: string, ...args: string[]) {
+  const result = git(repo, ...args)
+  if (!result.ok) throw new Error("git " + args[0] + " 失败：" + result.err)
+  return result.out
+}
+
+function parseLcov(text: string, repo: string, cwd: string) {
   const out: Record<string, number[]> = {}
   let file = ""
   for (const line of text.split("\n")) {
-    if (line.startsWith("SF:")) file = rel(path.resolve(cwd, line.slice(3)))
-    else if (line.startsWith("DA:")) {
-      const [ln, hits] = line.slice(3).split(",").map(Number)
-      if (hits > 0) (out[file] ??= []).push(ln)
+    if (line.startsWith("SF:")) {
+      file = posix(path.relative(repo, path.resolve(cwd, line.slice(3))))
+      if (file.startsWith("../") || path.isAbsolute(file)) throw new Error("覆盖率记录位于仓库外：" + file)
+      out[file] ??= []
     }
+    if (!line.startsWith("DA:")) continue
+    const [number, hits] = line.slice(3).split(",").map(Number)
+    if (!file || !Number.isSafeInteger(number) || number < 1 || !Number.isFinite(hits) || hits < 0) {
+      throw new Error("无效 lcov 行：" + line)
+    }
+    if (hits > 0) out[file].push(number)
   }
+  if (!Object.keys(out).length) throw new Error("lcov 没有任何源文件记录")
   return out
 }
 
-if (cmd === "map") {
-  const tests: string[] = []
-  for await (const f of new Glob("**/*.test.{ts,tsx}").scan({ cwd: pkgDir })) if (!f.includes("node_modules")) tests.push(posix(f))
-  const jobs = Number(opt("--jobs") ?? 4)
-  const map: CoverageMap = { commit: run(repo, "git", "rev-parse", "HEAD"), pkg: rel(pkgDir), tests: {} }
-  const tmp = path.join(require("node:os").tmpdir(), `covmap-${process.pid}`)
-  let next = 0
-  await Promise.all(
-    Array.from({ length: jobs }, async () => {
-      while (next < tests.length) {
-        const t = tests[next++]
-        const dir = path.join(tmp, t.replaceAll("/", "__"))
-        const proc = Bun.spawn(["bun", "test", "--coverage", "--coverage-reporter=lcov", `--coverage-dir=${dir}`, t], {
-          cwd: pkgDir,
-          stdout: "ignore",
-          stderr: "ignore",
-        })
-        await proc.exited
-        const lcov = Bun.file(path.join(dir, "lcov.info"))
-        map.tests[rel(path.join(pkgDir, t))] = (await lcov.exists()) ? parseLcov(await lcov.text(), pkgDir) : {}
-      }
-    }),
+function validMap(value: unknown, pkg: string): value is CoverageMap {
+  if (!value || typeof value !== "object") return false
+  const map = value as Partial<CoverageMap>
+  if (map.version !== 2 || map.pkg !== pkg || typeof map.commit !== "string" || !/^[a-f0-9]{40}$/.test(map.commit))
+    return false
+  if (!map.tests || typeof map.tests !== "object" || Array.isArray(map.tests) || !Object.keys(map.tests).length)
+    return false
+  return Object.entries(map.tests).every(
+    ([test, coverage]) =>
+      test.startsWith(pkg + "/") &&
+      TEST_FILE.test(test) &&
+      coverage &&
+      typeof coverage === "object" &&
+      !Array.isArray(coverage) &&
+      Object.entries(coverage).every(
+        ([file, lines]) =>
+          file &&
+          !file.startsWith("../") &&
+          !path.isAbsolute(file) &&
+          Array.isArray(lines) &&
+          lines.every((line) => Number.isSafeInteger(line) && line > 0),
+      ),
   )
-  await Bun.write(opt("--out") ?? "coverage-map.json", JSON.stringify(map))
-  console.log(`mapped ${tests.length} test files at ${map.commit.slice(0, 8)}`)
 }
 
-if (cmd === "select") {
-  const map: CoverageMap = await Bun.file(opt("--map") ?? "coverage-map.json").json()
-  // 建图提交不在本地（浅克隆或尚未 fetch）时 diff 为空，会静默漏选；交给调用方退回静态图
-  if (Bun.spawnSync(["git", "cat-file", "-e", `${map.commit}^{commit}`], { cwd: repo }).exitCode !== 0) {
-    console.log(JSON.stringify({ mode: "stale", reason: `本地没有建图提交 ${map.commit.slice(0, 8)}` }))
-    process.exit(0)
+if (import.meta.main) {
+  const [cmd, pkgArg, ...args] = process.argv.slice(2)
+  const pkg = path.resolve(pkgArg ?? ".")
+  if (cmd === "map") {
+    const map = await buildCoverageMap(
+      pkg,
+      flag(args, "--out") ?? "coverage-map.json",
+      Number(flag(args, "--jobs") ?? 4),
+    )
+    console.log("mapped " + Object.keys(map.tests).length + " test files at " + map.commit.slice(0, 8))
+  } else if (cmd === "select") {
+    console.log(
+      JSON.stringify(
+        await selectTests(
+          pkg,
+          flag(args, "--map") ?? "coverage-map.json",
+          flag(args, "--files")?.split(",").map(posix),
+        ),
+      ),
+    )
+  } else {
+    throw new Error("未知命令：" + cmd + "（可选 map | select）")
   }
-  // 旧行号区间：相对建图提交的全部改动（含未提交与未跟踪文件）
-  const diff = run(repo, "git", "diff", "-U0", map.commit, "--", ".")
-  const hunks = new Map<string, [number, number][]>()
-  let file = ""
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("--- ")) file = line.slice(4).replace(/^a\//, "")
-    const m = line.match(/^@@ -(\d+)(?:,(\d+))? \+/)
-    if (m && file !== "/dev/null") {
-      const start = Number(m[1])
-      const len = m[2] === undefined ? 1 : Number(m[2])
-      ;(hunks.get(file) ?? hunks.set(file, []).get(file)!).push([start - 1, start + Math.max(len, 1)])
-    }
-  }
-  const untracked = run(repo, "git", "ls-files", "--others", "--exclude-standard").split("\n").filter(Boolean)
-  const added = run(repo, "git", "diff", "--name-only", "--diff-filter=A", map.commit).split("\n").filter(Boolean)
-  // --files：只考虑这些文件（Agent 结束闸门按会话改动的文件选测试）
-  const restrict = opt("--files")?.split(",").map(posix)
-  const changed = [...new Set([...hunks.keys(), ...untracked, ...added])]
-    .filter((f) => !restrict || restrict.includes(f))
-    .filter((f) => f.startsWith(map.pkg + "/") || !f.startsWith("packages/"))
-
-  const escalate = changed.find((f) => ESCALATE_FULL.some((re) => re.test(f)))
-  if (escalate) {
-    console.log(JSON.stringify({ mode: "full", reason: `全局输入改动: ${escalate}` }))
-    process.exit(0)
-  }
-  const covered = new Set(Object.values(map.tests).flatMap((c) => Object.keys(c)))
-  const selected = new Set<string>()
-  const unmapped: string[] = []
-  for (const f of changed) {
-    if (map.tests[f] !== undefined || /\.test\.tsx?$/.test(f)) {
-      selected.add(f)
-      continue
-    }
-    if (!covered.has(f)) {
-      unmapped.push(f)
-      continue
-    }
-    const ranges = hunks.get(f) ?? [[0, Number.MAX_SAFE_INTEGER]]
-    for (const [t, cov] of Object.entries(map.tests)) {
-      const lines = cov[f]
-      if (lines?.some((ln) => ranges.some(([a, b]) => ln >= a && ln <= b))) selected.add(t)
-    }
-  }
-  // 覆盖图里没有的源文件（新文件、运行时读取的资源）交给静态 import 图兜底
-  console.log(JSON.stringify({ mode: "files", tests: [...selected].sort(), unmapped }))
 }

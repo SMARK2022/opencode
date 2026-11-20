@@ -35,6 +35,8 @@ jobs:
         with:
           ref: dev1-smark
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
       - name: 建图（opencode / core / tui）
         run: |
           for pkg in opencode core tui; do
@@ -64,6 +66,8 @@ jobs:
           ref: dev1-smark
           fetch-depth: 0
       - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
       - name: 检出看板数据
         run: bash script/guard/site.sh prepare "$RUNNER_TEMP/site"
       - name: 选择对比基准
@@ -75,12 +79,12 @@ jobs:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         # 退出码 1 只表示有退化：照样记录到看板，不让任务失败
         run: |
-          bun script/guard/bench/opencode.ts --base "${{ steps.base.outputs.base }}" \
+          bun script/guard/bench/opencode.ts --head HEAD --base "${{ steps.base.outputs.base }}" \
             --json bench.json --markdown "$GITHUB_STEP_SUMMARY" || [ $? -eq 1 ]
       - name: 全量规则扫描
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
-        run: bun script/guard/check.ts . --json guard.json --quiet || true
+        run: bun script/guard/check.ts . --json guard.json --quiet || [ $? -eq 1 ]
       - name: 写入看板并推送
         run: |
           args=(--site "$RUNNER_TEMP/site" --guard guard.json --sha "$(git rev-parse HEAD)")

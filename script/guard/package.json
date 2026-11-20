@@ -1,0 +1,9 @@
+{
+  "name": "opencode-guard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test ./test"
+  }
+}
