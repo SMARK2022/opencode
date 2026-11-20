@@ -166,7 +166,7 @@ async function comment() {
   if (guard && (await Bun.file(guard).exists())) parts.push(renderMarkdown(await Bun.file(guard).json()))
   else if (guard)
     parts.push(
-      "## 🔴 Guard 规则检查\n\n没有产出结果（检查在开始前就失败了，例如受保护路径缺少标签），请看本次运行日志。\n",
+      "## 🔴 Guard 规则检查\n\n没有产出结果（检查在开始前就失败了），请看本次运行日志。\n",
     )
   const bench = flag(process.argv, "--bench")
   const status = flag(process.argv, "--bench-status")
