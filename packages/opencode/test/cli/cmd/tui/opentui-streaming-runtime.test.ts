@@ -1,11 +1,45 @@
 import { describe, expect, test } from "bun:test"
-import { CodeRenderable, SyntaxStyle, TreeSitterClient } from "@opentui/core"
-import { createTestRenderer } from "@opentui/core/testing"
+import { CodeRenderable, MarkdownRenderable, SyntaxStyle, TextTableRenderable, TreeSitterClient } from "@opentui/core"
+import { createTestRenderer, MockTreeSitterClient } from "@opentui/core/testing"
 import { tmpdir } from "../../../fixture/fixture"
 import path from "node:path"
 
 // 核对真实消费版本，防止派生安装的旧链接冒充catalog中的新发布包。
 describe("installed OpenTUI streaming runtime", () => {
+  test.each(["inline", "reference"])("keeps late text and its %s link in the final table cell", async (kind) => {
+    const setup = await createTestRenderer({ width: 100, height: 12, useThread: false, consoleMode: "disabled" })
+    const style = SyntaxStyle.create()
+    const client = new MockTreeSitterClient()
+    const url = "https://example.org/fix"
+    const prefix = kind === "reference" ? `[fix]: ${url}\n\n` : ""
+    const link = kind === "reference" ? "[Fix][fix]" : `[Fix](${url})`
+    const md = new MarkdownRenderable(setup.renderer, {
+      content: `${prefix}| Version | Change | Verdict |\n|---|---|---|\n| B | updated | ${link}`,
+      streaming: true,
+      internalBlockMode: "top-level",
+      syntaxStyle: style,
+      treeSitterClient: client,
+    })
+    try {
+      md.streaming = false
+      md.content += " still pending. |"
+
+      const blocks = md.getChildren()
+      const table = blocks.find((block) => block instanceof TextTableRenderable)
+      const cell = table?.content.at(-1)?.[2]
+      expect({ url: cell?.find((chunk) => chunk.text === "Fix")?.link?.url, tail: cell?.at(-1)?.text }).toEqual({
+        url,
+        tail: " still pending.",
+      })
+      expect(blocks.at(-1)).toBe(table)
+    } finally {
+      md.destroyRecursively()
+      setup.renderer.destroy()
+      style.destroy()
+      await client.destroy()
+    }
+  })
+
   for (const hook of ["onHighlight", "onChunks"] as const) {
     for (const reject of [false, true]) {
       test(`queued teardown keeps the client destroyed after ${hook} ${reject ? "rejects" : "fulfills"}`, async () => {
@@ -151,11 +185,12 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       consoleMode: "disabled",
     })
     const callbackText: string[] = []
+    const style = SyntaxStyle.fromTheme([])
     const code = new CodeRenderable(setup.renderer, {
       id: "installed-streaming-code",
       filetype: "markdown",
       // 空主题 + 不画无样式文本：排除着色层干扰，断言只锁定 streaming 分块语义。
-      syntaxStyle: SyntaxStyle.fromTheme([]),
+      syntaxStyle: style,
       conceal: false,
       drawUnstyledText: false,
       // streaming 是本断言的核心前置：增量解析不得把每个 delta 当独立文档重解析。
@@ -177,10 +212,10 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       ]) {
         content += delta
         code.content = content
-        // renderOnce/highlightingDone/renderOnce 的顺序锁定增量高亮完成边界：先提交帧、等解析、再取终帧。
-        await setup.renderOnce()
+        // 正文变更已经预约一帧；等它启动高亮，再等高亮结果触发的重绘。
+        await setup.renderer.idle()
         await code.highlightingDone
-        await setup.renderOnce()
+        await setup.renderer.idle()
       }
       // plainText 必须与累积内容逐字相等——任何分块丢失/重复都会在这里暴露。
       expect(code.plainText).toBe(content)
@@ -189,8 +224,10 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       // 公式块断言含换行——验证 chunk 切分不吞结构内的空白边界。
       expect(callbackText.join("")).toContain("$$x\n+y$$")
     } finally {
-      // destroy 是测试自己的清理责任：highlight 线程不随断言失败泄漏。
+      code.destroy()
+      await setup.renderer.idle()
       setup.renderer.destroy()
+      style.destroy()
     }
   })
 
@@ -220,10 +257,8 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
     setup.renderer.root.add(code)
     try {
       await client.initialize()
-      await setup.renderOnce()
       await entered.promise
-      // 内容换代后故意不再渲染：任何在 stale 结算前到达的新渲染都会启动下一代
-      // 高亮，让断言失去对「旧请求是否归位标志」的分辨力。
+      // 在下一帧开始前释放旧请求，观察这次结算是否归位标志。
       code.content = "# Second\n"
       release.resolve()
       await code.highlightingDone
@@ -231,7 +266,7 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       // 消息永久钉在挂载态并逐帧请求重绘（用户可见的分钟级卡死链路的起点）。
       expect(code.isHighlighting).toBe(false)
       // 归位不能吃掉更新：setter 留下的脏标志须驱动下一次真实渲染重启高亮。
-      await setup.renderOnce()
+      await setup.renderer.idle()
       await code.highlightingDone
       expect(code.isHighlighting).toBe(false)
       // plainText 读出 "Second\n" 而非 "# Second\n"：conceal 只在高亮落地后生效，
@@ -241,6 +276,7 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       release.resolve()
       code.destroy()
       await client.destroy()
+      await setup.renderer.idle()
       setup.renderer.destroy()
       style.destroy()
     }
@@ -273,11 +309,9 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
     setup.renderer.root.add(code)
     try {
       await client.initialize()
-      await setup.renderOnce()
       await entered[0].promise
       code.content = "# Second\n"
-      // 脏渲染立即启动 B（renderSelf 不等待旧请求），entered[1] 确认 B 已在途。
-      await setup.renderOnce()
+      // 等正文变更预约的帧启动 B，再放行 A。
       await entered[1].promise
       release[0].resolve()
       // macrotask 排空：A 放行后的 stale 判定与分支是纯同步尾巴，setTimeout(0)
@@ -296,6 +330,7 @@ console.log(JSON.stringify({ initialized: client.isInitialized(), highlighting: 
       release[1].resolve()
       code.destroy()
       await client.destroy()
+      await setup.renderer.idle()
       setup.renderer.destroy()
       style.destroy()
     }

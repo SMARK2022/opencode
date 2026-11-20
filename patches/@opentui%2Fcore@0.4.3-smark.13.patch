@@ -1,7 +1,20 @@
 diff --git a/index.js b/index.js
 --- a/index.js
 +++ b/index.js
-@@ -10142,6 +10142,8 @@
+@@ -7925,6 +7925,12 @@
+       break;
+     }
+   }
++  if (trailingUnstable === 0 && offset === prevState.content.length && offset < newContent.length &&
++      prevState.tokens[reuseCount - 1]?.type === "table") {
++    const tableStart = offset - prevState.tokens[reuseCount - 1].raw.length;
++    // 重读末表时，前文可能含有单元格引用的链接定义。
++    reuseCount = prevState.content.lastIndexOf("]:", tableStart - 2) >= 0 ? 0 : reuseCount - 1;
++  }
+   reuseCount = Math.max(0, reuseCount - trailingUnstable);
+   offset = 0;
+   for (let i = 0;i < reuseCount; i++) {
+@@ -10142,6 +10148,8 @@
    _hasManualScroll = false;
    _isApplyingStickyScroll = false;
    scrollAccel;
@@ -10,7 +23,7 @@ diff --git a/index.js b/index.js
    get stickyScroll() {
      return this._stickyScroll;
    }
-@@ -10284,6 +10286,8 @@
+@@ -10284,6 +10292,8 @@
        ...sanitizedRootBoxOptions,
        ...sanitizedRootOptions
      });
@@ -19,7 +32,7 @@ diff --git a/index.js b/index.js
      this.internalId = ScrollBoxRenderable.idCounter++;
      this._stickyScroll = stickyScroll;
      this._stickyStart = stickyStart;
-@@ -10360,6 +10364,31 @@
+@@ -10360,6 +10370,31 @@
      };
      this._ctx.on("selection", this.selectionListener);
    }
