@@ -304,6 +304,7 @@ function titleUserText(message: SessionV1.WithParts) {
 export interface Interface {
   readonly generateTitle: (sessionID: SessionID) => Effect.Effect<Session.Info, TitleError | Session.NotFound>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly taskOps: () => Effect.Effect<TaskPromptOps>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly compact: (input: {
@@ -361,48 +362,48 @@ const layer = Layer.effect(
     const { db } = database
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
-        cancel: (sessionID: SessionID) => cancel(sessionID),
+        cancel: cancelSession,
         resolvePromptParts: (template: string) => resolvePromptParts(template),
         prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
     // #216：复用取消owner递归收尾子会话，保留冻结ID、runner等待与原子结算順序。
-    const cancel: Interface["cancel"] = Effect.fn("SessionPrompt.cancel")((sessionID: SessionID) =>
+    const cancelSession: TaskPromptOps["cancel"] = Effect.fn("SessionPrompt.cancel")((sessionID: SessionID, closingJobID?: string) =>
       Effect.uninterruptibleMask((restore) => {
         const inFlight = cancelFlights.get(sessionID)
-        if (inFlight) return restore(Deferred.await(inFlight).pipe(Effect.flatMap((exit) => exit)))
-        // 同步分配与登记之间不切让；body和join仍可中断，释放由onExit负责。
+        // 内部 finalizer 加入自己的取消 flight 会互等；外部 caller 继续共享完整 Exit。
+        if (inFlight) return closingJobID !== undefined ? Effect.void : restore(Deferred.await(inFlight).pipe(Effect.flatMap((exit) => exit)))
+        // 登记后由共享清理持有完整生命周期；首发请求断开也必须完成消息、用量和后代结算。
         const flight = Deferred.makeUnsafe<Exit.Exit<void>>()
         cancelFlights.set(sessionID, flight)
-        return restore(
-          Effect.gen(function* () {
-            yield* Effect.logInfo("cancel", { "session.id": sessionID })
-            // SessionRunState 提供真实活动身份，Session.children 只追溯其祖先链，保留空闲中间节点。
-            // 等待 runner 前冻结这批子会话，已结束历史不进入流程，也不在 idle 后误取消新工作。
-            const children = yield* sessions.children(sessionID, yield* state.active())
-            // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
-            // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
-            // 隐藏只改变展示，不撤销旧消息上的执行权与计费责任。
-            const snapshot = yield* MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pipe(Effect.provideService(Database.Service, database))
-            const pending = snapshot.pendingAssistantIDs
-            const orphanIDs = snapshot.orphanUserIDs
-            yield* state.cancel(sessionID)
-            yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
-              discard: true,
-            })
-            const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
-            if (usage) {
-              yield* Effect.forEach(orphanIDs, Effect.fnUntraced(function* (requestID) {
-                const request = yield* usage.get({ sessionID, requestID })
-                // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
-                if (request?.status !== "running") return
-                yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
-              }), { discard: true })
-            }
-            yield* Effect.forEach(children, (child) => cancel(child.id), { discard: true })
-          }),
-        ).pipe(
+        return Effect.gen(function* () {
+          yield* Effect.logInfo("cancel", { "session.id": sessionID })
+          // SessionRunState 提供真实活动身份，Session.children 只追溯其祖先链，保留空闲中间节点。
+          // 等待 runner 前冻结这批子会话，已结束历史不进入流程，也不在 idle 后误取消新工作。
+          const children = yield* sessions.children(sessionID, yield* state.active())
+          // pending与queued孤儿身份从同次读取冻结，旧cancel不得重新扫描replacement请求。
+          // 只读 hot 定位，已完成助手的冷 Tool 不因取消而持久预热；后续仍沿现有逐 ID 收尾 owner。
+          // 隐藏只改变展示，不撤销旧消息上的执行权与计费责任。
+          const snapshot = yield* MessageV2.cancelSnapshot(sessionID, { includeHidden: true }).pipe(Effect.provideService(Database.Service, database))
+          const pending = snapshot.pendingAssistantIDs
+          const orphanIDs = snapshot.orphanUserIDs
+          // 内部首发仍负责消息与后代结算，只把正在关闭的自身作业交回原 scope。
+          yield* state.cancel(sessionID, closingJobID)
+          yield* Effect.forEach(pending, (messageID) => abortPendingAssistant(sessionID, messageID).pipe(Effect.ignore), {
+            discard: true,
+          })
+          const usage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
+          if (usage) {
+            yield* Effect.forEach(orphanIDs, Effect.fnUntraced(function* (requestID) {
+              const request = yield* usage.get({ sessionID, requestID })
+              // noReply或已完成请求仍可能没有assistant，只有running项属于待取消队列。
+              if (request?.status !== "running") return
+              yield* usage.complete({ sessionID, requestID, status: "aborted", timeCompleted: Date.now() })
+            }), { discard: true })
+          }
+          yield* Effect.forEach(children, (child) => cancelSession(child.id), { discard: true })
+        }).pipe(
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               // 先发布完整Exit再删登记，重叠caller只能消费相同的取消结果。
@@ -2544,7 +2545,9 @@ const layer = Layer.effect(
 
     return Service.of({
       generateTitle,
-      cancel,
+      // 公开 API 只转发会话 ID，集合回调附带的索引不能变成私有作业参数。
+      cancel: (sessionID) => cancelSession(sessionID),
+      taskOps: ops,
       prompt,
       loop,
       compact,

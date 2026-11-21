@@ -31,7 +31,7 @@ export function buildParentInspectedFilesSummary(messages: SessionV1.WithParts[]
 }
 
 export interface TaskPromptOps {
-  cancel(sessionID: SessionID): Effect.Effect<void>
+  cancel(sessionID: SessionID, closingJobID?: string): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
 }
@@ -445,8 +445,10 @@ export const TaskTool = Tool.define(
         }
       }
 
+      // 注册与中断共用一个实际作业身份，Prompt 不用从会话 ID 还原它。
+      const jobID = nextSession.id
       const info = yield* background.start({
-        id: nextSession.id,
+        id: jobID,
         type: id,
         title: params.description,
         metadata,
@@ -457,7 +459,8 @@ export const TaskTool = Tool.define(
           }),
           notify(nextSession.id),
         ]),
-        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
+        // 作业自身正在退出，取消 owner 不能再等待这个 finalizer 关闭。
+        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id, jobID))),
       })
 
       function backgroundResult() {
