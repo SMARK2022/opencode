@@ -9,16 +9,23 @@ import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 
 test("measure real session frames", async () => {
   const env = process.env
-  const ui = await createTestRenderer({ width: 120, height: 40, useThread: false })
+  const ui = await createTestRenderer({ width: 140, height: 40, useThread: false })
   const core = await import("@opentui/core")
   await mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => ui.renderer }))
   const { run } = await import("../src/app")
   let api: TuiPluginApi | undefined
+  let disposeSlots: (() => void) | undefined
   const start = performance.now()
   const app = Effect.runPromise(run({
     url: env.BENCH_URL!, directory: env.BENCH_DIR!, args: { sessionID: env.BENCH_SESSION! },
     config: createTuiResolvedConfig({ plugin_enabled: {} }),
-    pluginHost: { async start(input) { api = input.api }, async dispose() {} },
+    pluginHost: {
+      async start(input) {
+        api = input.api
+        disposeSlots = input.runtime.setupSlots(api).dispose
+      },
+      async dispose() { disposeSlots?.() },
+    },
   }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))))
   const deadline = start + 35_000
   const frame = async (samples?: number[]) => {
