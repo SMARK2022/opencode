@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { Cause, Clock, Deferred, Duration, Effect, Exit, Fiber, Scheduler, Schema, SchemaGetter } from "effect"
 import { TestClock } from "effect/testing"
 import { CodeMode, Tool, toolError } from "../src/index.js"
+import { ToolRuntime } from "../src/tool-runtime.js"
 
 const run = (tool: Tool.Definition<never>) =>
   Effect.runPromise(CodeMode.make({ tools: { host: { call: tool } } }).execute("return await tools.host.call({})"))
@@ -774,6 +775,35 @@ describe("CodeMode schema flexibility", () => {
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.value).toStrictEqual({ echoed: { id: 42 } })
     expect(observed).toStrictEqual([{ id: 42 }])
+
+    const capture = (input: unknown) => Effect.sync(() => {
+      const list = (input as { list: string[] }).list
+      // 值读取无法区分洞和现有属性，必须同时观察自身键。
+      return [
+        Object.keys(list), Object.hasOwn(list, 0), list[0] === undefined, list.length, list.map((item) => item).join(","),
+      ]
+    })
+    const boundaries = CodeMode.make({ tools: { host: {
+      schema: Tool.make({ description: "Inspect host array shape", input: { type: "object" }, run: capture }),
+    } } })
+    // 字面量沿用显式 undefined；下标赋值得到的真洞须让原生 map 跳过回调。
+    const shapes = await Effect.runPromise(boundaries.execute(`
+      const literal = [, "one"]; const indexed = []; indexed[1] = "one";
+      return [await tools.host.schema({list: literal}), await tools.host.schema({list: indexed})];
+    `))
+    expect(shapes).toMatchObject({ ok: true, value: [
+      [["0", "1"], true, true, 2, ",one"], [["1"], false, true, 2, ",one"],
+    ] })
+    // Raw handler 使用 ToolRuntime 的出站入口，不扩大公开 CodeMode.make 的类型。
+    const raw = ToolRuntime.make({ host: { capture } }, undefined, [])
+    const hole: string[] = []
+    hole[1] = "one"
+    expect(await Effect.runPromise(raw.invoke(["host", "capture"], [{ list: [undefined, "one"] }]))).toStrictEqual(
+      [["0", "1"], true, true, 2, ",one"],
+    )
+    expect(await Effect.runPromise(raw.invoke(["host", "capture"], [{ list: hole }]))).toStrictEqual(
+      [["1"], false, true, 2, ",one"],
+    )
   })
 
   test("renders JSON Schema outputs and $defs references", async () => {
@@ -1632,15 +1662,34 @@ describe("CodeMode public contract", () => {
   test("returns JSON-safe data and normalizes undefined to null", async () => {
     const result = await Effect.runPromise(
       CodeMode.execute({
-        code: `return { top: undefined, nested: [1, undefined] }`,
+        code: `const holes = []; holes[1] = 1; return { top: undefined, nested: [1, undefined], holes: [holes] }`,
       }),
     )
     expect(result).toStrictEqual({
       ok: true,
-      value: { top: null, nested: [1, null] },
+      value: { top: null, nested: [1, null], holes: [[null, 1]] },
       toolCalls: [],
     })
+    // 直接取结果与走 JSON 的调用方应得到同一组键和值。
     expect(Schema.decodeUnknownSync(CodeMode.Result)(JSON.parse(JSON.stringify(result)))).toStrictEqual(result)
+
+    // 所有断言走公开执行结果；构造得到的真洞在沙箱内与显式 undefined 不同。
+    const arrays = await Effect.runPromise(CodeMode.execute({ code: `
+      const list = new Array(4); list[1] = 2; list[3] = 4;
+      const made = Array(2); made[1] = 3;
+      const mapped = list.map(x => x * 2); const source = [3, 1];
+      const sorted = source.sort((l, r) => { source.pop(); return l-r });
+      const dynamic = { length: 2, 0: "a", 1: "b" };
+      const from = Array.from(dynamic, (x, i) => { dynamic[1] = "c"; return x + i; });
+      return [Object.keys(mapped), mapped, made, sorted, source.length,
+        from, [1.4, 2.9].map(Math.floor), ["1", "[2]"].map(JSON.parse),
+        [7].map(Math.max), [3].map(Math.hypot)];
+    ` }))
+    expect(arrays).toMatchObject({ ok: true, value: [
+      ["1", "3"], [null, 4, null, 8], [null, 3], [1, 3], 1,
+      ["a0", "c1"], [1, 2], [1, [2]], [7], [Math.hypot(3, 0, 3)],
+    ] })
+
   })
 
   test("rejects invalid configuration and discovery limits", async () => {

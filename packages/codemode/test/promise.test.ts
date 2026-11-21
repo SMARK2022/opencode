@@ -1216,11 +1216,11 @@ describe("async standard-library callbacks and iteration", () => {
     async function nested() { await pause(0); return 3; }
     return [typeof pause, await nested(), await pause(0)];`),
     ).toEqual(["function", 3, null])
-    // sleep可当回调传递但不暴露宿主函数属性；Math.abs的反例保留原有全局方法不可提取的限制。
+    // sleep 可以当回调传递但不暴露宿主函数属性；JSON.stringify 不属于受限回调。
     for (const code of [
       "return sleep.name",
       "return sleep.constructor",
-      "return [1].map(Math.abs)",
+      "return [1].map(JSON.stringify)",
       "return sleep.call(null, 0)",
     ]) {
       expect((await run(code)).ok).toBe(false)
