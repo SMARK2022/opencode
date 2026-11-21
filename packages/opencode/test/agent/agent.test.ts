@@ -2,6 +2,8 @@ import { afterEach, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit } from "effect"
 import path from "path"
+import * as fs from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { Agent } from "../../src/agent/agent"
@@ -657,6 +659,34 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
+      // 在首次读取配置前备齐依赖，否则权限用例会启动后台安装。
+      yield* Effect.promise(async () => {
+        const config = path.join(test.directory, ".opencode")
+        const packageRoot = fileURLToPath(new URL("../../../plugin/", import.meta.url))
+        const staged = path.join(config, ".permission-fixture-plugin")
+        const npmModules = path.join(config, "node_modules", "@opencode-ai")
+        const dependency = JSON.parse(await fs.readFile(path.join(packageRoot, "package.json"), "utf8"))
+        if (dependency.name !== "@opencode-ai/plugin") throw new Error("Expected workspace plugin package")
+        await fs.mkdir(staged, { recursive: true })
+        await fs.mkdir(npmModules, { recursive: true })
+        // 工作区插件的 exports 指向源码，只有清单的目录不是完整包。
+        await fs.copyFile(path.join(packageRoot, "package.json"), path.join(staged, "package.json"))
+        await fs.cp(path.join(packageRoot, "src"), path.join(staged, "src"), { recursive: true })
+        // 依赖内容和链接在本测试临时盘上，避免 Windows 跨盘相对锁路径。
+        await fs.symlink(staged, path.join(npmModules, "plugin"), "junction")
+        const spec = "file:.permission-fixture-plugin"
+        const manifest = { name: "permission-fixture", version: "1.0.0", dependencies: { [dependency.name]: spec } }
+        await Bun.write(path.join(config, "package.json"), JSON.stringify(manifest))
+        // 锁文件将安装节点记为本地包的链接，避免已有目录被识别为待安装。
+        await Bun.write(path.join(config, "package-lock.json"), JSON.stringify({
+          name: manifest.name, version: manifest.version, lockfileVersion: 3, requires: true,
+          packages: {
+            "": manifest,
+            ".permission-fixture-plugin": { name: dependency.name, version: dependency.version },
+            "node_modules/@opencode-ai/plugin": { resolved: ".permission-fixture-plugin", link: true },
+          },
+        }))
+      })
       const skillDir = path.join(test.directory, ".opencode", "skill", "perm-skill")
       yield* Effect.promise(() =>
         Bun.write(
