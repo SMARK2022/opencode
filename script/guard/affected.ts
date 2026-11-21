@@ -40,8 +40,8 @@ export async function planAffected(repo: string, changed: string[]) {
       if (owner && dependency) link(dependencies, owner, dependency)
     }
 
-  // Playwright 端到端与性能套件不进门禁（app 只要求接口兼容）
-  const tests = files.filter((f) => TEST_FILE.test(f) && !/^packages\/[^/]+\/e2e\//.test(f))
+  // 主线不运行独立 sdk-next 套件或 Playwright E2E；源码仍参与依赖分析。
+  const tests = files.filter((f) => TEST_FILE.test(f) && !/^packages\/(?:sdk-next\/|[^/]+\/e2e\/)/.test(f))
   const testSet = new Set(tests)
   const always = tests.filter((f) => ALWAYS_RUN.some((re) => re.test(f)))
   const selected = new Set(always)

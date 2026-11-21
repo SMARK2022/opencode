@@ -2,7 +2,7 @@
 // 覆盖率图提供候选测试；图不完整、基线不可用或改动没有覆盖时，必须回到静态依赖图。
 import path from "node:path"
 import os from "node:os"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, realpath, rm } from "node:fs/promises"
 import { ESCALATE_FULL } from "./affected-rules"
 import { posix, pjoin, git, listFiles, flag } from "./lib"
 import { TEST_FILE } from "./affected"
@@ -11,6 +11,7 @@ export type CoverageMap = { version: 2; commit: string; pkg: string; tests: Reco
 
 export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
   if (!Number.isSafeInteger(jobs) || jobs < 1) throw new Error("--jobs 必须是正整数")
+  pkgDir = await realpath(pkgDir)
   const repo = readGit(pkgDir, "rev-parse", "--show-toplevel")
   const rel = posix(path.relative(repo, pkgDir))
   const tests = (await listFiles(pkgDir, "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}")).filter((file) => TEST_FILE.test(file))
@@ -51,7 +52,8 @@ export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
             }
           }
           map.tests[key] = null
-          console.warn(`跳过覆盖记录：${key}（退出码 ${code}）\n${stdout}\n${stderr}`)
+          // 子测试诊断保留在日志中，前缀与外层 Bun reporter 的 (fail) 行区分。
+          console.warn(`跳过覆盖记录：${key}（退出码 ${code}）\n${(stdout + "\n" + stderr).replace(/^/gm, "| ")}`)
         }
       }),
     )
@@ -65,6 +67,7 @@ export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
 }
 
 export async function selectTests(pkgDir: string, mapFile: string, restrict?: string[]) {
+  pkgDir = await realpath(pkgDir)
   const repo = readGit(pkgDir, "rev-parse", "--show-toplevel")
   const pkg = posix(path.relative(repo, pkgDir))
   const map: unknown = await Bun.file(mapFile).json()

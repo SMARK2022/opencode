@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { createSignal, untrack } from "solid-js"
 import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core"
-import { createTestRenderer } from "@opentui/core/testing"
+import { createTestRenderer, ManualClock } from "@opentui/core/testing"
 
 const sessionSource = await Bun.file(new URL("../../../src/routes/session/index.tsx", import.meta.url)).text()
 // #212：提取生产回调在原生布局中执行，避免测试另写一份跟随公式。
@@ -10,7 +10,7 @@ const callback = sessionSource.match(/  function syncSessionViewportStuckToBotto
 async function fixture() {
   expect(callback).toBeDefined()
   expect(sessionSource).toContain("renderAfter={syncSessionViewportStuckToBottom}")
-  const app = await createTestRenderer({ width: 100, height: 18, useThread: false })
+  const app = await createTestRenderer({ width: 100, height: 18, useThread: false, clock: new ManualClock() })
   // #212：非零屏幕位置与边框让 y/height 不等于滚动偏移/视口高度。
   const scroll = new ScrollBoxRenderable(app.renderer, {
     width: 96,

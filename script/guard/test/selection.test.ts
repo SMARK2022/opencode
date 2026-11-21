@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
 import path from "node:path"
 import os from "node:os"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, symlink } from "node:fs/promises"
 import { planAffected } from "../affected"
 import { buildCoverageMap, selectTests, type CoverageMap } from "../select-tests"
 
@@ -110,14 +110,18 @@ test("Guard 变动只调度规则自身和固定契约，不升级全部产品�
     "packages/schema/package.json": JSON.stringify({ name: "@fixture/schema" }),
     "packages/client/package.json": pkg("client"),
     "packages/client/test/import-boundaries.test.ts": "",
-    "packages/sdk-next/package.json": pkg("sdk-next"),
-    "packages/sdk-next/test/import-boundaries.test.ts": "",
+    "packages/sdk-next/package.json": pkg("sdk-next", { "@fixture/core": "workspace:*" }),
+    "packages/sdk-next/test/import-boundaries.test.ts": 'import "@fixture/core"',
     "packages/schema/test/schema.test.ts": "",
     "script/guard/test/rule.test.ts": "",
   })
   const result = await planAffected(repo, ["script/guard/affected.ts"])
   expect(result.plan.map((plan) => plan.pkg)).toEqual(["packages/schema", "script/guard"])
   expect(result.plan.at(-1)?.tests).toEqual(["script/guard/test/rule.test.ts"])
+  for (const changed of ["packages/core/src/value.ts", "packages/sdk-next/test/import-boundaries.test.ts", "bun.lock"]) {
+    const { plan } = await planAffected(repo, [changed])
+    expect(plan.map((p) => p.pkg)).not.toContain("packages/sdk-next")
+  }
 })
 
 test("实际 tsconfig paths 参与反向依赖选择", async () => {
@@ -215,6 +219,9 @@ test("跳过失败覆盖记录，保留成功记录；没有成功记录时不�
       'import { test, expect } from "bun:test"\nimport { value } from "../src/value"\ntest("value", () => expect(value).toBe(2))\n',
   })
   const out = path.join(repo, ".git", "coverage.json")
+  const pkgDir = path.join(repo, "packages/core")
+  const input = process.platform === "win32" ? pkgDir : path.join(repo, ".git", "linked-core")
+  if (input !== pkgDir) await symlink(pkgDir, input)
   await Bun.write(out, "previous map")
   await buildCoverageMap(path.join(repo, "packages/core"), out, 1)
   expect(await Bun.file(out).text()).toBe("previous map")
@@ -223,11 +230,11 @@ test("跳过失败覆盖记录，保留成功记录；没有成功记录时不�
     path.join(repo, "packages/core/test/pass.test.ts"),
     'import { test, expect } from "bun:test"\nimport { value } from "../src/value"\ntest("value", () => expect(value).toBe(1))\n',
   )
-  const map = await buildCoverageMap(path.join(repo, "packages/core"), out, 1)
+  const map = await buildCoverageMap(input, out, 1)
   expect(map.version).toBe(2)
   expect(map.tests["packages/core/test/pass.test.ts"]?.["packages/core/src/value.ts"]).toContain(1)
   expect(map.tests["packages/core/test/value.test.ts"]).toBeNull()
-  expect((await selectTests(path.join(repo, "packages/core"), out, [])).tests).toEqual(["packages/core/test/value.test.ts"])
+  expect((await selectTests(input, out, [])).tests).toEqual(["packages/core/test/value.test.ts"])
 })
 
 async function fixture(files: Record<string, string>) {
