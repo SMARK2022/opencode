@@ -39,10 +39,20 @@ jobs:
           install-flags: --frozen-lockfile
       - name: 建图（opencode / core / tui）
         run: |
+          set -o pipefail
           for pkg in opencode core tui; do
-            bun script/guard/select-tests.ts map "packages/$pkg" --out "coverage-map-$pkg.json" --jobs 4
+            bun script/guard/select-tests.ts map "packages/$pkg" --out "coverage-map-$pkg.json" --jobs 4 2>&1 | tee "coverage-$pkg.log"
           done
+      - name: 上传建图日志
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: guard-coverage-logs
+          path: coverage-*.log
+          if-no-files-found: ignore
+          retention-days: 14
       - name: 发布到 release guard-coverage-map
+        if: ${{ success() && hashFiles('coverage-map-*.json') != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

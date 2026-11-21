@@ -7,7 +7,7 @@ import { ESCALATE_FULL } from "./affected-rules"
 import { posix, pjoin, git, listFiles, flag } from "./lib"
 import { TEST_FILE } from "./affected"
 
-export type CoverageMap = { version: 2; commit: string; pkg: string; tests: Record<string, Record<string, number[]>> }
+export type CoverageMap = { version: 2; commit: string; pkg: string; tests: Record<string, Record<string, number[]> | null> }
 
 export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
   if (!Number.isSafeInteger(jobs) || jobs < 1) throw new Error("--jobs 必须是正整数")
@@ -30,23 +30,34 @@ export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
             [process.execPath, "test", "--timeout=30000", "--coverage", "--coverage-reporter=lcov", "--coverage-dir=" + dir, "./" + test],
             {
               cwd: pkgDir,
-              stdout: "ignore",
+              stdout: "pipe",
               stderr: "pipe",
             },
           )
-          const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()])
+          const [code, stdout, stderr] = await Promise.all([
+            proc.exited,
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+          ])
           const lcov = Bun.file(path.join(dir, "lcov.info"))
-          if (code !== 0 || !(await lcov.exists())) {
-            failures.push(test + "（退出码 " + code + "，需要有效 lcov）\n" + err.trim().split("\n").slice(-20).join("\n"))
-            continue
+          const key = pjoin(rel, test)
+          if (code === 0 && (await lcov.exists())) {
+            const text = await lcov.text()
+            try {
+              map.tests[key] = parseLcov(text, repo, pkgDir)
+              continue
+            } catch (error) {
+              console.warn(`${key}: ${error}`)
+            }
           }
-          map.tests[pjoin(rel, test)] = parseLcov(await lcov.text(), repo, pkgDir)
+          map.tests[key] = null
+          console.warn(`跳过覆盖记录：${key}（退出码 ${code}）\n${stdout}\n${stderr}`)
         }
       }),
     )
     for (const worker of workers) if (worker.status === "rejected") failures.push(String(worker.reason))
-    if (failures.length) throw new Error("覆盖率建图失败，禁止发布不完整地图：\n" + failures.join("\n"))
-    await Bun.write(out, JSON.stringify(map))
+    if (failures.length) throw new Error("覆盖率建图进程失败：\n" + failures.join("\n"))
+    if (Object.values(map.tests).some(Boolean)) await Bun.write(out, JSON.stringify(map))
     return map
   } finally {
     await rm(tmp, { recursive: true, force: true })
@@ -71,8 +82,10 @@ export async function selectTests(pkgDir: string, mapFile: string, restrict?: st
     .filter((file) => file && (!restrict || restrict.includes(file)))
   const escalate = changed.find((file) => ESCALATE_FULL.some((re) => re.test(file)))
   if (escalate) return { mode: "full", reason: "全局输入改动：" + escalate }
-  const covered = new Set(Object.values(map.tests).flatMap((coverage) => Object.keys(coverage)))
+  const covered = new Set(Object.values(map.tests).flatMap((coverage) => Object.keys(coverage ?? {})))
   const selected = new Set<string>()
+  for (const [test, coverage] of Object.entries(map.tests))
+    if (coverage === null && (await Bun.file(path.join(repo, test)).exists())) selected.add(test)
   const unmapped: string[] = []
   for (const file of changed) {
     if (file.startsWith(pkg + "/") && TEST_FILE.test(file)) {
@@ -104,7 +117,7 @@ export async function selectTests(pkgDir: string, mapFile: string, restrict?: st
         return [[Math.max(1, start - 1), start + Math.max(length, 1)]]
       })
     const hits = Object.entries(map.tests).filter(([, coverage]) =>
-      coverage[file]?.some((line) => ranges.some(([start, end]) => line >= start && line <= end)),
+      coverage?.[file]?.some((line) => ranges.some(([start, end]) => line >= start && line <= end)),
     )
     if (!hits.length) unmapped.push(file)
     for (const [test] of hits) {
@@ -152,10 +165,9 @@ function validMap(value: unknown, pkg: string): value is CoverageMap {
     ([test, coverage]) =>
       test.startsWith(pkg + "/") &&
       TEST_FILE.test(test) &&
-      coverage &&
       typeof coverage === "object" &&
       !Array.isArray(coverage) &&
-      Object.entries(coverage).every(
+      Object.entries(coverage ?? {}).every(
         ([file, lines]) =>
           file &&
           !file.startsWith("../") &&
@@ -175,7 +187,8 @@ if (import.meta.main) {
       flag(args, "--out") ?? "coverage-map.json",
       Number(flag(args, "--jobs") ?? 4),
     )
-    console.log("mapped " + Object.keys(map.tests).length + " test files at " + map.commit.slice(0, 8))
+    const records = Object.values(map.tests)
+    console.log(`${map.pkg}: ${records.filter(Boolean).length}/${records.length} 个测试文件有覆盖记录`)
   } else if (cmd === "select") {
     console.log(
       JSON.stringify(

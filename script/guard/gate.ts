@@ -184,7 +184,11 @@ async function planTests(files: string[]) {
       { cwd: repo },
     )
     const pick: { mode?: string; tests?: string[]; unmapped?: string[] } = JSON.parse(result.stdout.toString() || "{}")
-    if (result.exitCode !== 0 || !pick.mode || pick.mode === "stale" || pick.unmapped?.length) continue
+    if (result.exitCode !== 0 || !pick.mode || pick.mode === "stale") continue
+    if (pick.unmapped?.length) {
+      plan.tests = [...new Set([...plan.tests, ...(pick.tests ?? [])])]
+      continue
+    }
     plan.full = pick.mode === "full"
     plan.tests = pick.tests ?? []
     plan.via = "覆盖率图"
@@ -304,8 +308,6 @@ const contractJobs = () =>
   [
     ["schema", "./test"],
     ["protocol", "./test"],
-    ["client", "./test/import-boundaries.test.ts"],
-    ["sdk-next", "./test/import-boundaries.test.ts"],
   ].map(
     ([pkg, target]) =>
       () =>

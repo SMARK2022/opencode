@@ -108,6 +108,10 @@ test("Guard 变动只调度规则自身和固定契约，不升级全部产品�
   const repo = await fixture({
     ...modules(),
     "packages/schema/package.json": JSON.stringify({ name: "@fixture/schema" }),
+    "packages/client/package.json": pkg("client"),
+    "packages/client/test/import-boundaries.test.ts": "",
+    "packages/sdk-next/package.json": pkg("sdk-next"),
+    "packages/sdk-next/test/import-boundaries.test.ts": "",
     "packages/schema/test/schema.test.ts": "",
     "script/guard/test/rule.test.ts": "",
   })
@@ -203,7 +207,7 @@ test("旧格式覆盖图和其他包的图必须退回静态图", async () => {
   expect((await selectTests(path.join(repo, "packages/core"), map)).mode).toBe("stale")
 })
 
-test("覆盖率建图运行真实测试，失败或非法并发数均不发布地图", async () => {
+test("跳过失败覆盖记录，保留成功记录；没有成功记录时不覆盖旧图", async () => {
   const repo = await fixture({
     "packages/core/package.json": pkg("core"),
     "packages/core/src/value.ts": "export const value = 1\n",
@@ -211,16 +215,19 @@ test("覆盖率建图运行真实测试，失败或非法并发数均不发布�
       'import { test, expect } from "bun:test"\nimport { value } from "../src/value"\ntest("value", () => expect(value).toBe(2))\n',
   })
   const out = path.join(repo, ".git", "coverage.json")
-  await expect(buildCoverageMap(path.join(repo, "packages/core"), out, 1)).rejects.toThrow("覆盖率建图失败")
-  expect(await Bun.file(out).exists()).toBe(false)
+  await Bun.write(out, "previous map")
+  await buildCoverageMap(path.join(repo, "packages/core"), out, 1)
+  expect(await Bun.file(out).text()).toBe("previous map")
   await expect(buildCoverageMap(path.join(repo, "packages/core"), out, 0)).rejects.toThrow("正整数")
   await Bun.write(
-    path.join(repo, "packages/core/test/value.test.ts"),
+    path.join(repo, "packages/core/test/pass.test.ts"),
     'import { test, expect } from "bun:test"\nimport { value } from "../src/value"\ntest("value", () => expect(value).toBe(1))\n',
   )
   const map = await buildCoverageMap(path.join(repo, "packages/core"), out, 1)
   expect(map.version).toBe(2)
-  expect(map.tests["packages/core/test/value.test.ts"]["packages/core/src/value.ts"]).toContain(1)
+  expect(map.tests["packages/core/test/pass.test.ts"]?.["packages/core/src/value.ts"]).toContain(1)
+  expect(map.tests["packages/core/test/value.test.ts"]).toBeNull()
+  expect((await selectTests(path.join(repo, "packages/core"), out, [])).tests).toEqual(["packages/core/test/value.test.ts"])
 })
 
 async function fixture(files: Record<string, string>) {

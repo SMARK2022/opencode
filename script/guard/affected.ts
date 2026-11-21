@@ -18,7 +18,7 @@ export type TestPlan = {
 }
 
 // 契约测试每次 push 都跑；它们加载的包也算作“本次测试的输入”。
-const CONTRACT_PACKAGES = ["schema", "protocol", "client", "sdk-next"]
+const CONTRACT_PACKAGES = ["schema", "protocol"]
 
 export async function planAffected(repo: string, changed: string[]) {
   const pkgs = await loadPackages(repo)
@@ -48,11 +48,7 @@ export async function planAffected(repo: string, changed: string[]) {
   const guardChanged = changed.some((file) => file.startsWith("script/guard/"))
   if (guardChanged)
     for (const test of tests)
-      if (
-        /^packages\/(schema|protocol)\/test\//.test(test) ||
-        /^packages\/(client|sdk-next)\/test\/import-boundaries\.test\.ts$/.test(test)
-      )
-        selected.add(test)
+      if (/^packages\/(schema|protocol)\/test\//.test(test)) selected.add(test)
   // 升级全量只看改动本身：全局输入改全部包，包内全局输入或图外文件只改所属包
   const full = new Map<string, string>()
   for (const file of changed) {

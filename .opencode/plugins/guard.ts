@@ -99,7 +99,7 @@ export const GuardPlugin: Plugin = async ({ $, client, worktree }) => {
               type: "text",
               text:
                 `[guard] 本会话改动的文件未通过门禁。需要修复时回复“继续”。\n\n` +
-                `${r.stdout.toString()}\n${r.stderr.toString()}`.trim().slice(-12000),
+                `${r.stdout.toString()}\n${r.stderr.toString()}`.trim(),
             },
           ],
         },
