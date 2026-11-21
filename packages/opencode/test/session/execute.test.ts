@@ -29,7 +29,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { isRecord } from "@/util/record"
 import { ProviderTest } from "../fake/provider"
 import { TestConfig } from "../fixture/config"
-import { TestInstance } from "../fixture/fixture"
+import { TestInstance, disposeAllInstancesEffect } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
@@ -47,6 +47,8 @@ import { debugAgent } from "@/cli/cmd/debug/agent.handler"
 import { SessionPrompt } from "@/session/prompt"
 import { LLMRequestPrep } from "@/session/llm/request"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
+import { BackgroundJob } from "@/background/job"
+import { LSP } from "@/lsp/lsp"
 import { HttpClient, HttpClientResponse } from "effect/unstable/http"
 
 const provider = ProviderTest.fake()
@@ -211,6 +213,159 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}, http?: HttpClient.HttpCli
 const it = testEffect(layer())
 const background = testEffect(layer({ experimentalBackgroundSubagents: true }))
 
+// 各入口共享同一真实调用链，每个用例的模型同步信号独立，不同入口不复用已释放闸门。
+for (const ending of ["timeout", "session", "background", "scope"] as const) {
+  const childReady = Deferred.makeUnsafe<SessionID>()
+  const childCleanup = Deferred.makeUnsafe<void>()
+  const releaseChild = Deferred.makeUnsafe<void>()
+  const grandchildReady = Deferred.makeUnsafe<void>()
+  let grandchildID: SessionID | undefined
+  const cancellation = testEffect(LayerNode.compile(
+    LayerNode.group([SessionPrompt.node, Session.node, SessionProjector.node, BackgroundJob.node]),
+    [
+      [Provider.node, provider.layer],
+      // 空远程指令和技能目录让场景保持离线，取消预算继续由原 Execute 控制。
+      [Config.node, TestConfig.layer({ get: () => Effect.succeed({ permission: { "*": "allow" }, snapshot: false }) })],
+      [RuntimeFlags.node, RuntimeFlags.layer({ client: "cli", experimentalBackgroundSubagents: false })],
+      [Plugin.node, Layer.mock(Plugin.Service, {
+        trigger: (_name, _input, output) => Effect.succeed(output),
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      })],
+      [MCP.node, Layer.mock(MCP.Service, {
+        tools: () => Effect.succeed({}),
+        clients: () => Effect.succeed({}),
+        instructions: () => Effect.succeed([]),
+      })],
+      [LSP.node, Layer.mock(LSP.Service, {
+        init: () => Effect.void,
+        status: () => Effect.succeed([]),
+        hasClients: () => Effect.succeed(false),
+      })],
+      [LLM.node, Layer.succeed(LLM.Service, {
+        stream: (input) => Stream.unwrap<LLMEvent, unknown, never, never, never>(Effect.gen(function* () {
+          // 父消息与用量登记由真实 processor 的 prepared 回调完成。
+          yield* input.onRequestPrepared?.({ messages: input.messages }) ?? Effect.void
+          if (input.small) return Stream.make(LLMEvent.finish({ reason: "stop" }))
+          if (input.sessionID === grandchildID) {
+            yield* Deferred.succeed(grandchildReady, undefined)
+            return Stream.never
+          }
+          if (input.parentSessionID) {
+            // ready 发布时子 Runner 已执行模型流，清理闸门观察它的实际中断生命周期。
+            yield* Deferred.succeed(childReady, SessionID.make(input.sessionID))
+            return Stream.never.pipe(Stream.ensuring(
+              Deferred.succeed(childCleanup, undefined).pipe(Effect.andThen(Deferred.await(releaseChild))),
+            ))
+          }
+          // 首个Task的结果交回模型后结束本场景，不能让替身再创建一个无限等待的子任务。
+          if (input.messages.some(message => message.role === "tool")) return Stream.make(
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.textStart({ id: "done" }),
+            LLMEvent.textDelta({ id: "done", text: "Task cancellation observed" }),
+            LLMEvent.textEnd({ id: "done" }),
+            LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+            LLMEvent.finish({ reason: "stop" }),
+          )
+          const execute = input.tools.execute?.execute
+          if (!execute) return yield* Effect.die("Expected real Execute tool")
+          // 只有期限用例显式缩短预算；另外三个入口保持产品默认期限。
+          const args = {
+            code: 'return await tools.$opencode.task({description:"cancel child",prompt:"wait for cancellation",subagent_type:"general"});',
+            ...(ending === "timeout" ? { timeout: 1000 } : {}),
+          }
+          // 工具回调来自 SessionPrompt 构建的原目录，内部 promptOps 不使用 resolveTools 的默认替身。
+          return Stream.concat(Stream.make(
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.toolInputStart({ id: "cancel-task", name: "execute" }),
+            LLMEvent.toolInputEnd({ id: "cancel-task", name: "execute" }),
+            LLMEvent.toolCall({ id: "cancel-task", name: "execute", input: args }),
+          ), Stream.fromEffect(Effect.tryPromise({
+            try: (signal) => Promise.resolve(execute(args, { toolCallId: "cancel-task", abortSignal: signal, messages: input.messages })),
+            catch: (error) => error,
+          }).pipe(Effect.map((value) => LLMEvent.toolResult({ id: "cancel-task", name: "execute", result: { type: "json", value } }))))).pipe(
+            Stream.concat(Stream.make(LLMEvent.stepFinish({ index: 0, reason: "stop" }), LLMEvent.finish({ reason: "stop" }))),
+          )
+        })),
+      })],
+    ],
+  ))
+
+  cancellation.instance(`Execute ${ending} settles a real Task cancellation after child cleanup`, () => Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const jobs = yield* BackgroundJob.Service
+    const chat = yield* sessions.create({ permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+    const running = yield* prompt.prompt({
+      sessionID: chat.id,
+      model: { providerID: provider.model.providerID, modelID: provider.model.id },
+      parts: [{ type: "text", text: "run the child" }],
+    }).pipe(Effect.forkChild)
+    // 在工作fiber之后注册闸门释放，scope逆序退出时先放行清理，再等待工作退出。
+    yield* Effect.addFinalizer(() => Deferred.succeed(releaseChild, undefined))
+    const child = yield* awaitWithTimeout(Deferred.await(childReady), "child model never started", "5 seconds")
+    if (ending === "session") {
+      // 孙会话独立运行，不挂在子任务的 Job 里；只有共享取消真正递归，挂起的记录才会终结。
+      const grandchild = yield* sessions.create({ parentID: child, title: "independent descendant" })
+      grandchildID = grandchild.id
+      yield* prompt.prompt({
+        sessionID: grandchild.id,
+        model: { providerID: provider.model.providerID, modelID: provider.model.id },
+        parts: [{ type: "text", text: "wait for cancellation" }],
+      }).pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Deferred.await(grandchildReady), "descendant model never started", "5 seconds")
+    }
+    // 直接后台取消覆盖内部首发；外部会话取消覆盖flight已存在时的作业finalizer重入。
+    const trigger = yield* (ending === "background" ? jobs.cancel(child)
+      : ending === "session" ? prompt.cancel(child).pipe(Effect.interruptible)
+      : ending === "scope" ? Effect.all([disposeAllInstancesEffect, Fiber.interrupt(running)], { concurrency: "unbounded" }) : Effect.void).pipe(Effect.forkChild)
+    yield* awaitWithTimeout(Deferred.await(childCleanup), "cancellation did not interrupt child", "5 seconds")
+    // 后台内部首发期间加入外部caller，必须消费完整flight而非直接提前返回。
+    const joined = ending === "session" || ending === "background"
+      ? yield* prompt.cancel(child).pipe(Effect.forkChild)
+      : undefined
+    const completedEarly = joined ? yield* Effect.timeoutOption(Fiber.await(joined), "150 millis") : Option.none()
+    // 到期只能发起清理；叶原生 Promise 尚未完成时外层仍须保持等待。
+    if (ending === "timeout") expect(running.pollUnsafe()).toBeUndefined()
+    // BackgroundJob先发布done可让Task先返回，但取消调用本身仍要等待其scope收尾。
+    if (ending !== "timeout") expect(trigger.pollUnsafe()).toBeUndefined()
+    if (ending === "session") trigger.interruptUnsafe()
+    yield* Deferred.succeed(releaseChild, undefined)
+    if (ending === "session") {
+      // 首发请求仍收到中断，其他等待者和持久状态则必须看到完整清理。
+      expect(Exit.hasInterrupts(yield* awaitWithTimeout(Fiber.await(trigger), "request interruption did not settle"))).toBe(true)
+    } else yield* awaitWithTimeout(Fiber.join(trigger), "cancellation owner did not finish cleanup", "5 seconds")
+    const joinedExit = joined
+      ? yield* awaitWithTimeout(Fiber.await(joined), "external join did not receive completed flight", "5 seconds")
+      : undefined
+    if (grandchildID) {
+      // Runner 是否空闲只说明执行状态；回读次级会话确认助手记录也已写回终态。
+      const messages = yield* sessions.messages({ sessionID: grandchildID })
+      expect(messages.some((message) => message.info.role === "assistant" && !message.info.time.completed)).toBe(false)
+    }
+    // 先放行真实清理再报断言，红测也不能让测试自身留下被闸门挡住的 fiber。
+    expect(Option.isNone(completedEarly)).toBe(true)
+    if (joinedExit) expect(Exit.isSuccess(joinedExit)).toBe(true)
+    // scope用例的外层按合同中断；成功和中断都必须在真实清理结束后形成终态。
+    yield* awaitWithTimeout(Fiber.await(running), "Execute stayed running after real Task cleanup", "5 seconds")
+    // 实例退出同时回收作业登记；普通取消则保留cancelled终态供调用者查询。
+    expect((yield* jobs.get(child))?.status).toBe(ending === "scope" ? undefined : "cancelled")
+    // 公开消息回读同时核验持久终态，不能只凭 Runner idle 宣告外层结束。
+    // 公开子会话集合应只有本场景发起的任务，排除模型替身重复发起工作造成的假挂起。
+    expect((yield* sessions.children(chat.id)).map(session => session.id)).toEqual([child])
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+    const tools = messages.flatMap((message) => message.parts.filter((part) => part.type === "tool"))
+    expect(tools.some((part) => part.tool === "execute")).toBe(true)
+    expect(tools.every((part) => part.state.status !== "running" && part.state.status !== "pending")).toBe(true)
+    if (ending === "timeout") {
+      const parent = tools.find((part) => part.tool === "execute")
+      // 验证期限错误原文，防止权限拒绝或fixture失败产生同样终态而误报通过。
+      if (parent?.state.status !== "error") throw new Error("Expected Execute timeout receipt")
+      expect(parent.state.error).toContain("timed out")
+    }
+  }), { git: false }, 15_000)
+}
+
 // 模型文本的 ID 与 metadata 必须一致；去掉已验证的包裹后继续保持既有业务值精确断言。
 function scriptResult(result: unknown) {
   if (
@@ -242,7 +397,13 @@ it.instance("debug execute uses the same native tool host", () =>
       params: JSON.stringify({
         code: 'return (await tools.$opencode.read({filePath:"debug.txt"})).content;',
       }),
-    }).pipe(Effect.provide(Layer.merge(provider.layer, Layer.mock(SessionPrompt.Service, {}))))
+    }).pipe(Effect.provide(Layer.merge(provider.layer, Layer.mock(SessionPrompt.Service, {
+      taskOps: () => Effect.succeed({
+        cancel: () => Effect.die("Unexpected debug cancellation"),
+        resolvePromptParts: () => Effect.die("Unexpected debug prompt resolution"),
+        prompt: () => Effect.die("Unexpected debug child prompt"),
+      }),
+    }))))
     // CLI 输出也携带同一环境句柄，业务正文仍须保持原读取结果。
     expect(output).toHaveBeenCalledWith(expect.stringContaining('"output": "Environment: env_'))
     expect(output).toHaveBeenCalledWith(expect.stringContaining('\\n\\ndebug host"'))
