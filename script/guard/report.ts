@@ -4,7 +4,7 @@
 //   bun script/guard/report.ts comment --guard guard.json [--bench bench.json] --out comment.md
 //   bun script/guard/report.ts publish --site <bench-data 检出目录> [--bench a.json b.json …] [--guard guard.json --sha <sha>]
 import path from "node:path"
-import type { Verdict } from "./bench/harness"
+import { METRICS, type Verdict } from "./bench/harness"
 import { SCENARIO_BUDGETS } from "./bench/budgets"
 import type { CheckResult } from "./check"
 import { BOUNDARY_RULES, SHAPE_RULES, OTHER_RULES, RATCHETS } from "./rules"
@@ -68,9 +68,10 @@ export type BenchResult = {
   createdAt: string
   runner: { os: string; cpus: number; ci: boolean }
   runUrl?: string
+  unavailable?: Record<string, string>
   scenarios: Record<
     string,
-    { verdict: Verdict[]; headMedians: Record<string, number>; baseMedians: Record<string, number>; errors: string[] }
+    { pairs?: number; verdict: Verdict[]; headMedians: Record<string, number>; baseMedians: Record<string, number>; errors: string[] }
   >
   regressed: boolean
   error?: string
@@ -90,6 +91,19 @@ export const METRIC_LABEL: Record<string, [string, string]> = {
   peakRssMb: ["峰值内存", "MB"],
   rssGrowthMb: ["内存增量", "MB"],
   crashed: ["崩溃次数", ""],
+  prepMs: ["发送准备", "ms"],
+  finishMs: ["回复收尾", "ms"],
+  editTurnMs: ["编辑回合", "ms"],
+  compactMs: ["压缩", "ms"],
+  revertMs: ["撤回", "ms"],
+  unrevertMs: ["恢复撤回", "ms"],
+  tuiFirstPaintMs: ["TUI 首屏", "ms"],
+  tuiFullMs: ["长会话就绪", "ms"],
+  tuiInputMs: ["流中输入延迟", "ms"],
+  scrollFrameP95Ms: ["翻页帧 p95", "ms"],
+  scrollFrameMaxMs: ["翻页最长帧", "ms"],
+  streamFrameP95Ms: ["流式帧 p95", "ms"],
+  streamFrameMaxMs: ["流式最长帧", "ms"],
 }
 const fmt = (metric: string, v: number) =>
   metric === "probeErrorRate" ? `${(v * 100).toFixed(1)}%` : Number.isInteger(v) ? String(v) : v.toFixed(1)
@@ -120,6 +134,8 @@ export function renderBenchMarkdown(r: BenchResult, status?: string) {
   )
   if (error) out.push(`\n> 基准未完成：${error}`)
   if (r.note) out.push(`\n> ${r.note}`)
+  for (const [name, reason] of Object.entries(r.unavailable ?? {})) out.push(`
+> ${name}：无基准（${reason}）`)
   const names = Object.keys(r.scenarios)
   if (names.length) {
     const key = ["wallMs", "cpuMs", "maxBlockMs", "probeErrorRate", "peakRssMb"]
@@ -139,14 +155,18 @@ export function renderBenchMarkdown(r: BenchResult, status?: string) {
         `| \`${n}\` | ${key.map(cell).join(" | ")} | ${bad.length ? `🔴 ${bad.join("、")}` : s.errors.length ? "⚪ 未完成" : "🟢"} |`,
       )
     }
-    out.push(`\n<details><summary>全部指标（中位数，base → head，单侧 Mann-Whitney p 值）</summary>\n`)
+    out.push(`\n<details><summary>全部指标（中位数，base → head，单侧检验 p 值）</summary>\n`)
     for (const n of names) {
-      out.push(`\n**${n}**\n\n| 指标 | base | head | 比例 | p | |\n|---|--:|--:|--:|--:|---|`)
+      out.push(`\n**${n}**（${r.scenarios[n].pairs ?? r.rounds} 对样本）\n\n| 指标 | base | head | 比例 | p | |\n|---|--:|--:|--:|--:|---|`)
       for (const v of r.scenarios[n].verdict) {
         const [label, unit] = METRIC_LABEL[v.metric] ?? [v.metric, ""]
         out.push(
           `| ${label}${unit && unit !== "%" ? ` (${unit})` : ""} | ${fmt(v.metric, v.base)} | ${fmt(v.metric, v.head)} | ${v.ratio ?? "—"} | ${v.p} | ${v.regressed ? "🔴" : ""} |`,
         )
+      }
+      for (const [key, value] of Object.entries(r.scenarios[n].headMedians)) {
+        if (r.scenarios[n].verdict.some((v) => v.metric === key)) continue
+        out.push(`| ${METRIC_LABEL[key]?.[0] ?? key} | ${fmt(key, r.scenarios[n].baseMedians[key])} | ${fmt(key, value)} | — | — | 仅展示 |`)
       }
       if (r.scenarios[n].errors.length) out.push(`\n错误：${r.scenarios[n].errors.map((e) => `\`${e}\``).join("；")}`)
     }
@@ -186,6 +206,7 @@ type SiteBench = {
   runner: BenchResult["runner"]
   regressed: boolean
   error?: string
+  unavailable?: Record<string, string>
   scenarios: Record<string, { head: Record<string, number>; base: Record<string, number>; regressed: string[] }>
 }
 type SiteCommit = Commit & {
@@ -200,13 +221,13 @@ export function isCompleteBench(value: unknown) {
   if (!value || typeof value !== "object" || ("error" in value && value.error !== undefined)) return false
   if (!("scenarios" in value) || !value.scenarios || typeof value.scenarios !== "object") return false
   const entries = value.scenarios
-  const required = Object.keys(SCENARIO_BUDGETS).filter((name) => name !== "default")
-  if (!required.every((name) => Object.hasOwn(entries, name))) return false
-  const scenarios = Object.values(entries)
-  const metrics = (entry: unknown) =>
+  const required = Object.keys(SCENARIO_BUDGETS)
+  if (!required.some((name) => Object.hasOwn(entries, name))) return false
+  const missing = "unavailable" in value ? value.unavailable : undefined
+  const metrics = (entry: unknown, name: string) =>
     entry &&
     typeof entry === "object" &&
-    Object.keys(METRIC_LABEL).every((key) => {
+    [...METRICS, ...SCENARIO_BUDGETS[name].map((b) => b.metric)].every((key) => {
       const metric: unknown = Reflect.get(entry, key)
       return (
         typeof metric === "number" &&
@@ -217,8 +238,12 @@ export function isCompleteBench(value: unknown) {
       )
     })
   return (
-    scenarios.length > 0 &&
-    scenarios.every((scenario: unknown) => {
+    required.every((name) => {
+      const reason: unknown = missing && typeof missing === "object" && Object.hasOwn(missing, name)
+        ? Reflect.get(missing, name) : undefined
+      if (!Object.hasOwn(entries, name)) return typeof reason === "string" && reason.trim().length > 0
+      if (reason !== undefined) return false
+      const scenario: unknown = Reflect.get(entries, name)
       if (
         !scenario ||
         typeof scenario !== "object" ||
@@ -228,8 +253,8 @@ export function isCompleteBench(value: unknown) {
       )
         return false
       return (
-        metrics(scenario.head) &&
-        metrics(scenario.base) &&
+        metrics(scenario.head, name) &&
+        metrics(scenario.base, name) &&
         Array.isArray(scenario.regressed) &&
         !scenario.regressed.includes("crashed")
       )
@@ -260,6 +285,7 @@ async function publish() {
       runner: r.runner,
       regressed: r.regressed || Object.values(r.scenarios).some((s) => s.verdict.some((v) => v.regressed)),
       error: benchError(r),
+      unavailable: r.unavailable,
       scenarios: Object.fromEntries(
         Object.entries(r.scenarios).map(([n, s]) => [
           n,
@@ -299,12 +325,43 @@ async function publish() {
   console.log(`看板数据：${Object.keys(data.commits).length} 个提交`)
 }
 
+export async function merge(files: string[], head: string, base: string) {
+  const parts = await Promise.all(files.map(async (file) => await Bun.file(file).json() as BenchResult))
+  const first = parts[0]
+  const merged: BenchResult = { ...first, scenarios: {}, unavailable: {}, regressed: false }
+  const names = new Set<string>()
+  for (const part of parts) {
+    if (part.kind !== "bench" || part.head.sha !== head || part.base.sha !== base || part.rounds !== first.rounds || part.runner.os !== first.runner.os)
+      throw new Error("分组结果不属于同一次比较")
+    if (part.error) throw new Error(part.error)
+    for (const name of [...Object.keys(part.scenarios), ...Object.keys(part.unavailable ?? {})]) {
+      if (names.has(name)) throw new Error(`重复场景：${name}`)
+      names.add(name)
+    }
+    if (Object.keys(part.scenarios).length && benchError(part)) throw new Error(benchError(part))
+    Object.assign(merged.scenarios, part.scenarios)
+    Object.assign(merged.unavailable!, part.unavailable)
+    merged.regressed ||= part.regressed || Object.values(part.scenarios).some((s) => s.verdict.some((v) => v.regressed))
+  }
+  for (const name of Object.keys(SCENARIO_BUDGETS))
+    if (!names.has(name)) throw new Error(`缺少分组结果：${name}`)
+  if (!Object.keys(merged.scenarios).length) throw new Error("没有可比较的场景")
+  return merged
+}
+
 if (import.meta.main) {
   const cmd = process.argv[2]
   if (cmd === "comment") await comment()
   else if (cmd === "publish") await publish()
+  else if (cmd === "merge") {
+    const [head, base, ...files] = process.argv.slice(3)
+    const merged = await merge(files, head, base)
+    await Bun.write("bench.json", JSON.stringify(merged))
+    console.log(renderBenchMarkdown(merged))
+    process.exitCode = merged.regressed ? 1 : 0
+  }
   else {
-    console.error("用法：report.ts comment|publish …")
+    console.error("用法：report.ts comment|publish|merge …")
     process.exit(2)
   }
 }

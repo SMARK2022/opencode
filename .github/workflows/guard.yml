@@ -186,12 +186,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  bench:
-    name: 性能基准
+  bench-parts:
+    name: 性能采样 / ${{ matrix.part }}
     needs: plan
     if: needs.plan.outputs.bench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [basic, extended]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -215,14 +219,48 @@ jobs:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: |
           bun "${{ steps.src.outputs.dir || 'script/guard' }}/bench/opencode.ts" --head HEAD --base "${{ needs.plan.outputs.base }}" \
-            --json bench.json --markdown "$GITHUB_STEP_SUMMARY"
+            --group "${{ matrix.part }}" --json bench.json --markdown "$GITHUB_STEP_SUMMARY" || [ $? -eq 1 ]
       - name: 上传基准结果
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-part-${{ matrix.part }}
+          path: bench.json
+          if-no-files-found: error
+          retention-days: 30
+
+  bench:
+    name: 性能基准
+    needs: [plan, bench-parts]
+    if: always() && needs.plan.outputs.bench == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && needs.plan.outputs.policy || github.sha }}
+      - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
+      - name: 汇总分组
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PARTS: ${{ needs.bench-parts.result }}
+          BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          set -euo pipefail
+          for part in basic extended; do
+            gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n "bench-part-$part" -D "$part"
+          done
+          bun script/guard/report.ts merge "$GITHUB_SHA" "$BASE" basic/bench.json extended/bench.json >> "$GITHUB_STEP_SUMMARY"
+          test "$PARTS" = success
+      - name: 上传合并结果
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bench-result
           path: bench.json
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
   comment:

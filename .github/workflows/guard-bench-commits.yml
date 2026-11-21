@@ -15,11 +15,10 @@ on:
         description: "统一对比基准（留空 = 各自的父提交）"
         default: ""
       scenarios:
-        description: "只跑这些场景，逗号分隔：list,open,stream,abort（留空 = 全部）"
+        description: "只跑指定场景，逗号分隔（留空 = 全部）"
         default: ""
       rounds:
-        description: "每个场景的 A/B 轮数（越多越稳，越慢）"
-        default: "5"
+        description: "每个场景的 A/B 轮数（留空使用脚本默认值；轮数越多，耗时越长）"
 
 permissions:
   contents: read
@@ -72,7 +71,8 @@ jobs:
           ROUNDS: ${{ inputs.rounds }}
         run: |
           base=$(git rev-parse "${BASE:-$SHA^}")
-          args=(--head "$SHA" --base "$base" --rounds "${ROUNDS:-5}" --json "bench-$SHA.json" --markdown "$GITHUB_STEP_SUMMARY")
+          args=(--head "$SHA" --base "$base" --json "bench-$SHA.json" --markdown "$GITHUB_STEP_SUMMARY")
+          [ -n "$ROUNDS" ] && args+=(--rounds "$ROUNDS")
           [ -n "$ONLY" ] && args+=(--only "$ONLY")
           # 1 = 有退化（照样记录）；2 = 无法完成（结果里带 error，看板显示“未完成”）
           bun script/guard/bench/opencode.ts "${args[@]}" || [ $? -le 2 ]

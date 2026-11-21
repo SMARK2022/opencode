@@ -3,7 +3,7 @@
 //
 //   bun script/guard/bench/opencode.ts                         head=工作区，base=与 origin/dev1-smark 的 merge-base
 //   bun script/guard/bench/opencode.ts --head <sha> --base <sha>   任意两个提交（历史回测）
-//   选项：--rounds 7  --only list,stream  --sessions 2000  --turns 40  --tokens 20000
+//   选项：--rounds 15  --only list,stream 或 --group basic  --sessions 2000  --turns 40  --tokens 20000
 //         --json out.json  --markdown out.md（可指向 $GITHUB_STEP_SUMMARY）
 // 退出码：0 无退化；1 有退化；2 执行异常（例如旧提交缺少场景所需接口）。
 import path from "node:path"
@@ -20,14 +20,19 @@ import {
   validateRounds,
   METRICS,
   type Target,
-  type Sample,
-  type Verdict,
 } from "./harness"
-import { SCENARIO_BUDGETS } from "./budgets"
+import { GROUPS, SCENARIO_BUDGETS } from "./budgets"
 import { guardPlan } from "../affected-rules"
 import { assertReply } from "./protocol"
 import { renderBenchMarkdown, type BenchResult } from "../report"
+import { editFiles, lastUser, original, populate, relative, scripted } from "./workload"
+import { runTui } from "./tui"
+import { listening, valueOf, type Measurement, type Scenario } from "./harness"
 
+type ToolMessage = {
+  info: { id: string; role: string; summary?: boolean; error?: unknown }
+  parts: { type: string; text?: string; tool?: string; state?: { status: string } }[]
+}
 async function main() {
   const args = process.argv.slice(2)
   const opt = (n: string, d?: string) => {
@@ -40,7 +45,7 @@ async function main() {
     return result.stdout.toString().trim()
   }
   const repo = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"]).stdout.toString().trim()
-  const rounds = Number(opt("--rounds", "7"))
+  const rounds = Number(opt("--rounds", "15"))
   const only = (opt("--only", "") ?? "").split(",").filter(Boolean)
   const sessions = Number(opt("--sessions", "2000"))
   const turns = Number(opt("--turns", "40"))
@@ -54,11 +59,14 @@ async function main() {
       ["tokens", TOKENS],
     ] as const)
       if (!Number.isSafeInteger(value) || value < 1) throw new Error(`--${name} 必须为正整数`)
-    if (
-      args.includes("--only") &&
-      (!only.length || only.some((name) => name === "default" || !Object.hasOwn(SCENARIO_BUDGETS, name)))
-    )
-      throw new Error("--only 只能选择 list,open,stream,abort，且至少选择一个场景")
+    if (args.includes("--group")) {
+      const group = opt("--group")
+      if (!group || !Object.hasOwn(GROUPS, group)) throw new Error("未知基准分组：" + group)
+      if (args.includes("--only")) throw new Error("--group 和 --only 不能同时指定")
+      only.push(...Object.keys(GROUPS[group]))
+    }
+    if (args.includes("--only") && (!only.length || only.some((name) => !Object.hasOwn(SCENARIO_BUDGETS, name))))
+      throw new Error("--only 包含未知场景或为空")
   } catch (e) {
     console.error(`[bench] ${e instanceof Error ? e.message : String(e)}`)
     process.exit(2)
@@ -102,16 +110,37 @@ async function main() {
   const headDir = headRef ? await worktreeFor(head.sha, "head") : repo
   const baseDir = await worktreeFor(base.sha, "base")
 
-  // ── 模拟 LLM：OpenAI 兼容 SSE，固定速率，两边输入完全一致；每 token 1 字节，正文须低于 processor 的 64 KiB 上限 ──
+  // ── 模拟 LLM：OpenAI 兼容 SSE，预热和正式轮固定速率，两边输入完全一致；每 token 1 字节，正文须低于 processor 的 64 KiB 上限 ──
+  let paced = false
   let streamStarts = 0
   let activeStreams = 0
+  let compacting = false
+  let received = 0
+  let sent = 0
+  const phasePrompt = "bench:timed"
+  let timedRequests = 0
+  let tuiProgress = -1
   const llm = Bun.serve({
+    hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
-      await req.json().catch(() => ({}))
+      if (req.method === "GET" && new URL(req.url).pathname === "/bench/progress") return Response.json(tuiProgress)
+      const body = await req.json() as { messages: Parameters<typeof lastUser>[0]; tools?: unknown[] }
+      const user = lastUser(body.messages)
+      const timed = user.includes(phasePrompt) && !!body.tools?.length
+      if (timed) {
+        received = performance.now()
+        timedRequests++
+      }
+      const reply = scripted(body.messages, workspace, compacting)
+      if (reply) return reply
       const chunks = Array.from({ length: Math.ceil(TOKENS / 20) }, (_, i) =>
         "x".repeat(Math.min(20, TOKENS - i * 20)),
       )
+      // 在长回复的尾部留下可见标记，不靠在视口外搜索最后一条用户消息。
+      const turn = user.match(/turn (\d+)$/)?.[1]
+      const marker = turn === undefined ? "" : `tail-${turn}`
+      if (marker && chunks.at(-1)!.length >= marker.length) chunks[chunks.length - 1] = chunks.at(-1)!.slice(marker.length) + marker
       streamStarts++
       activeStreams++
       let index = 0
@@ -121,7 +150,8 @@ async function main() {
             c.enqueue(
               `data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: chunks[index++] } }] })}\n\n`,
             )
-            await Bun.sleep(1)
+            if (paced) await Bun.sleep(1)
+            if (user.includes("bench:tui-live")) tuiProgress = index / chunks.length
             return
           }
           c.enqueue(
@@ -129,6 +159,8 @@ async function main() {
           )
           c.enqueue("data: [DONE]\n\n")
           c.close()
+          if (timed) sent = performance.now()
+          if (user.includes("bench:tui-live")) tuiProgress = -1
           activeStreams--
         },
         cancel() {
@@ -147,11 +179,12 @@ async function main() {
     config,
     JSON.stringify({
       model: "bench/mock",
+      permission: { edit: "allow", read: "allow", grep: "allow", bash: "deny" },
       provider: {
         bench: {
           npm: "@ai-sdk/openai-compatible",
           options: { baseURL: `http://127.0.0.1:${llm.port}/v1`, apiKey: "x" },
-          models: { mock: {} },
+          models: { mock: { limit: { context: 2_000_000, output: 32_000 } } },
         },
       },
       autoupdate: false,
@@ -159,12 +192,13 @@ async function main() {
     }),
   )
 
-  const dirs = new Map<number, string>()
-  const target = (label: string, root: string): Target => ({
+  type Side = Target & { root: string; workspace: string; home: string }
+  const target = (label: string, root: string): Side => ({
+    root, workspace, home: "",
     label,
     healthPath: "/global/health",
-    start: (port) => {
-      const home = dirs.get(port)!
+    start() {
+      const home = this.home
       return Bun.spawn(
         [
           "bun",
@@ -174,7 +208,7 @@ async function main() {
           "src/index.ts",
           "serve",
           "--port",
-          String(port),
+          "0",
           "--hostname",
           "127.0.0.1",
         ],
@@ -189,8 +223,8 @@ async function main() {
             XDG_CONFIG_HOME: home,
             OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
           },
-          stdout: "ignore",
-          stderr: "ignore",
+          stdout: "pipe",
+          stderr: "inherit",
         },
       )
     },
@@ -209,7 +243,20 @@ async function main() {
   }
 
   // ── 场景：每个都是用户每天会做的事 ──
-  const SCENARIOS: Record<string, (base: string) => Promise<void>> = {
+  const prompt = (base: string, id: string, text: string) =>
+    call("POST", base, `/session/${id}/message`, { parts: [{ type: "text", text }] })
+  let long: { id: string; title: string }
+  const timedTurn = async (base: string, id: string) => {
+    timedRequests = 0
+    sent = 0
+    const start = performance.now()
+    const reply = await prompt(base, id, phasePrompt)
+    const end = performance.now()
+    assertReply(reply)
+    if (timedRequests !== 1 || sent < received) throw new Error("无法定位本轮模型请求的起止点")
+    return { prepMs: received - start, finishMs: end - sent }
+  }
+  const SCENARIOS: Record<string, Scenario<Side>> = {
     // 打开会话选择框
     list: async (base) => {
       for (let i = 0; i < 20; i++) await call("GET", base, "/session")
@@ -226,7 +273,7 @@ async function main() {
     // 等待一次长回复流式完成：墙钟扣除模拟 LLM 自身耗时后即为 opencode 的开销
     stream: async (base) => {
       const s = (await call("POST", base, "/session", { title: "bench stream" })) as { id: string }
-      assertReply(await call("POST", base, `/session/${s.id}/message`, { parts: [{ type: "text", text: "go" }] }))
+      return timedTurn(base, s.id)
     },
     // 流式输出中途按 Esc
     abort: async (base) => {
@@ -251,28 +298,87 @@ async function main() {
       if ("error" in outcome) throw outcome.error
       assertReply(outcome.value, true)
     },
+    continue: (base) => timedTurn(base, long.id),
+    tools: async (base) => {
+      const s = await call("POST", base, "/session", { title: "bench tools" }) as { id: string }
+      assertReply(await prompt(base, s.id, "bench:tools"))
+      const messages = await call("GET", base, `/session/${s.id}/message`) as ToolMessage[]
+      const parts = messages.flatMap((m) => m.parts).filter((p) => p.type === "tool")
+      if (parts.map((p) => p.tool).join() !== "grep,read" || parts.some((p) => p.state?.status !== "completed"))
+        throw new Error("grep/read 工具链未完成")
+    },
+    compact: async (base) => {
+      compacting = true
+      const start = performance.now()
+      try {
+        await call("POST", base, `/session/${long.id}/summarize`, { providerID: "bench", modelID: "mock", auto: false })
+      } finally {
+        compacting = false
+      }
+      const compactMs = performance.now() - start
+      const messages = await call("GET", base, `/session/${long.id}/message`) as ToolMessage[]
+      if (!messages.some((m) => m.info.summary && !m.info.error && m.parts.some((p) => p.text?.includes("Bench summary."))))
+        throw new Error("未找到本次压缩摘要")
+      return { compactMs }
+    },
+    revert: async (base, side) => {
+      const s = await call("POST", base, "/session", { title: "bench revert" }) as { id: string }
+      const url = `/session/${s.id}`
+      const files = [0, 10, 19]
+      const check = async (edited: boolean) => {
+        for (const i of files) {
+          const text = await Bun.file(path.join(side.workspace, relative(i))).text()
+          if (text !== (edited ? "edited" : original(i))) throw new Error(`revert 文件不匹配：${relative(i)}`)
+        }
+      }
+      const start = performance.now()
+      assertReply(await prompt(base, s.id, "bench:edit"))
+      const editTurnMs = performance.now() - start
+      const messages = await call("GET", base, url + "/message") as ToolMessage[]
+      const tools = messages.flatMap((m) => m.parts).filter((p) => p.type === "tool")
+      if (tools.length !== editFiles.length || tools.some((p) => p.tool !== "write" || p.state?.status !== "completed"))
+        throw new Error("20 次文件写入没有全部完成")
+      await check(true)
+      const messageID = messages.find((m) => m.info.role === "user")!.info.id
+      const undo = performance.now()
+      await call("POST", base, url + "/revert", { messageID })
+      const revertMs = performance.now() - undo
+      await check(false)
+      const redo = performance.now()
+      await call("POST", base, url + "/unrevert")
+      const unrevertMs = performance.now() - redo
+      await check(true)
+      return { editTurnMs, revertMs, unrevertMs }
+    },
+    tui: (base, side) => runTui(base, side.root, side.workspace, long, turns, `http://127.0.0.1:${llm.port}/bench/progress`),
   }
 
   // 种子会话由 base 创建一次。base、head 再分别打开副本，确保两边都已完成数据库迁移。
   // 正式轮从各自的模板启动，startupMs 衡量日常启动耗时，不重复计算一次性迁移。
-  async function seed(t: Target, source?: string) {
+  const missing: Record<string, Set<string>> = {}
+  async function seed(t: Side, source?: string) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bench-seed-"))
     temporary.add(dir)
     if (source) cpSync(source, dir, { recursive: true })
 
-    const port = 40000 + Math.floor(Math.random() * 10000)
-    dirs.set(port, dir)
-    const proc = t.start(port)
-    const url = `http://127.0.0.1:${port}`
+    t.home = dir
+    const proc = t.start()
     try {
+      const url = await listening(proc, 120_000)
       await waitHealthy(url + t.healthPath, 120_000, proc)
       if (source) {
         await call("GET", url, "/session")
+        const doc = await call("GET", url, "/doc") as { paths: Record<string, { post?: unknown }> }
+        const absent = missing[t.label] = new Set<string>()
+        for (const [name, operations] of Object.entries({ compact: ["summarize"], revert: ["revert", "unrevert"] }))
+          if (operations.some((op) => !Object.entries(doc.paths).some(([p, methods]) => p.endsWith(`/{sessionID}/${op}`) && methods.post))) absent.add(name)
+        if (!(await Bun.file(path.join(t.root, "packages/tui/test/fixture/tui-runtime.ts")).exists())) absent.add("tui")
         return dir
       }
 
       for (let i = 0; i < sessions; i++) {
         const s = (await call("POST", url, "/session", { title: `bench ${i}` })) as { id: string }
+        if (i === sessions - 1) long = { id: s.id, title: `bench ${i}` }
         if (i >= Math.max(0, sessions - 10))
           for (let k = 0; k < turns; k++)
             assertReply(
@@ -301,31 +407,67 @@ async function main() {
 
   let exit = 0
   try {
+    populate(workspace)
     const seedDir = await seed(target("seed", baseDir))
     const templates: Record<string, string> = {
       base: await seed(target("base", baseDir), seedDir),
       head: await seed(target("head", headDir), seedDir),
     }
+    paced = true
+
     for (const [name, scenario] of Object.entries(SCENARIOS)) {
       if (only.length && !only.includes(name)) continue
-      const fresh = (t: Target): Target => ({
+      const fresh = (t: Side): Side => ({
         ...t,
-        start: (port) => {
+        prepare() {
           const dir = mkdtempSync(path.join(os.tmpdir(), "opencode-bench-run-"))
           temporary.add(dir)
           cpSync(templates[t.label], dir, { recursive: true })
-          dirs.set(port, dir)
-          return t.start(port)
+          this.home = dir
+        },
+        async release() {
+          if (name === "revert") {
+            const git = Bun.spawnSync(["git", "-C", workspace, "restore", "--source=HEAD", "--worktree", "--", ...editFiles])
+            if (!git.success) throw new Error(`恢复基准工作区失败：${git.stderr.toString().trim()}`)
+          }
+          const dir = this.home
+          await rm(dir, { recursive: true, force: true })
+          temporary.delete(dir)
         },
       })
       console.log(`[bench] ${name}：预热 1 轮，正式 ${rounds} 轮 × 2`)
       // 首次运行承担磁盘缓存、转译缓存等冷启动开销，两边各空跑一轮再计数
-      for (const t of [target("base", baseDir), target("head", headDir)]) await runOnce(fresh(t), scenario)
-      const res = await abRun(fresh(target("base", baseDir)), fresh(target("head", headDir)), scenario, rounds)
-      const verdict: Verdict[] = judge(res.head, res.base, SCENARIO_BUDGETS[name] ?? SCENARIO_BUDGETS.default)
-      const med = (xs: Sample[]) => Object.fromEntries(METRICS.map((m) => [m, median(xs.map((s) => s[m]))]))
+      if (missing.head.has(name)) throw new Error(`head 缺少 ${name} 接口`)
+      const a = fresh(target("base", baseDir))
+      const b = fresh(target("head", headDir))
+      for (const t of missing.base.has(name) ? [b] : [a, b]) {
+        const sample = await runOnce(t, scenario)
+        if (sample.error !== undefined) throw new Error(`${name} ${t.label} 预热失败：${sample.error}`)
+      }
+      if (missing.base.has(name)) {
+        (result.unavailable ??= {})[name] = "base 缺少所需接口；head 已完成预热"
+        continue
+      }
+      const budgets = SCENARIO_BUDGETS[name]
+      const res = await abRun(a, b, scenario, rounds)
+      let verdict = judge(res.head, res.base, budgets)
+      if (verdict.some((v) => v.regressed) && !verdict.some((v) => v.metric === "crashed" && v.regressed)) {
+        const again = await abRun(a, b, scenario, rounds, rounds)
+        res.base.push(...again.base)
+        res.head.push(...again.head)
+        verdict = judge(res.head, res.base, budgets)
+      }
+      for (const [label, samples] of Object.entries(res)) {
+        for (const metric of ["startupMs", "wallMs"] as const)
+          console.log(`[bench] ${name} ${label} ${metric}: ${samples.map((s) => Math.round(s[metric])).join(", ")}`)
+      }
+      const med = (xs: Measurement[]) => {
+        const keys = [...METRICS, ...Object.keys(xs.find((s) => s.extra)?.extra ?? {})]
+        return Object.fromEntries(keys.map((key) => [key, median(xs.filter((s) => !s.crashed).map((s) => valueOf(s, key)))]))
+      }
       result.scenarios[name] = {
         verdict,
+        pairs: res.head.length,
         headMedians: med(res.head),
         baseMedians: med(res.base),
         errors: [...res.head, ...res.base]
@@ -336,6 +478,7 @@ async function main() {
       if (verdict.some((v) => v.regressed)) result.regressed = true
       console.table(verdict)
     }
+    if (!Object.keys(result.scenarios).length && !Object.keys(result.unavailable ?? {}).length) throw new Error("没有执行基准")
     // 两个提交之间没有运行时代码改动时，差异只能来自环境：只记录，不判定退化
     const changed = git("diff", "--name-only", base.sha, ...(headRef ? [head.sha] : [])).split("\n")
     if (
