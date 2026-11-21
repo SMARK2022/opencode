@@ -60,15 +60,15 @@ const run = Effect.fn("Cli.debug.agent.body")(function* (
       const { SessionPrompt } = yield* Effect.promise(() => import("@/session/prompt"))
       const processors = yield* SessionProcessor.Service
       const goalSvc = yield* SessionGoal.Service
-      const promptOps = yield* SessionPrompt.Service
+      // debug 真正运行 Task；必须沿普通会话的内部适配器保留正在结束的作业身份。
+      const promptOps = yield* SessionPrompt.Service.use((svc) => svc.taskOps())
       const provider = yield* Provider.Service
       const model = yield* provider.getModel(toolCtx.model.providerID, toolCtx.model.modelID).pipe(
         Effect.catch((error) => fail(`Model not found: ${error.providerID}/${error.modelID}`)),
       )
       const processor = yield* processors.create({ assistantMessage: toolCtx.message, sessionID: toolCtx.session.id, model })
       const tools = yield* SessionTools.resolve({ agent, model, session: toolCtx.session, processor,
-        goalSvc, promptOps: { cancel: promptOps.cancel, resolvePromptParts: promptOps.resolvePromptParts,
-          prompt: (input) => promptOps.prompt(input).pipe(Effect.orDie) }, bypassAgentCheck: false, messages: [] })
+        goalSvc, promptOps, bypassAgentCheck: false, messages: [] })
       const execute = tools.tools.execute?.execute
       if (!execute) return yield* fail("Tool execute is unavailable for this agent", 1)
       // CLI直接消费原聚合回执；子工具仍由共享invoke执行，而非在debug中另行分派。

@@ -19,7 +19,7 @@ export interface Interface {
   // 必须与 endRevert 配对使用（通过 Effect.acquireUseRelease 保证）。
   readonly beginRevert: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
   readonly endRevert: (sessionID: SessionID) => Effect.Effect<void>
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancel: (sessionID: SessionID, closingJobID?: string) => Effect.Effect<void>
   // 供取消入口筛选活动子树；身份来自现有执行登记，不读取历史消息。
   readonly active: () => Effect.Effect<readonly string[]>
   readonly ensureRunning: (
@@ -140,10 +140,11 @@ const layer = Layer.effect(
       ])]
     })
 
-    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
+    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID, closingJobID?: string) {
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
-      const jobs = yield* background.list()
+      // 自身 scope 已在退出时只排除准确作业身份，其余关联作业仍使用本轮冻结快照。
+      const jobs = (yield* background.list()).filter(job => job.id !== closingJobID)
       if (!existing) {
         // 无 runner 时仍需取消可能残留的 background jobs
         yield* Effect.all([cancelBackgroundJobs(background, sessionID, jobs), status.set(sessionID, { type: "idle" })], {
