@@ -2465,29 +2465,39 @@ it.instance(
   "routes Snowflake PAT transformations through NetworkProxy",
   () =>
     Effect.gen(function* () {
-      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async () =>
-        new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
+      const endpoint = "http://127.0.0.1:9/v1/chat/completions"
+      const targetsPAT = (input: Parameters<typeof NetworkProxy.fetch>[0]) =>
+        (input instanceof Request ? input.url : input.toString()) === endpoint
+      const originalFetch = NetworkProxy.fetch
+      const fetchSpy = spyOn(NetworkProxy, "fetch").mockImplementation(async (input, init) => {
+        // 同一传输入口还承载后台目录和 npm 初始化，只为此用例的目标返回 SSE。
+        if (!targetsPAT(input)) return originalFetch(input, init)
+        return new Response('data: {"choices":[{"delta":{"role":"","content":"hello"}}]}\n\n', {
           headers: { "content-type": "text/event-stream" },
-        }),
-      )
+        })
+      })
       yield* Effect.addFinalizer(() => Effect.sync(() => fetchSpy.mockRestore()))
       const providers = yield* list
       const provider = providers[ProviderV2.ID.make("snowflake-cortex")]
       expect(typeof provider.options.fetch).toBe("function")
       const signal = new AbortController().signal
       const response = yield* Effect.promise<Response>(() =>
-        provider.options.fetch("http://127.0.0.1:9/v1/chat/completions", {
+        provider.options.fetch(endpoint, {
           method: "POST",
           headers: { authorization: "Bearer test-pat", "x-keep": "yes" },
           body: JSON.stringify({ model: "test-model", max_tokens: 1024 }),
           signal,
         }),
       )
-      expect(fetchSpy).toHaveBeenCalledTimes(1)
-      expect(fetchSpy.mock.calls[0]?.[1]?.purpose).toBe("provider")
-      expect(fetchSpy.mock.calls[0]?.[1]?.signal).toBe(signal)
-      expect(new Headers(fetchSpy.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer test-pat")
-      expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toEqual({
+      // 同地址的非 POST 也要计入，避免共享入口的筛选吞掉目标请求的方法回归。
+      const calls = fetchSpy.mock.calls.filter(([input]) => targetsPAT(input))
+      expect(calls).toHaveLength(1)
+      const init = calls[0]?.[1]
+      expect(init?.method).toBe("POST")
+      expect(init?.purpose).toBe("provider")
+      expect(init?.signal).toBe(signal)
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-pat")
+      expect(JSON.parse(String(init?.body))).toEqual({
         model: "test-model", max_completion_tokens: 1024,
       })
       expect(yield* Effect.promise(() => response.text())).toContain('"role":"assistant"')

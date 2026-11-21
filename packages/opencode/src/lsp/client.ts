@@ -446,7 +446,7 @@ export async function create(input: {
     )
   }
 
-  function waitForRegistrationChange(timeout: number) {
+  function waitForRegistrationChange(timeout: number, signal: AbortSignal) {
     if (timeout <= 0) return Promise.resolve(false)
     return new Promise<boolean>((resolve) => {
       let finished = false
@@ -456,15 +456,20 @@ export async function create(input: {
         finished = true
         if (timer) clearTimeout(timer)
         registrationListeners.delete(listener)
+        // 一次操作可重试注册等待，已结束的轮次不再订阅它的取消。
+        signal.removeEventListener("abort", abort)
         resolve(result)
       }
       const listener = () => finish(true)
+      // 取消只结算未获胜的等待，已选定的诊断结果不经此信号传递。
+      const abort = () => finish(false)
+      signal.addEventListener("abort", abort, { once: true })
       registrationListeners.add(listener)
       timer = setTimeout(() => finish(false), timeout)
     })
   }
 
-  function waitForFreshPush(request: { path: string; version: number; after: number; timeout: number }) {
+  function waitForFreshPush(request: { path: string; version: number; after: number; timeout: number }, signal: AbortSignal) {
     if (request.timeout <= 0) return Promise.resolve(false)
     return new Promise<boolean>((resolve) => {
       let finished = false
@@ -477,6 +482,7 @@ export async function create(input: {
         if (debounceTimer) clearTimeout(debounceTimer)
         if (timeoutTimer) clearTimeout(timeoutTimer)
         unsub?.()
+        signal.removeEventListener("abort", abort)
         resolve(result)
       }
       const schedule = () => {
@@ -488,6 +494,8 @@ export async function create(input: {
         debounceTimer = setTimeout(() => finish(true), Math.max(0, DIAGNOSTICS_DEBOUNCE_MS - (Date.now() - hit.at)))
       }
 
+      const abort = () => finish(false)
+      signal.addEventListener("abort", abort, { once: true })
       timeoutTimer = setTimeout(() => finish(false), request.timeout)
       const listener = (event: { path: string; serverID: string }) => {
         if (event.path !== request.path || event.serverID !== input.serverID) return
@@ -500,50 +508,62 @@ export async function create(input: {
   }
 
   async function waitForDocumentDiagnostics(request: { path: string; version: number; after?: number }) {
-    const startedAt = request.after ?? Date.now()
-    const pushWait = waitForFreshPush({
-      path: request.path,
-      version: request.version,
-      after: startedAt,
-      timeout: DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS,
-    })
+    const waits = new AbortController()
+    try {
+      const startedAt = request.after ?? Date.now()
+      const pushWait = waitForFreshPush({
+        path: request.path,
+        version: request.version,
+        after: startedAt,
+        timeout: DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS,
+      }, waits.signal)
 
-    while (Date.now() - startedAt < DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS) {
-      const result = await requestDocumentDiagnostics(request.path)
-      if (result.matched) return true
-      const remaining = DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return false
-      const next = await Promise.race([
-        pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
-        waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
-      ])
-      if (next !== "registration") return next === "push"
+      while (Date.now() - startedAt < DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS) {
+        const result = await requestDocumentDiagnostics(request.path)
+        if (result.matched) return true
+        const remaining = DIAGNOSTICS_DOCUMENT_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
+        if (remaining <= 0) return false
+        const next = await Promise.race([
+          pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
+          waitForRegistrationChange(remaining, waits.signal).then((changed) => (changed ? "registration" : ("timeout" as const))),
+        ])
+        // 注册变化开启下一轮 pull；同一次调用的 push 等待仍可在下一轮获胜。
+        if (next !== "registration") return next === "push"
+      }
+      // 等待结束不等于收到诊断；将事实交回管理层，避免存活连接冒充检查成功。
+      return false
+    } finally {
+      // 安装的监听和 timer 归属于本次等待，结果确定后结束仍在等待的分支。
+      waits.abort()
     }
-    // 等待结束不等于收到诊断；将事实交回管理层，避免存活连接冒充检查成功。
-    return false
   }
 
   async function waitForFullDiagnostics(request: { path: string; version: number; after?: number }) {
-    const startedAt = request.after ?? Date.now()
-    const pushWait = waitForFreshPush({
-      path: request.path,
-      version: request.version,
-      after: startedAt,
-      timeout: DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS,
-    })
+    const waits = new AbortController()
+    try {
+      const startedAt = request.after ?? Date.now()
+      const pushWait = waitForFreshPush({
+        path: request.path,
+        version: request.version,
+        after: startedAt,
+        timeout: DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS,
+      }, waits.signal)
 
-    while (Date.now() - startedAt < DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS) {
-      const result = await requestFullDiagnostics(request.path)
-      if (result.handled || result.matched) return true
-      const remaining = DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
-      if (remaining <= 0) return false
-      const next = await Promise.race([
-        pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
-        waitForRegistrationChange(remaining).then((changed) => (changed ? "registration" : ("timeout" as const))),
-      ])
-      if (next !== "registration") return next === "push"
+      while (Date.now() - startedAt < DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS) {
+        const result = await requestFullDiagnostics(request.path)
+        if (result.handled || result.matched) return true
+        const remaining = DIAGNOSTICS_FULL_WAIT_TIMEOUT_MS - (Date.now() - startedAt)
+        if (remaining <= 0) return false
+        const next = await Promise.race([
+          pushWait.then((ready) => (ready ? "push" : ("timeout" as const))),
+          waitForRegistrationChange(remaining, waits.signal).then((changed) => (changed ? "registration" : ("timeout" as const))),
+        ])
+        if (next !== "registration") return next === "push"
+      }
+      return false
+    } finally {
+      waits.abort()
     }
-    return false
   }
 
   // --- Public API ---

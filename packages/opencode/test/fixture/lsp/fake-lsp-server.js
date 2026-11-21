@@ -107,7 +107,8 @@ function handle(raw) {
     const pending = pendingClientRequests.get(data.id)
     if (!pending) return
     pendingClientRequests.delete(data.id)
-    sendResponse(pending, data.result ?? null)
+    // 只改回包 ID；把 error 换成 null 会让一次失败的注册看起来成功。
+    send({ ...data, id: pending })
     return
   }
 
@@ -125,6 +126,13 @@ function handle(raw) {
 
   if (data.method === "test/get-initialize-params") {
     sendResponse(data.id, initializeParams)
+    return
+  }
+
+  if (data.method === "test/request-client") {
+    const id = sendRequest(data.params.method, data.params.params)
+    // 两个 ID 分属正反两个请求；收到反向回包后才完成原控制请求。
+    pendingClientRequests.set(id, data.id)
     return
   }
 
