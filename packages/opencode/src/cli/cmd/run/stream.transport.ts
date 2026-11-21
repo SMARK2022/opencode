@@ -17,7 +17,7 @@
 // delayed idle from an older turn cannot complete a newer busy turn.
 import type { Event, GlobalEvent, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Context, Deferred, Effect, Exit, Layer, Scope, Stream } from "effect"
-import { makeRuntime } from "@/effect/run-service"
+import { attach, makeRuntime } from "@/effect/run-service"
 import {
   blockerStatus,
   bootstrapSessionData,
@@ -129,7 +129,6 @@ type TransportService = {
   readonly runPromptTurn: (input: SessionTurnInput) => Effect.Effect<void, unknown>
   readonly selectSubagent: (sessionID: string | undefined) => Effect.Effect<void>
   readonly replayOnResize: (input: SessionResizeReplayInput) => Effect.Effect<boolean>
-  readonly close: () => Effect.Effect<void>
 }
 
 class Service extends Context.Service<Service, TransportService>()("@opencode/RunStreamTransport") {}
@@ -1415,15 +1414,10 @@ function createLayer(input: StreamInput) {
           }),
         )
 
-        const close = Effect.fn("RunStreamTransport.close")(function* () {
-          yield* closeScope()
-        })
-
         return Service.of({
           runPromptTurn,
           selectSubagent,
           replayOnResize,
-          close,
         })
       }),
     ),
@@ -1441,12 +1435,18 @@ function createLayer(input: StreamInput) {
 // at a time. The prompt queue enforces this from above.
 export async function createSessionTransport(input: StreamInput): Promise<SessionTransport> {
   const runtime = makeRuntime(Service, createLayer(input))
-  await runtime.runPromise(() => Effect.void)
+  const context = await runtime.context().catch(async (error) => {
+    await runtime.dispose()
+    throw error
+  })
 
+  const service = Context.get(context, Service)
+  // 调用方持有的 turn 要收到 transport 的 abort 并正常收尾，不能由 runtime 一并中断。
+  const run = Effect.runPromiseWith(context)
   return {
-    runPromptTurn: (next) => runtime.runPromise((svc) => svc.runPromptTurn(next)),
-    selectSubagent: (sessionID) => runtime.runSync((svc) => svc.selectSubagent(sessionID)),
-    replayOnResize: (next) => runtime.runPromise((svc) => svc.replayOnResize(next)),
-    close: () => runtime.runPromise((svc) => svc.close()),
+    runPromptTurn: (next) => run(attach(service.runPromptTurn(next))),
+    selectSubagent: (sessionID) => Effect.runSyncWith(context)(attach(service.selectSubagent(sessionID))),
+    replayOnResize: (next) => run(attach(service.replayOnResize(next))),
+    close: runtime.dispose,
   }
 }

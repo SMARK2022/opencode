@@ -1,5 +1,5 @@
-import { Layer, ManagedRuntime } from "effect"
-import { attach } from "./run-service"
+import { Effect, Exit, Layer, ManagedRuntime, Scope } from "effect"
+import { attach, serviceScope } from "./run-service"
 import * as Observability from "@opencode-ai/core/observability"
 
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -146,5 +146,5 @@ export const AppRuntime: Runtime = {
   runCallback(effect) {
     return rt.runCallback(wrap(effect))
   },
-  dispose: () => rt.dispose(),
+  dispose: () => rt.dispose().finally(() => Effect.runPromise(Scope.close(serviceScope, Exit.void))),
 }

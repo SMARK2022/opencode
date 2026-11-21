@@ -1,10 +1,11 @@
-import { Effect, Fiber, Layer, ManagedRuntime } from "effect"
+import { Effect, Exit, Fiber, Layer, ManagedRuntime, Scope } from "effect"
 import * as Context from "effect/Context"
 import { InstanceRef, WorkspaceRef } from "./instance-ref"
 import * as Observability from "@opencode-ai/core/observability"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
 import type { InstanceContext } from "@/project/instance-context"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
+import { lazy } from "../util/lazy"
 
 type Refs = {
   instance?: InstanceContext
@@ -30,18 +31,26 @@ export function attach<A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A
   })
 }
 
+export const serviceScope = Scope.makeUnsafe("parallel")
+
 export function makeRuntime<I, S, E>(service: Context.Service<I, S>, layer: Layer.Layer<I, E>) {
-  let rt: ManagedRuntime.ManagedRuntime<I, E> | undefined
-  const getRuntime = () => (rt ??= ManagedRuntime.make(Layer.provideMerge(layer, Observability.layer), { memoMap }))
+  const get = lazy(() => {
+    const owner = Scope.forkUnsafe(serviceScope)
+    const rt = ManagedRuntime.make(Layer.provideMerge(layer, Observability.layer), { memoMap })
+    Effect.runSync(Scope.addFinalizer(owner, rt.disposeEffect))
+    return { rt, owner }
+  })
 
   return {
-    runSync: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) => getRuntime().runSync(attach(service.use(fn))),
+    context: () => get().rt.context(),
+    dispose: () => Effect.runPromise(Scope.close(get().owner, Exit.void)),
+    runSync: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) => get().rt.runSync(attach(service.use(fn))),
     runPromiseExit: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>, options?: Effect.RunOptions) =>
-      getRuntime().runPromiseExit(attach(service.use(fn)), options),
+      get().rt.runPromiseExit(attach(service.use(fn)), options),
     runPromise: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>, options?: Effect.RunOptions) =>
-      getRuntime().runPromise(attach(service.use(fn)), options),
-    runFork: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) => getRuntime().runFork(attach(service.use(fn))),
+      get().rt.runPromise(attach(service.use(fn)), options),
+    runFork: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) => get().rt.runFork(attach(service.use(fn))),
     runCallback: <A, Err>(fn: (svc: S) => Effect.Effect<A, Err, I>) =>
-      getRuntime().runCallback(attach(service.use(fn))),
+      get().rt.runCallback(attach(service.use(fn))),
   }
 }
