@@ -37,11 +37,13 @@ jobs:
       - uses: ./.github/actions/setup-bun
         with:
           install-flags: --frozen-lockfile
-      - name: 建图（opencode / core / tui）
+      - name: 主线包覆盖率图
         run: |
           set -o pipefail
-          for pkg in opencode core tui; do
-            bun script/guard/select-tests.ts map "packages/$pkg" --out "coverage-map-$pkg.json" --jobs 4 2>&1 | tee "coverage-$pkg.log"
+          packages=$(bun script/guard/select-tests.ts packages)
+          for pkg in $packages; do
+            id=${pkg//\//-}
+            bun script/guard/select-tests.ts map "packages/$pkg" --out "coverage-map-$id.json" --jobs 4 2>&1 | tee "coverage-$id.log"
           done
       - name: 上传建图日志
         if: ${{ !cancelled() }}

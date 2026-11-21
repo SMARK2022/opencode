@@ -1,12 +1,11 @@
 name: guard
-# 机械门禁的 CI 侧。按触发方式分工：
-#   pull_request      第三方 Agent 的 PR 绕过了本地 hook，这里就是它们的 preflight：
-#                     规则检查（用目标分支上的规则与基线）+ 契约测试 + 运行时改动的 A/B 基准 + 置顶评论。
-#                     PR 上的单元测试仍由 test.yml 负责，这里不重复跑。
-#   workflow_dispatch 本地 pre-push 触发的跨平台 preflight（script/guard/preflight.ts）：
-#                     对同一个 SHA 在所选平台上跑 规则 + 选中测试 + 契约。
-#   push dev1-smark   事后告警：规则 + 契约。
-# 全量测试、覆盖率图、基准趋势与看板数据在 guard-nightly.yml。
+# 机械门禁的 CI 侧：plan 根据改动决定测试平台和是否运行 A/B 基准。
+#   pull_request      第三方 PR 不依赖本地 hook。用目标分支的规则与基线检查，保留审批和置顶评论。
+#   workflow_dispatch 本地 pre-push 固定待推送的 SHA 和比较基准，在线上运行该计划。
+#   push dev1-smark   规则与契约仍验证；相同输入已有成功 preflight 时，复用平台测试和基准结果。
+#
+# 产品全量测试由 test.yml 负责；覆盖率图、基准趋势与看板数据由 guard-nightly.yml 维护。
+
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('preflight base={0} · {1} · {2}', inputs.base, github.ref_name, inputs.platforms) || github.event.pull_request.title || github.event.head_commit.message || github.workflow }}
 
 on:
@@ -54,6 +53,8 @@ jobs:
       base: ${{ steps.mode.outputs.base }}
       policy: ${{ steps.mode.outputs.policy }}
       runtime: ${{ steps.plan.outputs.runtime }}
+      tests: ${{ steps.plan.outputs.tests }}
+      bench: ${{ steps.plan.outputs.bench }}
       protected: ${{ steps.plan.outputs.protected }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
@@ -91,7 +92,8 @@ jobs:
           MODE: ${{ steps.mode.outputs.mode }}
           BASE: ${{ steps.mode.outputs.base }}
           POLICY: ${{ steps.mode.outputs.policy }}
-          PLATFORMS: ${{ inputs.platforms || 'macos,linux' }}
+          PLATFORMS: ${{ inputs.platforms }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           dir=script/guard
           if [ "$MODE" = pr ]; then
@@ -104,7 +106,6 @@ jobs:
   rules:
     name: 规则与契约
     needs: plan
-    if: needs.plan.outputs.mode != 'preflight'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -188,7 +189,7 @@ jobs:
   bench:
     name: 性能基准
     needs: plan
-    if: needs.plan.outputs.mode == 'pr' && needs.plan.outputs.runtime == 'true'
+    if: needs.plan.outputs.bench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -201,10 +202,10 @@ jobs:
       # 基准脚本与预算同样取自目标分支：PR 不能改自己的考卷
       - name: 准备基准脚本
         id: src
+        if: github.event_name == 'pull_request'
         env:
           POLICY: ${{ needs.plan.outputs.policy }}
         run: |
-          dir="$GITHUB_WORKSPACE/script/guard"
           mkdir -p "$RUNNER_TEMP/base"
           git archive "$POLICY" script/guard | tar -x -C "$RUNNER_TEMP/base"
           dir="$RUNNER_TEMP/base/script/guard"
@@ -213,7 +214,7 @@ jobs:
         env:
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: |
-          bun "${{ steps.src.outputs.dir }}/bench/opencode.ts" --head HEAD --base "${{ needs.plan.outputs.base }}" \
+          bun "${{ steps.src.outputs.dir || 'script/guard' }}/bench/opencode.ts" --head HEAD --base "${{ needs.plan.outputs.base }}" \
             --json bench.json --markdown "$GITHUB_STEP_SUMMARY"
       - name: 上传基准结果
         if: always()
@@ -273,7 +274,7 @@ jobs:
   preflight:
     name: preflight / ${{ matrix.os }} / ${{ needs.plan.outputs.base }}
     needs: plan
-    if: needs.plan.outputs.mode == 'preflight'
+    if: needs.plan.outputs.tests == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -301,14 +302,13 @@ jobs:
             Windows) choco install ripgrep --yes --no-progress ;;
           esac
           rg --version
-      # 与本地 pre-push 同一个入口，只是关掉了“再触发 preflight”这一步
+      # 平台任务只执行选测。规则和固定契约由上面的 rules 任务验证一次。
       - name: 规则 + 选中测试 + 契约（${{ matrix.os }}）
         id: gate
         env:
           GH_TOKEN: ${{ github.token }} # 只用来下载覆盖率图（release guard-coverage-map）
-          GUARD_PREFLIGHT: "off"
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
-        run: bun script/guard/gate.ts push --since "${{ needs.plan.outputs.base }}" --sha HEAD
+        run: bun script/guard/gate.ts suites --since "${{ needs.plan.outputs.base }}"
       - name: 上传门禁失败日志
         if: failure() && steps.gate.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -328,26 +328,23 @@ jobs:
     steps:
       - name: 必需任务必须实际通过
         env:
-          MODE: ${{ needs.plan.outputs.mode }}
+          WANT_TESTS: ${{ needs.plan.outputs.tests }}
           PLAN: ${{ needs.plan.result }}
           RULES: ${{ needs.rules.result }}
           BENCH: ${{ needs.bench.result }}
-          RUNTIME: ${{ needs.plan.outputs.runtime }}
+          WANT_BENCH: ${{ needs.plan.outputs.bench }}
           PREFLIGHT: ${{ needs.preflight.result }}
         run: |
           [ "$PLAN" = success ]
-          case "$MODE" in
-            preflight) [ "$PREFLIGHT" = success ] ;;
-            pr|push)
-              [ "$RULES" = success ]
-              case "$RUNTIME" in true|false) ;; *) exit 1 ;; esac
-              if [ "$MODE" = pr ] && [ "$RUNTIME" = true ]; then
-                [ "$BENCH" = success ]
-              else
-                [ "$BENCH" = skipped ] || [ "$BENCH" = success ]
-              fi ;;
-            *) exit 1 ;;
-          esac
+          [ "$RULES" = success ]
+          required() {
+            case "$1/$2" in
+              true/success|false/skipped) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          required "$WANT_TESTS" "$PREFLIGHT"
+          required "$WANT_BENCH" "$BENCH"
 
   cleanup:
     name: 删除 preflight 临时分支

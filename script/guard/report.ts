@@ -172,7 +172,7 @@ async function comment() {
   const status = flag(process.argv, "--bench-status")
   if (bench && (await Bun.file(bench).exists())) parts.push(renderBenchMarkdown(await Bun.file(bench).json(), status))
   else if (status === "skipped" || (!status && bench === "none"))
-    parts.push("## ⚪ 性能基准\n\n本次改动没有触及运行时代码，未运行。\n")
+    parts.push("## 性能基准\n\n本次未运行：未触发性能基准，或已有相同输入的成功结果。\n")
   else if (bench || status)
     parts.push(`## 🔴 性能基准\n\n基准结果缺失${status ? `（任务状态：${status}）` : ""}，请查看本次运行日志。\n`)
   await Bun.write(flag(process.argv, "--out") ?? "guard-comment.md", parts.join("\n"))

@@ -3,7 +3,7 @@
 import path from "node:path"
 import os from "node:os"
 import { mkdtemp, realpath, rm } from "node:fs/promises"
-import { ESCALATE_FULL } from "./affected-rules"
+import { guardPlan } from "./affected-rules"
 import { posix, pjoin, git, listFiles, flag } from "./lib"
 import { TEST_FILE } from "./affected"
 
@@ -14,7 +14,9 @@ export async function buildCoverageMap(pkgDir: string, out: string, jobs = 4) {
   pkgDir = await realpath(pkgDir)
   const repo = readGit(pkgDir, "rev-parse", "--show-toplevel")
   const rel = posix(path.relative(repo, pkgDir))
-  const tests = (await listFiles(pkgDir, "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}")).filter((file) => TEST_FILE.test(file))
+  const tests = (await listFiles(pkgDir, "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}")).filter(
+    (file) => TEST_FILE.test(file) && !file.split("/").includes("e2e"),
+  )
   if (!tests.length) throw new Error("没有发现可建图的测试：" + rel)
   const map: CoverageMap = { version: 2, commit: readGit(repo, "rev-parse", "HEAD"), pkg: rel, tests: {} }
   const tmp = await mkdtemp(path.join(os.tmpdir(), "guard-covmap-"))
@@ -83,8 +85,7 @@ export async function selectTests(pkgDir: string, mapFile: string, restrict?: st
   ]
     .map(posix)
     .filter((file) => file && (!restrict || restrict.includes(file)))
-  const escalate = changed.find((file) => ESCALATE_FULL.some((re) => re.test(file)))
-  if (escalate) return { mode: "full", reason: "全局输入改动：" + escalate }
+  if (guardPlan(restrict ?? changed, repo).full(pkg.slice(9))) return { mode: "full", reason: "包级输入改动" }
   const covered = new Set(Object.values(map.tests).flatMap((coverage) => Object.keys(coverage ?? {})))
   const selected = new Set<string>()
   for (const [test, coverage] of Object.entries(map.tests))
@@ -184,7 +185,16 @@ function validMap(value: unknown, pkg: string): value is CoverageMap {
 if (import.meta.main) {
   const [cmd, pkgArg, ...args] = process.argv.slice(2)
   const pkg = path.resolve(pkgArg ?? ".")
-  if (cmd === "map") {
+  if (cmd === "packages") {
+    const p = guardPlan([])
+    for (const name of p.main)
+      if (
+        (await listFiles(path.resolve("packages", name), "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs}")).some(
+          (f) => TEST_FILE.test(f) && p.suite("packages/" + name + "/" + f),
+        )
+      )
+        console.log(name)
+  } else if (cmd === "map") {
     const map = await buildCoverageMap(
       pkg,
       flag(args, "--out") ?? "coverage-map.json",

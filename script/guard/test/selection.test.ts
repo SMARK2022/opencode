@@ -4,6 +4,7 @@ import os from "node:os"
 import { mkdtemp, rm, symlink } from "node:fs/promises"
 import { planAffected } from "../affected"
 import { buildCoverageMap, selectTests, type CoverageMap } from "../select-tests"
+import { guardPlan } from "../affected-rules"
 
 const fixtures: string[] = []
 afterEach(async () => {
@@ -13,13 +14,13 @@ afterEach(async () => {
 test("包配置变化升级所属包的全量，不扩散到消费者；嵌套包同样生效", async () => {
   const repo = await fixture({
     ...modules(),
-    "packages/console/app/package.json": pkg("console-app", { "@fixture/core": "workspace:*" }),
-    "packages/console/app/src/view.test.ts": "",
-    "packages/console/app/tsconfig.test.json": "{}",
+    "packages/sdk/js/package.json": pkg("sdk"),
+    "packages/sdk/js/src/view.test.ts": "",
+    "packages/sdk/js/tsconfig.test.json": "{}",
   })
   const result = await planAffected(repo, ["packages/core/package.json"])
   expect(result.plan.map((plan) => [plan.pkg, plan.mode])).toEqual([["packages/core", "full"]])
-  expect((await planAffected(repo, ["packages/console/app/tsconfig.test.json"])).plan).toHaveLength(1)
+  expect((await planAffected(repo, ["packages/sdk/js/tsconfig.test.json"])).plan).toHaveLength(1)
 })
 
 test("静态闭包识别跨包源码、spec/JS 测试，并保留包自己的测试参数", async () => {
@@ -54,57 +55,38 @@ test("没有测试可达的源码不升级全量；图外资源升级所属包",
 test("always 套件并入计划，新增测试包缺少执行入口时失败", async () => {
   const repo = await fixture({
     ...modules(),
-    "packages/other/package.json": pkg("other"),
-    "packages/other/test/smoke/ready.test.ts": "",
+    "packages/plugin/package.json": pkg("plugin"),
+    "packages/plugin/test/smoke/ready.test.ts": "",
   })
   const result = await planAffected(repo, ["packages/core/src/value.ts"])
-  expect(result.plan.find((plan) => plan.pkg === "packages/other")?.tests).toEqual([
-    "packages/other/test/smoke/ready.test.ts",
+  expect(result.plan.find((p) => p.pkg === "packages/plugin")?.tests).toEqual([
+    "packages/plugin/test/smoke/ready.test.ts",
   ])
-  await Bun.write(path.join(repo, "packages/unknown/package.json"), JSON.stringify({ name: "@fixture/unknown" }))
-  await Bun.write(path.join(repo, "packages/unknown/test/a.test.ts"), "")
-  await expect(planAffected(repo, ["packages/unknown/test/a.test.ts"])).rejects.toThrow("测试没有可执行入口")
+  await Bun.write(path.join(repo, "packages/server/package.json"), JSON.stringify({ name: "@fixture/server" }))
+  await Bun.write(path.join(repo, "packages/server/test/a.test.ts"), "")
+  await expect(planAffected(repo, ["packages/server/test/a.test.ts"])).rejects.toThrow("bun test")
 })
 
-test("复合脚本保留自己的执行器，端到端套件不进门禁", async () => {
-  const repo = await fixture({
-    "packages/app/package.json": JSON.stringify({
-      name: "@fixture/app",
-      scripts: {
-        test: "bun run test:unit && bun run test:browser",
-        "test:unit": "bun test --timeout 15000 ./src",
-        "test:browser": "bun test ./test-browser",
-        "test:e2e": "playwright test",
-      },
-    }),
-    "packages/app/src/a.test.ts": "",
-    "packages/app/e2e/a.spec.ts": "",
-    "packages/app/e2e/performance/unit/a.test.ts": 'import { test } from "bun:test"\n',
-  })
-  const result = await planAffected(repo, ["packages/app/package.json"])
-  expect(result.plan.map((plan) => [plan.command, plan.tests])).toEqual([
-    [["bun", "run", "test"], ["packages/app/src/a.test.ts"]],
-  ])
-  expect(result.plan[0].commands).toEqual([
-    ["bun", "test", "--timeout", "15000", "./src"],
-    ["bun", "test", "./test-browser"],
-  ])
-  await Bun.write(
-    path.join(repo, "packages/app/package.json"),
-    JSON.stringify({
-      name: "@fixture/app",
-      scripts: {
-        test: "bun run prepare && bun test",
-        prepare: "bun build ./src/index.ts",
-        "test:e2e": "playwright test",
-      },
-    }),
-  )
-  const prepared = await planAffected(repo, ["packages/app/package.json"])
-  expect(prepared.plan.find((plan) => plan.command.at(-1) === "test")?.commands).toBeUndefined()
+test("主线补丁、包级输入与全局输入共用一个计划", () => {
+  const repo = path.resolve(import.meta.dir, "../../..")
+  const patch = guardPlan(["patches/@opentui%2Fcore@0.4.3-smark.13.patch"], repo)
+  expect(patch.bench).toBe(true)
+  expect(patch.full("tui")).toBe(true)
+  expect(patch.suite("packages/app/x.test.ts")).toBe(false)
+  const preload = guardPlan(["packages/opencode/test/preload.ts"])
+  expect(preload.full("opencode")).toBe(true)
+  expect(preload.full("core")).toBe(false)
 })
 
-test("Guard 变动只调度规则自身和固定契约，不升级全部产品测试", async () => {
+test("仓库全局输入也不会调度 app 或 sdk-next", async () => {
+  const repo = await fixture({ ...modules(), "packages/app/package.json": pkg("app"), "packages/app/a.test.ts": "" })
+  expect((await planAffected(repo, ["bun.lock"])).plan.map((p) => p.pkg).sort()).toEqual([
+    "packages/core",
+    "packages/opencode",
+  ])
+})
+
+test("Guard 改动选择自身测试，不把非主线包加入选测", async () => {
   const repo = await fixture({
     ...modules(),
     "packages/schema/package.json": JSON.stringify({ name: "@fixture/schema" }),
@@ -116,7 +98,7 @@ test("Guard 变动只调度规则自身和固定契约，不升级全部产品�
     "script/guard/test/rule.test.ts": "",
   })
   const result = await planAffected(repo, ["script/guard/affected.ts"])
-  expect(result.plan.map((plan) => plan.pkg)).toEqual(["packages/schema", "script/guard"])
+  expect(result.plan.map((p) => p.pkg)).toEqual(["script/guard"])
   expect(result.plan.at(-1)?.tests).toEqual(["script/guard/test/rule.test.ts"])
   for (const changed of ["packages/core/src/value.ts", "packages/sdk-next/test/import-boundaries.test.ts", "bun.lock"]) {
     const { plan } = await planAffected(repo, [changed])

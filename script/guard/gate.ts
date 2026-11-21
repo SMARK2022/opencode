@@ -4,7 +4,8 @@
 //   bun script/guard/gate.ts commit --message <file>    commit-msg：暂存区静态检查 + 改动规模（不碰其他 Agent 未暂存的改动）
 //   bun script/guard/gate.ts stop --files a.ts,b.ts     Agent 结束回合：只看本会话改过的文件 + 受影响测试
 //   bun script/guard/gate.ts push [--since <ref>]       pre-push：待推送提交的静态检查 + 选中测试 + 契约测试 + 按需 preflight
-//   bun script/guard/gate.ts contracts                  只跑契约与打包边界测试（CI 用）
+//   bun script/guard/gate.ts suites --since <ref>       CI 平台任务：执行选中测试与多余防御检查
+//   bun script/guard/gate.ts contracts                  CI 契约任务：只跑 schema 和 protocol
 //
 // 本地不跑全量测试：选测试的结果是全量、或工作区里有会被测试加载的未提交改动时，转交 preflight，
 // 在线上对同一个 SHA 跑，通过后再 push 即放行。
@@ -17,7 +18,9 @@ import path from "node:path"
 import os from "node:os"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { git, gitPath, flag, posix, originRepo } from "./lib"
-import { MAIN_BRANCH, PLATFORM_SENSITIVE } from "./rules"
+import { MAIN_BRANCH } from "./rules"
+import { guardPlan, ALWAYS_RUN, RUNTIME_SOURCE } from "./affected-rules"
+import { selectTests } from "./select-tests"
 import { UI } from "./ui"
 
 const args = process.argv.slice(2)
@@ -110,13 +113,13 @@ function failureSummary(output: string) {
   return entries
 }
 
-const runtimeTs = (f: string) =>
-  /^packages\/(core|opencode|tui|cli|server)\/src\/.*\.tsx?$/.test(f) && !f.endsWith(".d.ts")
-
 // 类型感知的多余防御检查：默认只提示（GUARD_UNNEEDED=error 时阻断）
 async function unneededGuards(files: string[]) {
   const enforce = process.env.GUARD_UNNEEDED === "error"
-  for (const [pkg, list] of Map.groupBy(files.filter(runtimeTs), (f) => f.split("/").slice(0, 2).join("/"))) {
+  for (const [pkg, list] of Map.groupBy(
+    files.filter((f) => RUNTIME_SOURCE.test(f) && /(?<!\.d)\.tsx?$/.test(f)),
+    (f) => f.split("/src/")[0],
+  )) {
     const r = await step(
       "多余防御检查",
       `${pkg} · ${list.length} 个文件`,
@@ -159,38 +162,25 @@ type Plan = {
   full: boolean
   tests: string[]
   via: string
-  runner: "bun" | "script"
   command: string[]
-  commands?: string[][]
 }
 
 async function planTests(files: string[]) {
   const selection = await staticPlan(files)
   for (const plan of selection.plans) {
-    if (plan.runner !== "bun") continue
+    if (plan.pkg === "script/guard") continue
     const map = gitPath(repo, "guard-cache", `coverage-map-${plan.pkg.split("/").slice(1).join("-")}.json`)
     if (!Bun.file(map).size) continue
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        path.join(here, "select-tests.ts"),
-        "select",
-        plan.pkg,
-        "--map",
-        map,
-        "--files",
-        files.join(","),
-      ],
-      { cwd: repo },
-    )
-    const pick: { mode?: string; tests?: string[]; unmapped?: string[] } = JSON.parse(result.stdout.toString() || "{}")
-    if (result.exitCode !== 0 || !pick.mode || pick.mode === "stale") continue
+
+    // 覆盖率图是可选输入；读取或比较失败时保留已经算好的静态计划。
+    const pick = await selectTests(path.join(repo, plan.pkg), map, files).catch(() => undefined)
+    if (!pick || pick.mode === "stale") continue
     if (pick.unmapped?.length) {
       plan.tests = [...new Set([...plan.tests, ...(pick.tests ?? [])])]
       continue
     }
     plan.full = pick.mode === "full"
-    plan.tests = pick.tests ?? []
+    plan.tests = [...new Set([...(pick.tests ?? []), ...plan.tests.filter((f) => ALWAYS_RUN.some((re) => re.test(f)))])]
     plan.via = "覆盖率图"
   }
   return { plans: selection.plans.filter((p) => p.full || p.tests.length), inputs: selection.inputs }
@@ -290,54 +280,46 @@ function testJobs(plans: Plan[]) {
     }
     const cwd = path.join(repo, plan.pkg)
     const rel = plan.full ? [] : plan.tests.map((t) => `./${posix(path.relative(cwd, path.join(repo, t)))}`)
-    const native = plan.runner === "bun" || plan.commands !== undefined
-    return (plan.commands ?? [plan.command]).map((command) => async () =>
-      step(
-        "测试",
-        `${plan.pkg} · ${scope} · ${plan.via}`,
-        native ? [...command, "--dots", "--preload", path.join(here, "leak-preload.ts"), ...rel] : command,
-        { cwd, progress: native ? testProgress(await estimateCases(cwd, rel)) : undefined },
-      ),
-    )
+    return [
+      async () =>
+        step(
+          "测试",
+          `${plan.pkg} · ${scope} · ${plan.via}`,
+          [...plan.command, "--dots", "--preload", path.join(here, "leak-preload.ts"), ...rel],
+          { cwd, progress: testProgress(await estimateCases(cwd, rel)) },
+        ),
+    ]
   })
   return { jobs, deferred }
 }
 
-// 已有契约与打包边界测试：原先不在任何必过任务里
-const contractJobs = () =>
-  [
-    ["schema", "./test"],
-    ["protocol", "./test"],
-  ].map(
-    ([pkg, target]) =>
-      () =>
-        step("契约测试", pkg, ["bun", "test", target], { cwd: path.join(repo, "packages", pkg) }),
+// push 验证固定契约；stop 只验证计划选中的契约包。
+const contractJobs = (packages = guardPlan([]).contracts) =>
+  packages.map(
+    (pkg) => () => step("契约测试", pkg, ["bun", "test", "./test"], { cwd: path.join(repo, "packages", pkg) }),
   )
 
 // 跨平台 / 全量测试交给 GitHub：同一个 SHA 通过后再 push 即放行
-async function preflight(sha: string, base: string, sensitive: string[], deferred: string[]) {
+async function preflight(sha: string, base: string, plan: ReturnType<typeof guardPlan>, reason: string) {
   const mode = process.env.GUARD_PREFLIGHT ?? "auto"
   if (!["off", "auto", "required"].includes(mode)) throw new Error(`未知 preflight 模式：${mode}`)
-  const why = [sensitive.length && "平台敏感改动", deferred.length && `测试（${deferred.join("、")}）`]
-    .filter(Boolean)
-    .join(" + ")
+  const why = plan.bench ? "性能基准" : reason
   if (mode === "off") {
     if (!ci) notes.push(`GUARD_PREFLIGHT=off：${why}没有在推送前验证，push 之后由 CI 补测`)
     return
   }
-  const platforms = sensitive.length
-    ? (process.env.GUARD_PREFLIGHT_PLATFORMS ?? "macos,linux")
-    : (process.env.GUARD_PREFLIGHT_FULL_PLATFORMS ?? "linux")
+
   const r = await step(
     "preflight",
-    `${sha.slice(0, 8)} · ${platforms} · ${why}`,
-    ["bun", path.join(here, "preflight.ts"), "ensure", "--sha", sha, "--base", base, "--platforms", platforms],
-    { states: { 0: "ok", 10: "wait", 3: mode === "required" ? "fail" : "skip" } },
+    `${sha.slice(0, 8)} · ${plan.platforms.join(",")} · ${why}`,
+    ["bun", path.join(here, "preflight.ts"), "ensure", "--sha", sha, "--base", base],
+    { states: { 0: "ok", 10: "wait", 3: mode === "required" || plan.bench ? "fail" : "skip" } },
   )
   if (r.state !== "fail") for (const l of r.out.trim().split("\n").filter(Boolean)) UI.sub(l)
   if (r.state === "wait") waiting = "通过后再 push 一次即可，本地不用等"
   if (r.state === "skip")
     notes.push(`gh 不可用，跳过 preflight：${why}交给 push 之后的 CI（GUARD_PREFLIGHT=required 可改为阻断）`)
+  return r.state
 }
 
 // 会影响测试结果的仓库根配置
@@ -351,17 +333,22 @@ async function push() {
   const comparison = git(repo, "rev-parse", "--verify", `${since}^{commit}`)
   if (!comparison.ok) throw new Error(`无法解析比较基准：${comparison.err}`)
   const base = comparison.out
-  // 同一个提交、同一个基准只需通过一次
-  const stamp = gitPath(repo, "guard", "green", `push-${sha}-${base.slice(0, 12)}`)
-  if (await Bun.file(stamp).exists()) {
+  // 显式关闭 preflight 后，只复用相同提交、比较基准和本地测试模式的结果。
+  const localCache = !ci && process.env.GUARD_PREFLIGHT === "off"
+  const stamp = gitPath(repo, "guard", "green", `local-${sha}-${base}-${testsMode ?? "auto"}`)
+  if (localCache && (await Bun.file(stamp).exists())) {
     UI.line("ok", "push 检查", sha.slice(0, 8), "此前已通过，跳过")
     return
   }
-  const diff = git(repo, "diff", "--name-only", "-z", base, sha)
+  const diff = git(repo, "diff", "--name-only", "-z", "--no-renames", base, sha)
   if (!diff.ok) throw new Error(`无法计算待检改动：${diff.err}`)
   const range = diff.out.split("\0").map(posix).filter(Boolean)
   const testing = testsMode !== "off"
   if (!testing) notes.push("GUARD_TESTS=off：本次没有运行测试与契约，push 之后由 CI 补测")
+
+  const plan = guardPlan(range, repo)
+  const remote = !ci && range.length > 0 && testsMode === undefined && process.env.GUARD_PREFLIGHT !== "off"
+  if (remote && (await preflight(sha, base, plan, "主线验证")) !== "skip") return
 
   // 规则检查、多余防御检查、选测试互不依赖，同时进行
   if (testing) syncMaps()
@@ -413,9 +400,10 @@ async function push() {
       deferred.push("提交快照的测试与契约")
     }
   }
-  const sensitive = range.filter((f) => PLATFORM_SENSITIVE.some((re) => re.test(f)))
-  if (!failures.length && (sensitive.length || deferred.length)) await preflight(sha, base, sensitive, deferred)
-  if (!failures.length && !waiting) {
+  if (!remote && !failures.length && (plan.sensitive || plan.bench || deferred.length))
+    await preflight(sha, base, plan, deferred.join("、") || "主线验证")
+
+  if (localCache && !failures.length && !waiting) {
     mkdirSync(path.dirname(stamp), { recursive: true })
     writeFileSync(stamp, new Date().toISOString())
   }
@@ -447,16 +435,24 @@ async function main() {
     ])
     if (!failures.length && selection) {
       const tests = testJobs(selection.plans)
-      await parallel(tests.jobs)
+      await parallel([...tests.jobs, ...contractJobs(guardPlan(files, repo).stopContracts)])
       if (tests.deferred.length)
         notes.push(`${tests.deferred.join("、")} 需要全量测试，留到 push 时由 preflight 在线上运行`)
     }
+  } else if (tier === "suites") {
+    const range = git(repo, "diff", "--name-only", "-z", "--no-renames", flag(args, "--since")!, "HEAD")
+    if (!range.ok) throw new Error(range.err)
+    const files = range.out.split("\0").filter(Boolean)
+    syncMaps()
+    const selection = await planTests(files)
+    await unneededGuards(files)
+    if (!failures.length) await parallel(testJobs(selection.plans).jobs)
   } else if (tier === "push") {
     await push()
   } else if (tier === "contracts") {
     await parallel(contractJobs())
   } else {
-    console.error(`未知层级：${tier}（可选 commit | stop | push | contracts）`)
+    console.error(`未知层级：${tier}（可选 commit | stop | push | suites | contracts）`)
     return 2
   }
 

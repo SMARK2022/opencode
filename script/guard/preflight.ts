@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // preflight 按实际执行的测试平台判定；每次查询远端最新结果，避免复用已重跑或覆盖不全的成功记录。
-import { git, flag, originRepo } from "./lib"
+import { guardPlan, preflightPlatforms } from "./affected-rules"
+export { preflightPlatforms } from "./affected-rules"
 import { MAIN_BRANCH } from "./rules"
 
 export type PreflightRun = {
@@ -27,26 +28,14 @@ export function environmentFailure(run: PreflightRun) {
   const failed = run.jobs
     .filter((job) => job.conclusion === "failure")
     .flatMap((job) => (job.steps ?? []).filter((step) => step.conclusion === "failure"))
-  return (run.attempt ?? 1) < 2 && failed.length > 0 && failed.every((step) => !step.name.startsWith(GATE_STEP))
+  return (run.attempt ?? 1) < 2 &&
+    failed.length > 0 &&
+    failed.every((step) => !step.name.startsWith(GATE_STEP) && !step.name.startsWith("A/B 基准"))
     ? failed[0].name
     : undefined
 }
 
-export function preflightPlatforms(value: string) {
-  const names = [
-    ...new Set(
-      value
-        .split(/[\s,]+/)
-        .map((name) => name.toLowerCase())
-        .filter(Boolean),
-    ),
-  ]
-  if (!names.length || names.some((name) => !["linux", "macos", "windows"].includes(name)))
-    throw new Error(`未知平台：${value || "（空）"}。可选 linux, macos, windows`)
-  return names
-}
-
-export function preflightState(runs: PreflightRun[], platforms: string[], base: string) {
+export function preflightState(runs: PreflightRun[], platforms: string[], base: string, bench = false) {
   const ordered = runs
     .filter(
       (run) =>
@@ -57,6 +46,7 @@ export function preflightState(runs: PreflightRun[], platforms: string[], base: 
     .sort((a, b) => (b.updatedAt ?? b.createdAt).localeCompare(a.updatedAt ?? a.createdAt))
   for (const run of ordered) {
     const jobs = platforms.map((platform) => run.jobs.find((job) => job.name === `preflight / ${platform} / ${base}`))
+    if (bench) jobs.push(run.jobs.find((job) => job.name === "性能基准"))
     if (run.status !== "completed") return { kind: "running" as const, run }
     if (
       run.conclusion === "success" &&
@@ -80,6 +70,8 @@ export function preflightRuns(
     slug,
     "--workflow",
     "guard.yml",
+    "--branch",
+    `preflight/${sha.slice(0, 12)}`,
     "--commit",
     sha,
     "--limit",
@@ -100,7 +92,13 @@ export function preflightRuns(
     })
 }
 
+export const gh = (...params: string[]) => {
+  const proc = Bun.spawnSync(["gh", ...params], { stdout: "pipe", stderr: "pipe" })
+  return { ok: proc.success, out: proc.stdout.toString().trim(), err: proc.stderr.toString().trim() }
+}
+
 async function main() {
+  const { git, flag, originRepo } = await import("./lib")
   const args = process.argv.slice(2)
   const cmd = args[0] ?? "ensure"
   if (!["ensure", "start", "status", "wait"].includes(cmd)) throw new Error(`未知命令：${cmd}`)
@@ -114,21 +112,18 @@ async function main() {
   if (!comparison.ok) throw new Error(`无法解析比较基准：${comparison.err}`)
   const base = comparison.out
   const branch = `preflight/${sha.slice(0, 12)}`
-  const platforms = preflightPlatforms(
-    flag(args, "--platforms") ?? process.env.GUARD_PREFLIGHT_PLATFORMS ?? "macos,linux",
-  )
+  const diff = git(repo, "diff", "--name-only", "-z", "--no-renames", base, sha)
+  if (!diff.ok) throw new Error(diff.err)
+  const plan = guardPlan(diff.out.split("\0").filter(Boolean), repo, flag(args, "--platforms"))
+  const platforms = plan.platforms
   const slug = originRepo(repo)
   if (!slug) throw new Error("origin 必须指向待验证的 GitHub 仓库")
-  const gh = (...params: string[]) => {
-    const proc = Bun.spawnSync(["gh", ...params], { cwd: repo, stdout: "pipe", stderr: "pipe" })
-    return { ok: proc.exitCode === 0, out: proc.stdout.toString().trim(), err: proc.stderr.toString().trim() }
-  }
   if (!Bun.which("gh") || !gh("auth", "status").ok) {
     console.log("gh 未安装或未登录，无法运行 preflight。")
     return 3
   }
 
-  const state = () => preflightState(preflightRuns(gh, slug, sha), platforms, base)
+  const state = () => preflightState(preflightRuns(gh, slug, sha), platforms, base, plan.bench)
 
   const start = () => {
     const push = git(repo, "push", "--no-verify", "origin", `${sha}:refs/heads/${branch}`)

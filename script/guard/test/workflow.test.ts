@@ -12,29 +12,24 @@ test("工作流汇总拒绝缺失、跳过或失败的必需任务", async () =>
   const script = workflow.jobs.result.steps.find((step) => step.run)?.run
   expect(script).toBeDefined()
   const cases = [
-    { MODE: "pr", RUNTIME: "false", RULES: "success", expected: 0 },
-    { MODE: "pr", RUNTIME: "true", RULES: "success", BENCH: "success", expected: 0 },
-    { MODE: "pr", RUNTIME: "true", RULES: "success", expected: 1 },
-    { MODE: "pr", RUNTIME: "false", RULES: "success", BENCH: "failure", expected: 1 },
-    { MODE: "pr", RUNTIME: "false", RULES: "success", BENCH: "cancelled", expected: 1 },
-    { MODE: "pr", RUNTIME: "false", RULES: "skipped", expected: 1 },
-    { MODE: "pr", RUNTIME: "false", RULES: "success", PLAN: "failure", expected: 1 },
-    { MODE: "preflight", PREFLIGHT: "success", expected: 0 },
-    { MODE: "preflight", PREFLIGHT: "skipped", expected: 1 },
-    { MODE: "preflight", PREFLIGHT: "failure", expected: 1 },
-    { MODE: "push", RUNTIME: "false", RULES: "success", expected: 0 },
-    { MODE: "push", RUNTIME: "", RULES: "success", expected: 1 },
-    { MODE: "", expected: 1 },
+    { WANT_TESTS: "true", WANT_BENCH: "true", BENCH: "success", expected: 0 },
+    { WANT_TESTS: "true", WANT_BENCH: "true", BENCH: "skipped", expected: 1 },
+    { WANT_TESTS: "true", WANT_BENCH: "true", BENCH: "failure", expected: 1 },
+    { WANT_TESTS: "true", WANT_BENCH: "false", expected: 0 },
+    { WANT_TESTS: "true", WANT_BENCH: "false", PREFLIGHT: "cancelled", expected: 1 },
+    { WANT_TESTS: "true", WANT_BENCH: "false", RULES: "skipped", expected: 1 },
+    { WANT_TESTS: "false", WANT_BENCH: "false", PREFLIGHT: "skipped", expected: 0 },
+    { WANT_TESTS: "false", WANT_BENCH: "false", PREFLIGHT: "skipped", PLAN: "failure", expected: 1 },
+    { WANT_TESTS: "", WANT_BENCH: "true", expected: 1 },
   ]
   for (const { expected, ...values } of cases) {
     const result = Bun.spawnSync(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script!], {
       env: {
         ...process.env,
         PLAN: "success",
-        RULES: "skipped",
+        RULES: "success",
         BENCH: "skipped",
-        PREFLIGHT: "skipped",
-        RUNTIME: "false",
+        PREFLIGHT: "success",
         ...values,
       },
       stdout: "pipe",

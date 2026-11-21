@@ -24,7 +24,7 @@ import {
   type Verdict,
 } from "./harness"
 import { SCENARIO_BUDGETS } from "./budgets"
-import { RUNTIME_PATHS } from "../rules"
+import { guardPlan } from "../affected-rules"
 import { assertReply } from "./protocol"
 import { renderBenchMarkdown, type BenchResult } from "../report"
 
@@ -71,8 +71,8 @@ async function main() {
   }
 
   // 缓存源码工作树；每次确认依赖完整，安装失败后的目录仍可重试。
-  async function worktreeFor(sha: string) {
-    const dir = path.join(os.tmpdir(), `opencode-bench-${sha.slice(0, 12)}`)
+  async function worktreeFor(sha: string, side: string) {
+    const dir = path.join(os.tmpdir(), `opencode-bench-${side}-${sha.slice(0, 12)}`)
     if (!(await Bun.file(path.join(dir, "package.json")).exists())) {
       console.log(`[bench] 准备 ${sha.slice(0, 8)} 的工作树…`)
       const created = Bun.spawnSync(["git", "-C", repo, "worktree", "add", "--force", "--detach", dir, sha], {
@@ -99,8 +99,8 @@ async function main() {
   const info = commitInfo(headRef ?? "HEAD")
   const head = headRef ? info : { ...info, subject: `工作区（基于 ${info.sha.slice(0, 8)}）` }
   const base = commitInfo(opt("--base") ?? git("merge-base", "origin/dev1-smark", "HEAD"))
-  const headDir = headRef ? await worktreeFor(head.sha) : repo
-  const baseDir = await worktreeFor(base.sha)
+  const headDir = headRef ? await worktreeFor(head.sha, "head") : repo
+  const baseDir = await worktreeFor(base.sha, "base")
 
   // ── 模拟 LLM：OpenAI 兼容 SSE，固定速率，两边输入完全一致；每 token 1 字节，正文须低于 processor 的 64 KiB 上限 ──
   let streamStarts = 0
@@ -140,7 +140,8 @@ async function main() {
   })
 
   const workspace = await mkdtemp(path.join(os.tmpdir(), "opencode-bench-ws-"))
-  const temporary = new Set([workspace])
+  const cache = await mkdtemp(path.join(os.tmpdir(), "opencode-bench-cache-"))
+  const temporary = new Set([workspace, cache])
   const config = path.join(workspace, "opencode.json")
   await Bun.write(
     config,
@@ -184,7 +185,7 @@ async function main() {
             OPENCODE_CONFIG: config,
             XDG_DATA_HOME: home,
             XDG_STATE_HOME: home,
-            XDG_CACHE_HOME: path.join(os.tmpdir(), "opencode-bench-cache"),
+            XDG_CACHE_HOME: path.join(cache, label),
             XDG_CONFIG_HOME: home,
             OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
           },
@@ -252,17 +253,24 @@ async function main() {
     },
   }
 
-  // 种子数据由 base 代码生成一次；head 启动时自行迁移（迁移耗时计入 startupMs，不计入场景）
-  async function seed(sessions: number, turns: number) {
+  // 种子会话由 base 创建一次。base、head 再分别打开副本，确保两边都已完成数据库迁移。
+  // 正式轮从各自的模板启动，startupMs 衡量日常启动耗时，不重复计算一次性迁移。
+  async function seed(t: Target, source?: string) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "opencode-bench-seed-"))
     temporary.add(dir)
+    if (source) cpSync(source, dir, { recursive: true })
+
     const port = 40000 + Math.floor(Math.random() * 10000)
     dirs.set(port, dir)
-    const t = target("seed", baseDir)
     const proc = t.start(port)
     const url = `http://127.0.0.1:${port}`
     try {
       await waitHealthy(url + t.healthPath, 120_000, proc)
+      if (source) {
+        await call("GET", url, "/session")
+        return dir
+      }
+
       for (let i = 0; i < sessions; i++) {
         const s = (await call("POST", url, "/session", { title: `bench ${i}` })) as { id: string }
         if (i >= Math.max(0, sessions - 10))
@@ -293,7 +301,11 @@ async function main() {
 
   let exit = 0
   try {
-    const template = await seed(sessions, turns)
+    const seedDir = await seed(target("seed", baseDir))
+    const templates: Record<string, string> = {
+      base: await seed(target("base", baseDir), seedDir),
+      head: await seed(target("head", headDir), seedDir),
+    }
     for (const [name, scenario] of Object.entries(SCENARIOS)) {
       if (only.length && !only.includes(name)) continue
       const fresh = (t: Target): Target => ({
@@ -301,7 +313,7 @@ async function main() {
         start: (port) => {
           const dir = mkdtempSync(path.join(os.tmpdir(), "opencode-bench-run-"))
           temporary.add(dir)
-          cpSync(template, dir, { recursive: true })
+          cpSync(templates[t.label], dir, { recursive: true })
           dirs.set(port, dir)
           return t.start(port)
         },
@@ -326,7 +338,11 @@ async function main() {
     }
     // 两个提交之间没有运行时代码改动时，差异只能来自环境：只记录，不判定退化
     const changed = git("diff", "--name-only", base.sha, ...(headRef ? [head.sha] : [])).split("\n")
-    if (!changed.some((file) => RUNTIME_PATHS.test(file))) {
+    if (
+      !(headRef && head.sha === base.sha) &&
+      !guardPlan(changed, repo).bench &&
+      !Object.values(result.scenarios).some((s) => s.verdict.some((v) => v.metric === "crashed" && v.regressed))
+    ) {
       result.note = "两个提交之间没有运行时代码改动，只记录数据，不判定退化"
       result.regressed = false
       for (const s of Object.values(result.scenarios)) for (const v of s.verdict) v.regressed = false

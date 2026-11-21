@@ -39,7 +39,9 @@
 
 写法和规模检查聚焦本次改动。存量允许项按规则和文件/依赖边登记，新增代码的默认允许数为零。
 
-选测试：静态依赖图沿反向 import 闭包选出测试；覆盖率图可用时以它为准（静态图经测试夹具几乎连到全部测试，单靠它常升级为全量）。全局输入（根目录 `bun.lock`、`package.json` 等）升级全部包，包内全局输入或依赖图之外的文件只升级所属包。Playwright 端到端和性能套件不进门禁。单个测试文件失败、超时或缺少有效 LCOV 时，建图跳过该文件的覆盖记录；选测该包时仍运行它。整包无有效记录时保留上次发布的图。Guard 自身变化只触发其自测和固定契约（schema、protocol）。
+选测试先沿静态 import 图反向查找受影响的测试。共享夹具可能连到整个包，覆盖率图可用时再按命中的源码行缩小范围。静态选测和覆盖率选测都使用 `guardPlan`：根配置升级全部主线包，包内公共输入只升级所属包，依赖补丁按锁文件定位受影响的主线包。
+
+单个测试文件失败、超时或缺少有效 LCOV 时，建图跳过该文件的覆盖记录，下次选测该包时仍运行它。整包无有效记录时保留上次发布的图。Playwright E2E 和性能套件不混入普通选测；schema、protocol 单独运行固定契约。
 
 ## 首次接入
 
@@ -164,7 +166,7 @@ Guard-Allow-Large: 理由
 
 Agent 也可以这样写，但带这行的 `git commit` 会触发 OpenCode 的权限确认，由你决定。放行记录留在提交历史里，pre-push 和 CI 的报告会列出来。
 
-**同一个提交只验证一次。** push 通过后在 `.git/guard/green/` 记下提交和比较基准，再推同一个提交直接放行。
+显式关闭 preflight 时，本地通过记录仅适用于相同的提交、比较基准和测试模式。
 
 **本地不跑全量测试。** 选测试的结果是全量时（比如改了 `package.json`、`bun.lock`），本地跳过这个包，把同一个提交与固定比较 base 交给 preflight 在线上跑，默认只跑 Linux（`GUARD_PREFLIGHT_FULL_PLATFORMS`）。确实想在本地跑全量时，设置 `GUARD_TESTS=full`。
 
@@ -194,14 +196,14 @@ bun script/guard/preflight.ts wait --base <本次比较提交>
 bun script/guard/preflight.ts start --base <本次比较提交> --platforms linux,macos,windows   # 手动指定平台
 ```
 
-push 到 `dev1-smark` 之后，`guard.yml` 会再跑一次规则与契约，作为事后告警；三平台全量测试仍由现有的 `test.yml` 负责。
+主线 push 和 PR 复用相同提交、基准和所需平台的成功 preflight，否则执行所需检查。test.yml 保持独立。
 
 ### 第三方 Agent 的 PR
 
 这些 PR 不经过本地 hook，所以 PR 上的 CI 就是它们的 preflight：
 
 - **规则与契约**：用目标分支上的规则、基线和脚本检查 PR，违规以注释标在 diff 上。
-- **性能基准**：PR 改到运行时代码（`packages/{core,opencode,tui,server,cli,llm,plugin,sdk/js}/src/`）时，head 与 merge-base 交替跑 A/B。基准脚本同样来自目标分支，PR 改不了自己的考卷。
+- **性能基准**：主线运行时代码或影响主线的依赖补丁触发 A/B；保持既有阈值和统计判定。
 - **PR 评论**：上面两项汇总成一条置顶评论，每次更新同一条。
 - 单元测试仍由 `test.yml` 负责，这里不重复跑。
 
@@ -233,7 +235,7 @@ bun script/guard/bench/opencode.ts                                 # 工作区 �
 bun script/guard/bench/opencode.ts --head <sha> --base <sha> --only list,stream --rounds 5
 ```
 
-两个提交各自建一个缓存 worktree（`$TMPDIR/opencode-bench-<sha12>`）并安装依赖，第二次起会快很多。
+CI 为 base 和 head 各建一个缓存工作树（`$TMPDIR/opencode-bench-<角色>-<sha12>`），分别安装依赖；再次测同一提交和角色时复用其工作树。
 
 ### 基准测什么
 
@@ -249,7 +251,9 @@ bun script/guard/bench/opencode.ts --head <sha> --base <sha> --only list,stream 
 
 判定退化需要同时满足：中位数变差超过预算比例、超过绝对噪声下限，且单侧 Mann-Whitney 检验 p < 0.05。预算在 `bench/budgets.ts`，它本身是受保护路径。
 
-为减少环境差异造成的误报：两个提交都在各自的缓存工作树里运行（CI 用 `--head HEAD`，不拿工作区和工作树比）；每个场景先两边各空跑一轮预热、不计入；两个提交之间没有运行时代码改动时只记录数据、不判定退化。
+CI 显式传入 `--head HEAD`，使两个版本都从各自的工作树启动。同一份种子数据分别由两个版本打开并完成迁移，两边各用自己的缓存。每个场景先各预热一轮，不计入结果，再交替测量正式轮。
+
+没有运行时改动且不涉及主线依赖补丁时，只记录计时数据；被测进程崩溃仍判失败。显式将同一提交作为 head 和 base 时，保留原始判定供校准使用。
 
 ## 环境变量速查
 

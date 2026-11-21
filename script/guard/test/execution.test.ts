@@ -160,103 +160,47 @@ test("CI classification uses the same exact comparison commits as push validatio
   }
 })
 
-test("the required CI result rejects skipped, failed or cancelled mandatory jobs", () => {
-  const normal = {
-    mode: "pr",
-    plan: "success",
-    rules: "success",
-    bench: "success",
-    runtime: "true",
-    preflight: "skipped",
-  }
-  const checks: { change: Partial<typeof normal>; code: number }[] = [
-    { change: {}, code: 0 },
-    { change: { runtime: "false", bench: "skipped" }, code: 0 },
-    { change: { mode: "push", bench: "skipped" }, code: 0 },
-    { change: { mode: "preflight", rules: "skipped", bench: "skipped", preflight: "success" }, code: 0 },
-    { change: { mode: "unknown" }, code: 1 },
-    { change: { plan: "skipped" }, code: 1 },
-    { change: { plan: "failure" }, code: 1 },
-    { change: { rules: "skipped" }, code: 1 },
-    { change: { rules: "cancelled" }, code: 1 },
-    { change: { bench: "skipped" }, code: 1 },
-    { change: { runtime: "false", bench: "failure" }, code: 1 },
-    { change: { mode: "push", rules: "skipped" }, code: 1 },
-    { change: { mode: "preflight", preflight: "skipped" }, code: 1 },
-    { change: { mode: "preflight", preflight: "cancelled" }, code: 1 },
-    { change: { runtime: "" }, code: 1 },
-  ]
-  for (const check of checks) {
-    const args = Object.entries({ ...normal, ...check.change }).flatMap(([key, value]) => ["--" + key, value])
-    const result = Bun.spawnSync([process.execPath, path.resolve(import.meta.dir, "../ci.ts"), "result", ...args], {
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    expect({ args, code: result.exitCode }).toEqual({ args, code: check.code })
-  }
-})
-
-test("composite Bun suites run with leak checks through the actual gate", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "guard-composite-test-"))
-  try {
-    const git = (...args: string[]) => Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "pipe" })
-    expect(git("init", "-q").exitCode).toBe(0)
-    expect(
-      git("-c", "user.name=guard", "-c", "user.email=guard@example.test", "commit", "--allow-empty", "-qm", "fixture")
-        .exitCode,
-    ).toBe(0)
-    await Bun.write(
-      path.join(dir, "packages/app/package.json"),
-      JSON.stringify({
-        name: "@opencode-ai/app",
-        scripts: {
-          test: "bun run test:unit && bun run test:browser",
-          "test:unit": "bun test --timeout 15000 ./src",
-          "test:browser": "bun test ./test-browser",
-        },
-      }),
-    )
-    await Bun.write(
-      path.join(dir, "packages/app/src/unit.test.ts"),
-      'import { test } from "bun:test"\ntest("leak", () => { Bun.spawn([process.execPath, "-e", "Bun.serve({port:0,fetch:()=>new Response()})"], { stdout: "ignore", stderr: "ignore" }) })\n',
-    )
-    await Bun.write(
-      path.join(dir, "packages/app/test-browser/browser.test.ts"),
-      'import { test, expect } from "bun:test"\ntest("browser suite", () => expect(true).toBe(true))\n',
-    )
-    const result = Bun.spawnSync(
-      [
-        process.execPath,
-        path.resolve(import.meta.dir, "../gate.ts"),
-        "stop",
-        "--files",
-        "packages/app/src/unit.test.ts",
-      ],
-      {
-        cwd: dir,
-        env: { ...process.env, GITHUB_ACTIONS: "false", GUARD_TESTS: "full", GUARD_MAP_SYNC: "off" },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    )
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout.toString()).toContain("leakedChildren")
-    expect(result.stdout.toString()).toContain("1 通过")
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
+test("主线 Bun 测试仍然执行资源泄漏门禁", async () => {
+  await using repo = await gateRepo({
+    "packages/llm/package.json": JSON.stringify({ name: "@fixture/llm", scripts: { test: "bun test" } }),
+    "packages/llm/test/leak.test.ts": `
+      import { test } from "bun:test"
+      test("child", () => {
+        Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60_000)"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        })
+      })`,
+  })
+  const r = Bun.spawnSync(
+    [
+      process.execPath,
+      path.resolve(import.meta.dir, "../gate.ts"),
+      "stop",
+      "--files",
+      "packages/llm/test/leak.test.ts",
+    ],
+    { cwd: repo.dir, env: { ...process.env, GITHUB_ACTIONS: "true" } },
+  )
+  expect(r.exitCode).toBe(1)
+  expect(r.stdout.toString()).toContain("leakedChildren")
 })
 
 test("gate reports early failures before the output tail and keeps each suite log", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "guard-failure-summary-"))
   try {
     expect(Bun.spawnSync(["git", "init", "-q", dir]).exitCode).toBe(0)
-    const pkg = path.join(dir, "packages/function")
+    const pkg = path.join(dir, "packages/llm")
+    const other = path.join(dir, "packages/plugin")
+    await Bun.write(
+      path.join(other, "package.json"),
+      JSON.stringify({ name: "@fixture/plugin", scripts: { test: "bun test" } }),
+    )
     await Bun.write(
       path.join(pkg, "package.json"),
       JSON.stringify({
-        name: "@opencode-ai/function",
-        scripts: { test: "bun test ./unit && bun test ./other" },
+        name: "@fixture/llm",
+        scripts: { test: "bun test" },
       }),
     )
     await Bun.write(
@@ -266,7 +210,7 @@ test("gate reports early failures before the output tail and keeps each suite lo
       test("late case", () => { console.error("x".repeat(9000)); throw new Error("late diagnostic") })`,
     )
     await Bun.write(
-      path.join(pkg, "other/sample.test.ts"),
+      path.join(other, "test/sample.test.ts"),
       'import { test } from "bun:test"; test("other suite", () => { throw new Error("other diagnostic") })',
     )
     const result = Bun.spawnSync(
@@ -275,7 +219,7 @@ test("gate reports early failures before the output tail and keeps each suite lo
         path.resolve(import.meta.dir, "../gate.ts"),
         "stop",
         "--files",
-        "packages/function/unit/sample.test.ts",
+        "packages/llm/package.json,packages/plugin/package.json",
       ],
       { cwd: dir, env: { ...process.env, GITHUB_ACTIONS: "true", GUARD_LOG_ARTIFACT: "guard-logs-linux" } },
     )
@@ -305,15 +249,15 @@ test("parallel gates keep their selected test plans isolated and remove temporar
         .exitCode,
     ).toBe(0)
     await Bun.write(
-      path.join(dir, "packages/function/package.json"),
-      JSON.stringify({ name: "@opencode-ai/function", scripts: { test: "bun test" } }),
+      path.join(dir, "packages/llm/package.json"),
+      JSON.stringify({ name: "@opencode-ai/llm", scripts: { test: "bun test" } }),
     )
     await Bun.write(
-      path.join(dir, "packages/function/test/pass.test.ts"),
+      path.join(dir, "packages/llm/test/pass.test.ts"),
       'import { test, expect } from "bun:test"\ntest("passing suite", () => expect(true).toBe(true))\n',
     )
     await Bun.write(
-      path.join(dir, "packages/function/test/fail.test.ts"),
+      path.join(dir, "packages/llm/test/fail.test.ts"),
       'import { test, expect } from "bun:test"\ntest("failing suite", () => expect(true).toBe(false))\n',
     )
     const results = await Promise.all(
@@ -324,7 +268,7 @@ test("parallel gates keep their selected test plans isolated and remove temporar
             path.resolve(import.meta.dir, "../gate.ts"),
             "stop",
             "--files",
-            `packages/function/test/${name}.test.ts`,
+            `packages/llm/test/${name}.test.ts`,
           ],
           {
             cwd: dir,
@@ -465,10 +409,10 @@ async function gateRepo(files: Record<string, string>) {
 
 test("同一提交与基准通过一次后，再次 push 直接跳过；GUARD_TESTS=off 只提示", async () => {
   await using repo = await gateRepo({ "README.md": "fixture\n" })
-  const first = repo.push({ GUARD_TESTS: "off" }, "--since", "HEAD")
+  const first = repo.push({ GUARD_TESTS: "off", GUARD_PREFLIGHT: "off" }, "--since", "HEAD")
   expect(first.code).toBe(0)
   expect(first.output).toContain("GUARD_TESTS=off")
-  const second = repo.push({ GUARD_TESTS: "off" }, "--since", "HEAD")
+  const second = repo.push({ GUARD_TESTS: "off", GUARD_PREFLIGHT: "off" }, "--since", "HEAD")
   expect(second.code).toBe(0)
   expect(second.output).toContain("此前已通过")
 })

@@ -2,15 +2,18 @@
 // CI 的小工具，只给 .github/workflows/guard*.yml 用。
 //
 //   bun script/guard/ci.ts plan --base <ref> [--head <ref>] [--platforms macos,linux]
-//       把改动分类写进 $GITHUB_OUTPUT：runtime / sensitive / protected（true|false）、files（改动文件数）
-//       以及 preflight 矩阵 matrix（JSON）
+//       把改动分类写进 $GITHUB_OUTPUT：runtime / protected（true|false）、files（改动文件数）
+//       以及需要执行的 tests / bench 和 preflight 平台矩阵 matrix（JSON）。
 //   bun script/guard/ci.ts commits <"sha sha …" | A..B> [--max 20]
 //       把用户输入展开成 JSON 数组（完整 SHA，旧→新），写进 $GITHUB_OUTPUT 的 list
 //   bun script/guard/ci.ts nightly-base <site/data/index.json>
 //       nightly 的对比基准：看板里最近一次测过、且是 HEAD 祖先的提交；HEAD 已测过时 skip=true
 import { appendFileSync } from "node:fs"
-import { PLATFORM_SENSITIVE, PROTECTED_GLOBS, PROTECTED_PATHS, RUNTIME_PATHS } from "./rules"
+import { PROTECTED_GLOBS, PROTECTED_PATHS } from "./rules"
+import { guardPlan } from "./affected-rules"
+import { gh, preflightRuns, preflightState } from "./preflight"
 import { isCompleteBench } from "./report"
+
 // 不依赖 ./lib（它会加载 typescript）：plan 任务只装 bun，不装工作区依赖
 const flag = (a: string[], name: string) => (a.includes(name) ? a[a.indexOf(name) + 1] : undefined)
 const posix = (p: string) => p.replaceAll("\\", "/")
@@ -37,30 +40,13 @@ function must(r: { ok: boolean; out: string; err: string }, what: string) {
 }
 
 const RUNNERS: Record<string, string> = { linux: "ubuntu-latest", macos: "macos-latest", windows: "windows-latest" }
-function platforms(list: string) {
-  const names = [
-    ...new Set(
-      list
-        .split(/[\s,]+/)
-        .map((s) => s.toLowerCase())
-        .filter(Boolean),
-    ),
-  ]
-  const bad = names.filter((n) => !RUNNERS[n])
-  if (bad.length || !names.length) {
-    console.error(`未知平台：${bad.join(", ") || "（空）"}。可选 linux, macos, windows`)
-    process.exit(2)
-  }
-  return names.map((os) => ({ os, runner: RUNNERS[os] }))
-}
-
 if (cmd === "plan") {
   const base = flag(args, "--base")
   if (!base) throw new Error("plan 需要 --base")
   const head = flag(args, "--head") ?? "HEAD"
   const from = must(git(repo, "rev-parse", "--verify", `${base}^{commit}`), "解析比较基准")
   const to = must(git(repo, "rev-parse", "--verify", `${head}^{commit}`), "解析待检提交")
-  const files = must(git(repo, "diff", "--name-only", "-z", from, to), "git diff")
+  const files = must(git(repo, "diff", "--name-only", "-z", "--no-renames", from, to), "git diff")
     .split("\0")
     .map(posix)
     .filter(Boolean)
@@ -68,36 +54,23 @@ if (cmd === "plan") {
     (f) => PROTECTED_PATHS.some((p) => f === p || f.startsWith(p)) || PROTECTED_GLOBS.some((re) => re.test(f)),
   )
   if (protectedHit.length) console.log(`受保护路径改动：\n  ${protectedHit.join("\n  ")}`)
+  const plan = guardPlan(files, repo, flag(args, "--platforms"))
+  const reusable =
+    process.env.GH_TOKEN &&
+    process.env.MODE !== "preflight" &&
+    process.env.POLICY === from &&
+    !protectedHit.length &&
+    !files.some((f) => f.startsWith(".github/")) &&
+    preflightState(preflightRuns(gh, process.env.GITHUB_REPOSITORY!, to), plan.platforms, from, plan.bench).kind ===
+      "green"
   output({
     files: String(files.length),
-    runtime: String(files.some((f) => RUNTIME_PATHS.test(f))),
-    sensitive: String(files.some((f) => PLATFORM_SENSITIVE.some((re) => re.test(f)))),
+    runtime: String(plan.bench),
+    tests: String(!reusable),
+    bench: String(plan.bench && !reusable),
     protected: String(protectedHit.length > 0),
-    matrix: JSON.stringify({ include: platforms(flag(args, "--platforms") ?? "macos,linux") }),
+    matrix: JSON.stringify({ include: plan.platforms.map((os) => ({ os, runner: RUNNERS[os] })) }),
   })
-} else if (cmd === "result") {
-  const mode = flag(args, "--mode")
-  const runtime = flag(args, "--runtime")
-  const plan = flag(args, "--plan")
-  const rules = flag(args, "--rules")
-  const bench = flag(args, "--bench")
-  const preflight = flag(args, "--preflight")
-  const failures = [
-    !["pr", "push", "preflight"].includes(mode ?? "") && "无法识别工作流模式",
-    !["true", "false"].includes(runtime ?? "") && "缺少运行时改动分类",
-    plan !== "success" && "计划任务必须成功完成",
-    (mode === "preflight" ? !["success", "skipped"].includes(rules ?? "") : rules !== "success") &&
-      "规则与契约必须成功完成",
-    (mode === "pr" && runtime === "true" ? bench !== "success" : !["success", "skipped"].includes(bench ?? "")) &&
-      "性能基准未完成所需验证",
-    (mode === "preflight" ? preflight !== "success" : !["success", "skipped"].includes(preflight ?? "")) &&
-      "跨平台预检未成功完成",
-  ].filter(Boolean)
-  if (failures.length) {
-    for (const failure of failures) console.error(`::error::${failure}`)
-    process.exit(1)
-  }
-  console.log("Guard 所需检查均已成功完成")
 } else if (cmd === "commits") {
   const input = (args[0] ?? "").trim()
   const max = Number(flag(args, "--max") ?? 20)
@@ -137,8 +110,6 @@ if (cmd === "plan") {
   // 第一次运行没有历史：和第一父提交比
   output({ skip: "false", base: prev?.sha ?? must(git(repo, "rev-parse", "HEAD~1"), "rev-parse HEAD~1") })
 } else {
-  console.error(
-    "用法：ci.ts plan --base <ref> [--head <ref>] [--platforms …] | result --mode <pr|push|preflight> --plan <result> --rules <result> --bench <result> --runtime <true|false> --preflight <result> | commits <列表或范围> [--max 20] | nightly-base <index.json>",
-  )
+  console.error("用法：ci.ts plan | commits | nightly-base")
   process.exit(2)
 }

@@ -1,3 +1,5 @@
+import { RUNTIME } from "./affected-rules"
+
 // 机械门禁的唯一规则表。改这里 = 改架构；放宽规则或提高基线时单独开 PR。
 // 依赖矩阵与白名单取自官方 v1.19.6 实测依赖图：上游代码在这些规则下为 0 违规。
 
@@ -140,7 +142,6 @@ export type Ratchet = {
   fix: string
 }
 
-const RUNTIME = /^packages\/(core|opencode|tui|server|cli)\//
 const BUSINESS = /^packages\/(core|opencode)\/src\/(session|tool|permission)\//
 
 export const RATCHETS: Ratchet[] = [
@@ -378,14 +379,3 @@ export const OTHER_RULES: Record<string, { level: Level; fix: string }> = {
   "ci-soft": { level: "error", fix: "失败不阻塞的 CI 等于注释。要么设为必过，要么删除该 job。" },
   "ci-timeout": { level: "error", fix: "超时只在各包 test 脚本里定义一次。CI 按平台放宽超时等于给慢测试开后门。" },
 }
-
-// ── 平台敏感路径：改到这些文件时 pre-push 才需要跨平台 preflight ──
-export const PLATFORM_SENSITIVE = [
-  /^packages\/(core|opencode|tui|cli)\/src\/.*(shell|pty|process|spawn|win32|windows|flock|which|glob|watcher|clipboard|terminal|editor|fs-util|filesystem|path|encoding|decoding)/i,
-  /(^|\/)package\.json$/,
-  /^bun\.lock$/,
-  /^patches\//,
-]
-
-// ── 运行时代码：PR 改到这里才跑性能基准 ──
-export const RUNTIME_PATHS = /^packages\/(core|opencode|tui|server|cli|llm|plugin|sdk\/js)\/src\//
