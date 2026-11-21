@@ -1,7 +1,8 @@
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { Deferred, Duration, Effect, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { HttpRouter, HttpServerResponse } from "effect/unstable/http"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Project } from "../../src/project/project"
 import { InstanceRef } from "../../src/effect/instance-ref"
@@ -9,7 +10,7 @@ import { registerDisposer } from "../../src/effect/instance-registry"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { tmpdirScoped } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 
 let bootstrapRun: Effect.Effect<void> = Effect.void
 const noopBootstrap = Layer.succeed(
@@ -285,6 +286,36 @@ describe("InstanceStore", () => {
     }),
   )
 })
+
+for (const operation of ["load", "reload"] as const) {
+  testEffect(Layer.empty).live(`web disposal settles an in-flight ${operation}`, () => Effect.gen(function* () {
+    const entered = Promise.withResolvers<void>()
+    const service = yield* Deferred.make<InstanceStore.Interface>()
+    const layer = LayerNode.compile(InstanceStore.node, [
+      [Project.node, Layer.mock(Project.Service, {})],
+      [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, {
+        run: Effect.sync(() => entered.resolve()).pipe(Effect.andThen(Effect.never)),
+      })],
+    ])
+    const web = HttpRouter.toWebHandler(HttpRouter.use((router) => Effect.gen(function* () {
+      const store = yield* InstanceStore.Service
+      yield* Deferred.succeed(service, store)
+      yield* router.add("GET", "/", Effect.succeed(HttpServerResponse.empty()))
+    })).pipe(Layer.provide(layer)), { disableLogger: true })
+    yield* Effect.promise(() => web.handler(new Request("http://localhost/")))
+    const store = yield* Deferred.await(service)
+    const directory = process.cwd()
+    const input = { directory, worktree: directory, project: { id: ProjectV2.ID.make("global"), worktree: directory, sandboxes: [], time: { created: 0, updated: 0 } } }
+    const waiter = yield* store[operation](input).pipe(Effect.exit, Effect.forkScoped)
+    yield* awaitWithTimeout(Effect.promise(() => entered.promise), "startup did not begin")
+    const settled = yield* Effect.promise(web.dispose).pipe(
+      Effect.andThen(Fiber.join(waiter)),
+      Effect.map((exit) => Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)),
+      Effect.timeoutOrElse({ duration: "2 seconds", orElse: () => Effect.succeed(false) }),
+    )
+    expect(settled).toBe(true)
+  }))
+}
 
 testEffect(Layer.empty).live("cancels and re-arms pending bootstrap with isolated services", () =>
   Effect.gen(function* () {

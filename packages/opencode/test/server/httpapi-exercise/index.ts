@@ -2009,6 +2009,9 @@ const main = Effect.gen(function* () {
   const modules = yield* Effect.promise(() => runtime())
   const effectRoutes = routeKeys(OpenApi.fromApi(modules.PublicApi))
   const selected = selectedScenarios(options, scenarios)
+  if (options.mode === "auth" && selected.some((scenario) => scenario.name === "tui.control.next")) {
+    modules.Tui.submitTuiRequest({ path: "/tui/exercise", body: { text: "queued" } })
+  }
   const missing = effectRoutes.filter((route) => !scenarios.some((scenario) => route === routeKey(scenario)))
   const extra = scenarios.filter((scenario) => !effectRoutes.includes(routeKey(scenario)))
 

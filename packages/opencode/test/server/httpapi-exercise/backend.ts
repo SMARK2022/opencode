@@ -18,25 +18,12 @@ export function call(scenario: ActiveScenario, ctx: SeededContext<unknown>, opti
 }
 
 export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" | "valid" = "missing") {
-  return Effect.promise(async () => {
-    const controller = new AbortController()
-    return Promise.race([
-      Promise.resolve(
-        app(await runtime(), { auth: { password: "secret" } }).request(
-          toAuthProbeRequest(scenario, credentials, controller.signal),
-        ),
-      ).then((response) => capture(response, scenario.capture)),
-      Bun.sleep(1_000).then(() => {
-        controller.abort("auth probe timed out")
-        return {
-          status: 0,
-          contentType: "",
-          text: "auth probe timed out",
-          body: undefined,
-          timedOut: true,
-        }
-      }),
-    ])
+  return Effect.promise(async (signal) => {
+    const response = await app(await runtime(), { auth: { password: "secret" } }).request(
+      toAuthProbeRequest(scenario, credentials, signal),
+    )
+    await response.body?.cancel()
+    return response.status
   })
 }
 
@@ -121,7 +108,6 @@ async function capture(response: Response, mode: CaptureMode): Promise<CallResul
     contentType: response.headers.get("content-type") ?? "",
     text,
     body: parse(text),
-    timedOut: false,
   }
 }
 

@@ -73,15 +73,14 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
         return true
       })
 
-    const completeLoad = (directory: string, input: LoadInput, entry: Entry) =>
-      Effect.gen(function* () {
-        // #523：pending bootstrap 与取消信号竞争；取消胜出时以 interrupt 收尾，不再等 boot 完成
-        const exit = yield* Effect.exit(
-          Effect.raceFirst(boot({ ...input, directory }), Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt))),
-        )
+    const start = (directory: string, input: LoadInput, entry: Entry) =>
+      Effect.raceFirst(boot({ ...input, directory }), Deferred.await(entry.cancel).pipe(Effect.andThen(Effect.interrupt)))
+
+    const publish = (directory: string, entry: Entry) =>
+      Effect.onExit((exit: Exit.Exit<InstanceContext>) => Effect.gen(function* () {
         if (Exit.isFailure(exit)) yield* removeEntry(directory, entry)
-        yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)
-      })
+        yield* Deferred.done(entry.deferred, exit)
+      }))
 
     const emitDisposed = (input: { directory: string; project?: string }) =>
       Effect.sync(() =>
@@ -126,8 +125,8 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
           cache.set(directory, entry)
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("creating instance", { directory: directory })
-            yield* completeLoad(directory, input, entry)
-          }).pipe(Effect.forkIn(scope, { startImmediately: true }))
+            return yield* start(directory, input, entry)
+          }).pipe(publish(directory, entry), Effect.forkIn(scope, { startImmediately: true }))
           return yield* restore(Deferred.await(entry.deferred))
         }),
       ).pipe(Effect.withSpan("InstanceStore.load"))
@@ -144,13 +143,15 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
             yield* Effect.logInfo("reloading instance", { directory: directory })
             if (previous) {
               yield* Deferred.await(previous.deferred).pipe(Effect.ignore)
-              yield* Effect.promise(() => runDisposers(directory))
-              // 新context尚未completeLoad；此刻只退休旧实例持有的entry。
-              PromptWindowCache.invalidateInstance(directory)
-              yield* emitDisposed({ directory, project: input.project?.id })
+              // 一旦开始释放旧实例，宿主须等清理和失效通知完成才能关闭。
+              yield* Effect.uninterruptible(Effect.gen(function* () {
+                yield* Effect.promise(() => runDisposers(directory))
+                PromptWindowCache.invalidateInstance(directory)
+                yield* emitDisposed({ directory, project: input.project?.id })
+              }))
             }
-            yield* completeLoad(directory, input, entry)
-          }).pipe(Effect.forkIn(scope, { startImmediately: true }))
+            return yield* start(directory, input, entry)
+          }).pipe(publish(directory, entry), Effect.forkIn(scope, { startImmediately: true }))
           return yield* restore(Deferred.await(entry.deferred))
         }),
       ).pipe(Effect.withSpan("InstanceStore.reload"))

@@ -41,7 +41,6 @@ export type CallResult = {
   contentType: string
   body: unknown
   text: string
-  timedOut: boolean
 }
 
 export type BackendApp = {
