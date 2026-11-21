@@ -247,6 +247,54 @@ test("composite Bun suites run with leak checks through the actual gate", async 
   }
 })
 
+test("gate reports early failures before the output tail and keeps each suite log", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "guard-failure-summary-"))
+  try {
+    expect(Bun.spawnSync(["git", "init", "-q", dir]).exitCode).toBe(0)
+    const pkg = path.join(dir, "packages/function")
+    await Bun.write(
+      path.join(pkg, "package.json"),
+      JSON.stringify({
+        name: "@opencode-ai/function",
+        scripts: { test: "bun test ./unit && bun test ./other" },
+      }),
+    )
+    await Bun.write(
+      path.join(pkg, "unit/sample.test.ts"),
+      `import { test, expect } from "bun:test"
+      test("early case", () => expect(12).toBe(34))
+      test("late case", () => { console.error("x".repeat(9000)); throw new Error("late diagnostic") })`,
+    )
+    await Bun.write(
+      path.join(pkg, "other/sample.test.ts"),
+      'import { test } from "bun:test"; test("other suite", () => { throw new Error("other diagnostic") })',
+    )
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        path.resolve(import.meta.dir, "../gate.ts"),
+        "stop",
+        "--files",
+        "packages/function/unit/sample.test.ts",
+      ],
+      { cwd: dir, env: { ...process.env, GITHUB_ACTIONS: "true", GUARD_LOG_ARTIFACT: "guard-logs-linux" } },
+    )
+    expect(result.exitCode).toBe(1)
+    const output = result.stdout.toString()
+    const summary = output.match(/失败摘要（2 条[^\n]*\n([\s\S]*?)\n原始输出（仅显示末尾 8000 字符）/)?.[1]
+    expect(summary).toMatch(/\(fail\)[^\n]*early case[\s\S]*Expected: 34[\s\S]*Received: 12/)
+    expect(summary).toMatch(/\(fail\)[^\n]*late case[\s\S]*error: late diagnostic/)
+    expect(output).toContain("Artifacts → guard-logs-linux")
+    const logs = Array.from(output.matchAll(/完整日志：([^\r\n]+\.log)/g), (m) => path.resolve(dir, m[1]))
+    expect(new Set(logs).size).toBe(2)
+    const contents = await Promise.all(logs.map((file) => Bun.file(file).text()))
+    expect(contents.some((s) => s.includes("Expected: 34") && s.includes("x".repeat(9000)))).toBe(true)
+    expect(contents.some((s) => s.includes("other diagnostic"))).toBe(true)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test("parallel gates keep their selected test plans isolated and remove temporary plans", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "guard-parallel-test-"))
   try {

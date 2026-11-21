@@ -27,7 +27,7 @@ const here = import.meta.dir
 const ci = process.env.GITHUB_ACTIONS === "true"
 const testsMode = ci ? undefined : process.env.GUARD_TESTS
 const started = performance.now()
-const failures: { title: string; out: string; log: string }[] = []
+const failures: { title: string; out: string; log: string; summary: string[] }[] = []
 const notes: string[] = []
 let waiting = ""
 
@@ -56,7 +56,13 @@ async function step(name: string, detail: string, cmd: string[], opts: StepOptio
   const code = await p.exited
   const state = opts.states?.[code] ?? (code === 0 ? "ok" : "fail")
   task.done(state, opts.progress?.result())
-  if (state === "fail") failures.push({ title: `${name}  ${detail}`, out, log: saveLog(`${name}-${detail}`, out) })
+  if (state === "fail")
+    failures.push({
+      title: `${name}  ${detail}`,
+      out,
+      log: saveLog(`${name}-${detail}`, out),
+      summary: cmd[0] === "bun" && cmd[1] === "test" ? failureSummary(out) : [],
+    })
   // 通过时也转出放行记录，让人看到哪些提交是按 Guard-Allow-Large 放行的
   if (state === "ok")
     for (const l of out.split("\n")) if (l.includes("已按 Guard-Allow-Large 放行")) UI.sub(l.replace(/^ℹ\s*/, ""))
@@ -71,10 +77,37 @@ function saveLog(name: string, text: string) {
     `${name
       .replace(/[^\p{L}\p{N}]+/gu, "-")
       .replace(/^-|-$/g, "")
-      .slice(0, 60)}.log`,
+      .slice(0, 60)}-${failures.length + 1}.log`,
   )
   writeFileSync(file, text)
   return posix(path.relative(repo, file))
+}
+
+function failureSummary(output: string) {
+  const entries: string[] = []
+  let details: string[] = []
+  let frame = ""
+  // Bun 先打印报错，再打印 (fail)；末尾的失败清单会重复用例名。
+  for (const raw of Bun.stripANSI(output).split("\n")) {
+    const line = raw.trim()
+    if (/^\d+ tests? failed:$/.test(line)) break
+    if (line.startsWith("(fail)")) {
+      const context = [...details, frame].filter(Boolean).map((s) => `   ${s}`)
+      entries.push([`${entries.length + 1}. ${line}`, ...context].join("\n"))
+    }
+    if (/^\((fail|pass)\)|^\.+$/.test(line)) {
+      details = []
+      frame = ""
+    } else if (/^(?:[\w.]*error|timeout):/i.test(line)) {
+      details = [line.slice(0, 240)]
+      frame = ""
+    } else if (details.length && details.length < 3 && /^(?:Expected:|Received:|\+\s)/.test(line)) {
+      details.push(line.slice(0, 240))
+    } else if (details.length && !frame && /^at\s/.test(line)) {
+      frame = line.slice(0, 240)
+    }
+  }
+  return entries
 }
 
 const runtimeTs = (f: string) =>
@@ -428,13 +461,22 @@ async function main() {
   for (const n of notes) UI.note(n)
   for (const f of failures) {
     UI.section(f.title)
-    UI.raw(f.out.trim().slice(-8000))
+    const output = f.out.trim()
+    if (f.summary.length) {
+      UI.raw(`失败摘要（${f.summary.length} 条，按出现顺序）`)
+      UI.raw(f.summary.join("\n"))
+    }
+    UI.raw(UI.dim(output.length > 8000 ? "原始输出（仅显示末尾 8000 字符）" : "原始输出（完整）"))
+    UI.raw(output.slice(-8000))
     UI.raw(UI.dim(`完整日志：${f.log}`))
   }
   if (tier === "push" || failures.length || waiting) {
     const ms = performance.now() - started
-    if (failures.length) UI.line("fail", `未通过（${failures.length} 项）`, "", "", ms)
-    else if (waiting) UI.line("wait", "等待 preflight", waiting)
+    if (failures.length) {
+      UI.line("fail", `未通过（${failures.length} 个步骤）`, "", "", ms)
+      if (ci && process.env.GUARD_LOG_ARTIFACT)
+        UI.sub(`上传完成后下载完整日志：本次 Actions 运行 → Summary → Artifacts → ${process.env.GUARD_LOG_ARTIFACT}`)
+    } else if (waiting) UI.line("wait", "等待 preflight", waiting)
     else UI.line("ok", "全部通过", "", "", ms)
   }
   return failures.length || waiting ? 1 : 0

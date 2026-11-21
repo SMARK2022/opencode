@@ -279,6 +279,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      GUARD_LOG_ARTIFACT: guard-logs-${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -301,11 +303,21 @@ jobs:
           rg --version
       # 与本地 pre-push 同一个入口，只是关掉了“再触发 preflight”这一步
       - name: 规则 + 选中测试 + 契约（${{ matrix.os }}）
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }} # 只用来下载覆盖率图（release guard-coverage-map）
           GUARD_PREFLIGHT: "off"
           GUARD_TYPESCRIPT: ${{ github.workspace }}/node_modules/typescript
         run: bun script/guard/gate.ts push --since "${{ needs.plan.outputs.base }}" --sha HEAD
+      - name: 上传门禁失败日志
+        if: failure() && steps.gate.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.GUARD_LOG_ARTIFACT }}
+          path: .git/guard/logs/*.log
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 14
 
   result:
     name: guard-required
