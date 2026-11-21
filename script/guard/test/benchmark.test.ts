@@ -5,7 +5,7 @@ import os from "node:os"
 import { mkdtemp, rm } from "node:fs/promises"
 import {
   judge,
-  mannWhitneyGreater,
+  signedRankP,
   runOnce,
   startRssSampler,
   validateRounds,
@@ -15,6 +15,7 @@ import {
 import { measure, expectScaleInvariant } from "../budget"
 import { assertReply } from "../bench/protocol"
 import { isCompleteBench, renderBenchMarkdown, type BenchResult } from "../report"
+import { SCENARIO_BUDGETS } from "../bench/budgets"
 
 function sample(values: Partial<Sample> = {}): Sample {
   return {
@@ -104,10 +105,11 @@ describe("基准必须完成有效的 A/B 测量", () => {
     expect(() => judge(samples(), samples(), [{ ...budget[0], maxRatio: -1 }])).toThrow("预算")
   })
 
-  test("并列值使用实际置换分布，完全相同的数据 p=1", () => {
-    expect(mannWhitneyGreater([1, 1], [1, 1]).p).toBe(1)
-    expect(mannWhitneyGreater([1, 1], [1, 0]).p).toBe(0.5)
-    expect(mannWhitneyGreater([3, 4], [1, 2]).p).toBeCloseTo(1 / 6)
+  test("配对检验：零差剔除、并列平均秩、单侧精确概率", () => {
+    expect(signedRankP([1, 1], [1, 1])).toBe(1)
+    expect(signedRankP([1, 1], [1, 0])).toBe(0.5)
+    expect(signedRankP([3, 4], [1, 2])).toBe(0.25)
+    expect(signedRankP([3, 2], [2, 3])).toBe(0.75)
   })
 
   test("负内存增量仍按变差方向比较，失败率保留小数精度", () => {
@@ -122,13 +124,15 @@ describe("基准必须完成有效的 A/B 测量", () => {
   })
 
   test("轮数与场景参数错误在启动被测应用前返回 2", () => {
-    for (const rounds of [0, 3, NaN, 4.5, 51]) expect(() => validateRounds(rounds)).toThrow("轮数")
-    expect(() => validateRounds(4)).not.toThrow()
+    for (const rounds of [0, 4, NaN, 4.5, 51]) expect(() => validateRounds(rounds)).toThrow("轮数")
+    expect(() => validateRounds(5)).not.toThrow()
     for (const args of [
       ["--rounds", "0"],
       ["--rounds", "NaN"],
       ["--only", "typo"],
       ["--only", ","],
+      ["--group", "typo"],
+      ["--group", "basic", "--only", "list"],
       ["--sessions", "0"],
       ["--head", `missing-${crypto.randomUUID()}`],
     ]) {
@@ -145,10 +149,10 @@ test("实际场景失败、超时和信号退出均失败并释放进程", async
     const target: Target = {
       label: "fixture",
       healthPath: "/health",
-      start: (port) => {
-        proc = Bun.spawn([process.execPath, "-e", `Bun.serve({port:${port},fetch:()=>new Response('ok')})`], {
-          stdout: "ignore",
-          stderr: "pipe",
+      start: () => {
+        proc = Bun.spawn([process.execPath, "-e", `const s = Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response("ok")}); console.log("opencode server listening on http://127.0.0.1:"+s.port)`], {
+          stdout: "pipe",
+          stderr: "inherit",
         })
         return proc
       },
@@ -180,10 +184,10 @@ test("进程采样失败阻断测量并关闭被测进程", async () => {
       {
         label: "unavailable metrics",
         healthPath: "/health",
-        start: (port) => {
-          proc = Bun.spawn([process.execPath, "-e", `Bun.serve({port:${port},fetch:()=>new Response('ok')})`], {
-            stdout: "ignore",
-            stderr: "pipe",
+        start: () => {
+          proc = Bun.spawn([process.execPath, "-e", `const s = Bun.serve({hostname:"127.0.0.1",port:0,fetch:()=>new Response("ok")}); console.log("opencode server listening on http://127.0.0.1:"+s.port)`], {
+            stdout: "pipe",
+            stderr: "inherit",
           })
           return proc
         },
@@ -210,7 +214,7 @@ test("RSS 采样串行执行，停止等待在途读取并传播采样失败", a
   const stop = startRssSampler(1, 0, async () => {
     calls++
     maximum = Math.max(maximum, ++active)
-    if (calls === 1) {
+    if (calls === 2) {
       ready.resolve()
       await release.promise
     }
@@ -323,17 +327,24 @@ describe("基准报告的完成状态", () => {
   test("看板复用只接受完整指标和成功场景", () => {
     const value = {
       scenarios: Object.fromEntries(
-        ["list", "open", "stream", "abort"].map((name) => [
+        Object.keys(SCENARIO_BUDGETS).map((name) => [
           name,
           {
-            head: sample(),
-            base: sample(),
+            head: { ...sample(), ...Object.fromEntries(SCENARIO_BUDGETS[name].map((b) => [b.metric, 0])) },
+            base: { ...sample(), ...Object.fromEntries(SCENARIO_BUDGETS[name].map((b) => [b.metric, 0])) },
             regressed: [] as string[],
           },
         ]),
       ),
     }
     expect(isCompleteBench(value)).toBe(true)
+    const { tui, ...measured } = value.scenarios
+    const partial = { scenarios: measured, unavailable: { tui: "base 缺少 TUI 驱动接口" } }
+    expect(isCompleteBench(partial)).toBe(true)
+    expect(isCompleteBench({ scenarios: measured })).toBe(false)
+    expect(isCompleteBench({ ...partial, unavailable: { tui: "" } })).toBe(false)
+    expect(isCompleteBench({ ...partial, scenarios: { ...measured, tui } })).toBe(false)
+    expect(isCompleteBench({ ...partial, error: "head 失败" })).toBe(false)
     expect(isCompleteBench({ scenarios: {} })).toBe(false)
     expect(isCompleteBench({ scenarios: { list: value.scenarios.list } })).toBe(false)
     expect(isCompleteBench({ ...value, error: "failed" })).toBe(false)

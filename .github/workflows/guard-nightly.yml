@@ -105,3 +105,10 @@ jobs:
           [ -f bench.json ] && args+=(--bench bench.json)
           bun script/guard/report.ts publish "${args[@]}"
           bash script/guard/site.sh push "$RUNNER_TEMP/site" "nightly $(git rev-parse --short HEAD)"
+
+  logs:
+    needs: [coverage-map, trend]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/guard-logs.yml

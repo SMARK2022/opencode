@@ -1,0 +1,97 @@
+import { mock, test } from "bun:test"
+import { Effect } from "effect"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { Global } from "@opencode-ai/core/global"
+import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { BaseRenderable, ScrollBoxRenderable } from "@opentui/core"
+import { createTestRenderer } from "@opentui/core/testing"
+import { createTuiResolvedConfig } from "./fixture/tui-runtime"
+
+test("measure real session frames", async () => {
+  const env = process.env
+  const ui = await createTestRenderer({ width: 120, height: 40, useThread: false })
+  const core = await import("@opentui/core")
+  await mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => ui.renderer }))
+  const { run } = await import("../src/app")
+  let api: TuiPluginApi | undefined
+  const start = performance.now()
+  const app = Effect.runPromise(run({
+    url: env.BENCH_URL!, directory: env.BENCH_DIR!, args: { sessionID: env.BENCH_SESSION! },
+    config: createTuiResolvedConfig({ plugin_enabled: {} }),
+    pluginHost: { async start(input) { api = input.api }, async dispose() {} },
+  }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))))
+  const deadline = start + 35_000
+  const frame = async (samples?: number[]) => {
+    if (performance.now() > deadline || ui.renderer.isDestroyed) throw new Error("TUI 未到达目标画面")
+    const t = performance.now()
+    await ui.renderOnce()
+    samples?.push(performance.now() - t)
+    return ui.captureCharFrame()
+  }
+  const until = async (text: string) => {
+    while (!(await frame()).includes(text)) await Bun.sleep(1)
+    return performance.now() - start
+  }
+  try {
+    const tuiFirstPaintMs = await until(env.BENCH_TITLE!)
+    const tuiFullMs = await until(env.BENCH_TAIL!)
+    const scroll: number[] = []
+    const findViewport = (node: BaseRenderable): ScrollBoxRenderable | undefined => {
+      if (node instanceof core.ScrollBoxRenderable && node.stickyStart === "bottom" && node.stickyScroll) return node
+      for (const child of node.getChildren()) {
+        const match = findViewport(child)
+        if (match) return match
+      }
+    }
+    const viewport = findViewport(ui.renderer.root)
+    if (!viewport) throw new Error("未找到会话消息视口")
+    for (let i = 0; i < 30; i++) {
+      const before = viewport.scrollTop
+      const count = scroll.length
+      const painted = () => {
+        if (scroll.length !== count || viewport.scrollTop >= before) return
+        // FRAME 在原生提交之后发出；即使让步时已经自动绘制，也取那次翻页帧，而不是下一次空闲帧。
+        scroll.push(ui.renderer.getNativeStats().nativeLastFrameTime / 1000)
+      }
+      ui.renderer.on(core.CliRenderEvents.FRAME, painted)
+      try {
+        api!.keymap.dispatchCommand("session.page.up")
+        await Bun.sleep(0)
+        if (scroll.length === count) await frame()
+        if (scroll.length === count) throw new Error(`第 ${i + 1} 次翻页没有绘制移动后的视口`)
+      } finally {
+        ui.renderer.off(core.CliRenderEvents.FRAME, painted)
+      }
+    }
+    api!.keymap.dispatchCommand("session.last")
+    await until(env.BENCH_TAIL!)
+    await ui.mockInput.typeText("bench:tui-live")
+    ui.mockInput.pressEnter()
+    const stream: number[] = []
+    const probe = "~Q7~"
+    let pressed: number | undefined
+    let tuiInputMs: number | undefined
+    for (;;) {
+      const progress = await (await fetch(env.BENCH_CLOCK!)).json() as number
+      if (progress >= 0.35 && progress < 1 && pressed === undefined) {
+        pressed = performance.now()
+        await ui.mockInput.typeText(probe)
+      }
+      const text = await frame(progress >= 0 ? stream : undefined)
+      if (pressed !== undefined && tuiInputMs === undefined && text.includes(probe)) tuiInputMs = performance.now() - pressed
+      if (stream.length && progress < 0) break
+      await Bun.sleep(16)
+    }
+    if (tuiInputMs === undefined || stream.length < 2) throw new Error("未采集到流式输入和帧")
+    const p95 = (s: number[]) => s.toSorted((a, b) => a - b)[Math.ceil(s.length * 0.95) - 1]
+    await Bun.write(env.BENCH_OUT!, JSON.stringify({ tuiFirstPaintMs, tuiFullMs, tuiInputMs,
+      scrollFrameP95Ms: p95(scroll), scrollFrameMaxMs: Math.max(...scroll),
+      streamFrameP95Ms: p95(stream), streamFrameMaxMs: Math.max(...stream) }))
+  } finally {
+    if (api) api.keymap.dispatchCommand("app.exit")
+    else process.emit("SIGHUP")
+    await app
+    if (!ui.renderer.isDestroyed) ui.renderer.destroy()
+    mock.restore()
+  }
+})

@@ -71,6 +71,8 @@ test("主线补丁、包级输入与全局输入共用一个计划", () => {
   const repo = path.resolve(import.meta.dir, "../../..")
   const patch = guardPlan(["patches/@opentui%2Fcore@0.4.3-smark.13.patch"], repo)
   expect(patch.bench).toBe(true)
+  expect(guardPlan(["script/guard/bench/harness.ts"]).bench).toBe(true)
+  expect(guardPlan(["script/guard/README.md"]).bench).toBe(false)
   expect(patch.full("tui")).toBe(true)
   expect(patch.suite("packages/app/x.test.ts")).toBe(false)
   const preload = guardPlan(["packages/opencode/test/preload.ts"])

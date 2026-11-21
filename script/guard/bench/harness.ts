@@ -16,9 +16,16 @@ export type Sample = {
   rssGrowthMb: number // 场景结束时相对开始时的常驻内存增量
   crashed: number // 场景期间进程退出 = 1
 }
-export type Target = { label: string; start: (port: number) => Bun.Subprocess; healthPath: string }
+export type Target = {
+  label: string
+  prepare?: () => void
+  release?: () => Promise<void>
+  start: () => Bun.Subprocess
+  healthPath: string
+}
 type ProcessMetrics = { rssMb: (pid: number) => Promise<number>; cpuMs: (pid: number) => Promise<number> }
-export type Measurement = Sample & { error?: string }
+export type Measurement = Sample & { error?: string; extra?: Record<string, number> }
+export type Scenario<T extends Target> = (base: string, target: T) => Promise<void | Record<string, number>>
 export const METRICS: (keyof Sample)[] = [
   "startupMs",
   "wallMs",
@@ -33,6 +40,42 @@ export const METRICS: (keyof Sample)[] = [
   "rssGrowthMb",
   "crashed",
 ]
+
+// 服务自己绑定端口；只接受该进程发布的回环地址，不能误探另一个进程。
+export async function listening(proc: Bun.Subprocess, timeoutMs = 60_000) {
+  const stream = proc.stdout
+  if (!(stream instanceof ReadableStream)) throw new Error("启动协议需要 stdout 管道")
+  const ready = Promise.withResolvers<string>()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let announced = false
+  const timer = setTimeout(() => ready.reject(new Error("等待服务监听地址超时")), timeoutMs)
+  void stream.pipeTo(new WritableStream({
+    write(bytes) {
+      process.stdout.write(bytes)
+      if (announced) return
+      buffer += decoder.decode(bytes, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop()!
+      for (const line of lines) {
+        const url = /^opencode server listening on (http:\/\/127\.0\.0\.1:\d+)$/.exec(line.trim())?.[1]
+        if (url) {
+          announced = true
+          ready.resolve(url)
+          return
+        }
+      }
+    },
+    async close() {
+      if (!announced) ready.reject(new Error(`进程未发布监听地址，退出码 ${await proc.exited}；见 stderr`))
+    },
+  })).catch(ready.reject)
+  try {
+    return await ready.promise
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 export async function waitHealthy(url: string, timeoutMs = 60_000, proc?: Bun.Subprocess) {
   const t0 = performance.now()
@@ -134,30 +177,27 @@ export function startRssSampler(pid: number, intervalMs = 50, read = readRssMb) 
   })().catch((cause: unknown) => {
     error = cause instanceof Error ? cause : new Error(String(cause))
   })
-  let completed: Promise<number> | undefined
-  return () =>
-    (completed ??= (async () => {
-      stop = true
-      await loop
-      if (error) throw error
-      peak = Math.max(peak, await read(pid))
-      return peak
-    })())
+  return async () => {
+    stop = true
+    await loop
+    if (error) throw error
+    return peak
+  }
 }
 
-export async function runOnce(
-  target: Target,
-  scenario: (base: string) => Promise<void>,
+export async function runOnce<T extends Target>(
+  target: T,
+  scenario: Scenario<T>,
   timeoutMs = 60_000,
   metrics: ProcessMetrics = { rssMb: readRssMb, cpuMs: readCpuMs },
 ): Promise<Measurement> {
-  const port = 20000 + Math.floor(Math.random() * 20000)
+  target.prepare?.()
   const t0 = performance.now()
-  const proc = target.start(port)
-  const base = `http://127.0.0.1:${port}`
+  const proc = target.start()
   let stopRss: ReturnType<typeof startRssSampler> | undefined
   let stopProbe: ReturnType<typeof startProbe> | undefined
   try {
+    const base = await listening(proc)
     const startupMs = await waitHealthy(base + target.healthPath, 60_000, proc).then(() => performance.now() - t0)
     const rss0 = await metrics.rssMb(proc.pid)
     const cpu0 = await metrics.cpuMs(proc.pid)
@@ -171,31 +211,39 @@ export async function runOnce(
     stopProbe = startProbe(base + target.healthPath)
     const s0 = performance.now()
     let error: string | undefined
+    let extra: Record<string, number> | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
     const expired = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`场景超过 ${timeoutMs}ms`)), timeoutMs)
     })
     try {
-      await Promise.race([scenario(base), expired]).catch((e) => (error = e instanceof Error ? e.message : String(e)))
+      extra = (await Promise.race([scenario(base, target), expired])) || undefined
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause)
     } finally {
       clearTimeout(timer)
     }
     const wallMs = performance.now() - s0
-    const block = await stopProbe()
+    const running = proc.exitCode === null && proc.signalCode === null
+    const [cpu1, rss1, peak, block] = await Promise.all([
+      running ? metrics.cpuMs(proc.pid) : 0,
+      running ? metrics.rssMb(proc.pid) : 0,
+      stopRss(),
+      stopProbe(),
+    ])
     const crashed = proc.exitCode !== null || proc.signalCode !== null ? 1 : 0
-    const cpuMs = crashed ? 0 : (await metrics.cpuMs(proc.pid)) - cpu0
-    const rss1 = crashed ? 0 : await metrics.rssMb(proc.pid)
     return {
+      extra,
       startupMs,
       wallMs,
-      cpuMs,
+      cpuMs: crashed ? 0 : cpu1 - cpu0,
       maxBlockMs: block.max,
       p50Ms: block.p50,
       p95Ms: block.p95,
       p99Ms: block.p99,
       probeErrorRate: block.errorRate,
       maxOutageMs: block.maxOutage,
-      peakRssMb: await stopRss(),
+      peakRssMb: Math.max(rss0, peak, rss1),
       rssGrowthMb: crashed ? 0 : rss1 - rss0,
       crashed,
       error: crashed ? `场景期间进程退出（${proc.exitCode ?? proc.signalCode}）` : error,
@@ -206,6 +254,7 @@ export async function runOnce(
       await stopRss?.()
     } finally {
       await stopTarget(proc)
+      await target.release?.()
     }
   }
 }
@@ -221,46 +270,45 @@ export async function stopTarget(proc: Bun.Subprocess) {
 }
 
 // 交替执行 A、B（ABBA），抵消机器负载的漂移
-export async function abRun(a: Target, b: Target, scenario: (base: string) => Promise<void>, rounds: number) {
+export async function abRun<T extends Target>(a: T, b: T, scenario: Scenario<T>, rounds: number, offset = 0) {
   validateRounds(rounds)
   if (a.label === b.label) throw new Error("A/B 目标必须使用不同的名称")
   const res: Record<string, Measurement[]> = { [a.label]: [], [b.label]: [] }
   for (let i = 0; i < rounds; i++)
-    for (const t of i % 2 ? [b, a] : [a, b]) res[t.label].push(await runOnce(t, scenario))
+    for (const t of (i + offset) % 2 ? [b, a] : [a, b]) res[t.label].push(await runOnce(t, scenario))
   return res
 }
 
-// Mann-Whitney U，单侧：head 是否显著大于 base（精确分布，适合小样本）
-export function mannWhitneyGreater(head: number[], base: number[]) {
-  if (!head.length || !base.length || [...head, ...base].some((x) => !Number.isFinite(x)))
-    throw new Error("Mann-Whitney 需要两组有限数值样本")
-  let u = 0
-  for (const x of head) for (const y of base) u += x > y ? 1 : x === y ? 0.5 : 0
-  const sorted = [...head, ...base].toSorted((a, b) => a - b)
-  const ranks: number[] = []
-  for (let first = 0; first < sorted.length; ) {
-    let end = first + 1
-    while (end < sorted.length && sorted[end] === sorted[first]) end++
-    for (let i = first; i < end; i++) ranks.push(first + end + 1)
-    first = end
+// 单侧配对 Wilcoxon：零差剔除，并列绝对差取平均秩；按符号翻转求精确尾概率。
+export function signedRankP(head: number[], base: number[]) {
+  if (!head.length || head.length !== base.length) throw new Error("A/B 配对样本数不一致")
+  const delta = head.map((v, i) => v - base[i])
+  if (delta.some((v) => !Number.isFinite(v))) throw new Error("配对差值必须有限")
+  const sorted = delta.filter((v) => v !== 0).sort((a, b) => Math.abs(a) - Math.abs(b))
+  const ways = [1]
+  let observed = 0
+  for (let i = 0; i < sorted.length; ) {
+    let j = i + 1
+    while (j < sorted.length && Math.abs(sorted[j]) === Math.abs(sorted[i])) j++
+    const rank = i + j + 1 // 两倍秩，避免半整数下标
+    for (; i < j; i++) {
+      if (sorted[i] > 0) observed += rank
+      for (let s = ways.length - 1; s >= 0; s--)
+        if (ways[s]) ways[s + rank] = (ways[s + rank] ?? 0) + ways[s]
+    }
   }
-  // 两倍平均秩保持整数；按观测值的实际并列秩求置换分布。
-  const ways = Array.from({ length: head.length + 1 }, () => new Map<number, number>())
-  ways[0].set(0, 1)
-  for (const [i, rank] of ranks.entries()) {
-    for (let n = Math.min(head.length, i + 1); n > 0; n--)
-      for (const [sum, count] of ways[n - 1]) ways[n].set(sum + rank, (ways[n].get(sum + rank) ?? 0) + count)
-  }
-  const dist = ways[head.length]
-  const observed = 2 * u + head.length * (head.length + 1)
-  const total = [...dist.values()].reduce((s, v) => s + v, 0)
-  const tail = [...dist].filter(([k]) => k >= observed).reduce((s, [, v]) => s + v, 0)
-  return { u, p: tail / total }
+  return ways.slice(observed).reduce((sum, n) => sum + n, 0) / 2 ** sorted.length
 }
 
 export const median = (xs: number[]) => xs.toSorted((a, b) => a - b)[Math.floor(xs.length / 2)] ?? 0
 
-export type Budget = { metric: keyof Sample; maxRatio: number; minAbs: number }
+export type Budget = { metric: string; maxRatio: number; minAbs: number }
+export function valueOf(s: Measurement, metric: string): number {
+  if (METRICS.includes(metric as keyof Sample)) return s[metric as keyof Sample]
+  const v = s.extra?.[metric]
+  if (v === undefined || !Number.isFinite(v) || v < 0) throw new Error(`缺少有效指标：${metric}`)
+  return v
+}
 export type Verdict = {
   metric: string
   base: number
@@ -272,18 +320,18 @@ export type Verdict = {
 
 // 退化 = 中位数变差超过 maxRatio，且超过绝对噪声下限 minAbs，且统计显著；head 任何一次崩溃直接判退化
 export function validateRounds(rounds: number) {
-  if (!Number.isInteger(rounds) || rounds < 4 || rounds > 50)
-    throw new Error("A/B 轮数必须为 4–50 的整数；少于 4 轮无法达到单侧 p < 0.05")
+  if (!Number.isInteger(rounds) || rounds < 5 || rounds > 50)
+    throw new Error("A/B 轮数必须为 5–50 的整数；少于 5 对无法达到单侧 p < 0.05")
 }
 
 export function judge(head: Measurement[], base: Measurement[], budgets: Budget[]): Verdict[] {
-  validateRounds(head.length)
+  if (!head.length) throw new Error("轮数为零")
   if (head.length !== base.length) throw new Error("A/B 样本数不一致")
   if (!budgets.length || new Set(budgets.map((b) => b.metric)).size !== budgets.length)
     throw new Error("性能预算必须非空且指标唯一")
   for (const b of budgets)
     if (
-      !METRICS.includes(b.metric) ||
+      !b.metric ||
       !Number.isFinite(b.maxRatio) ||
       b.maxRatio < 0 ||
       !Number.isFinite(b.minAbs) ||
@@ -305,12 +353,13 @@ export function judge(head: Measurement[], base: Measurement[], budgets: Budget[
         throw new Error(`${label} 第 ${i + 1} 轮未完成：${s.error ?? "进程退出"}`)
     }
   }
-  const out: Verdict[] = budgets.map((b) => {
-    const h = head.map((s) => s[b.metric])
-    const o = base.map((s) => s[b.metric])
+  const crashes = head.filter((s) => s.crashed).length
+  const out: Verdict[] = (crashes ? [] : budgets).map((b) => {
+    const h = head.map((s) => valueOf(s, b.metric))
+    const o = base.map((s) => valueOf(s, b.metric))
     const mh = median(h)
     const mo = median(o)
-    const { p } = mannWhitneyGreater(h, o)
+    const p = signedRankP(h, o)
     const regressed = mh - mo > Math.abs(mo) * b.maxRatio && mh - mo > b.minAbs && p < 0.05
     const digits = b.metric === "probeErrorRate" ? 4 : 1
     return {
@@ -322,7 +371,6 @@ export function judge(head: Measurement[], base: Measurement[], budgets: Budget[
       regressed,
     }
   })
-  const crashes = head.filter((s) => s.crashed).length
   out.push({
     metric: "crashed",
     base: base.filter((s) => s.crashed).length,

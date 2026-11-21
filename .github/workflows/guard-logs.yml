@@ -1,0 +1,27 @@
+name: guard-logs
+on: workflow_call
+
+jobs:
+  archive:
+    name: Archive original job logs
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Download this attempt's completed job logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir logs
+          api="repos/$GITHUB_REPOSITORY/actions"
+          gh api --paginate "$api/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.status == "completed" and .conclusion != "skipped") | [.id, .name] | @tsv' > logs/jobs.tsv
+          while IFS=$'\t' read -r id name; do
+            gh api "$api/jobs/$id/logs" > "logs/$id.log" || echo "::warning::Log unavailable for job $id"
+          done < logs/jobs.tsv
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: guard-raw-logs-${{ github.run_attempt }}
+          path: logs/
+          retention-days: 14

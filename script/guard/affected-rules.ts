@@ -140,8 +140,8 @@ export function guardPlan(files: string[], repo = process.cwd(), requested?: str
     full,
     sensitive,
     platforms,
-    // 主线运行时代码和影响它的依赖补丁触发性能基准。
-    bench: affected.size > 0 || files.some((f) => RUNTIME_SOURCE.test(f)),
+    // 基准自身、主线运行时代码和影响它的依赖补丁触发性能基准。
+    bench: affected.size > 0 || files.some((f) => f.startsWith("script/guard/bench/") || RUNTIME_SOURCE.test(f)),
     suite: (f: string) => RUNTIME.test(f) && !f.includes("/e2e/"),
     stopContracts: contracts.filter((p) =>
       files.some((f) => f.startsWith("script/guard/") || f.startsWith("packages/" + p + "/")),
