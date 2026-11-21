@@ -1041,11 +1041,23 @@ export function Session() {
     } else if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
   }
 
+  // 会话路由拥有两个入口的延迟贴底；卸载后不能再滚动新的会话。
+  const pendingSessionOpenScroll = new Set<ReturnType<typeof setTimeout>>()
+  let sessionOpenScrollDisposed = false
+  onCleanup(() => {
+    sessionOpenScrollDisposed = true
+    for (const handle of pendingSessionOpenScroll) clearTimeout(handle)
+    pendingSessionOpenScroll.clear()
+  })
+
   function scheduleSessionOpenScroll(respectUserScroll = false) {
-    setTimeout(() => {
+    if (sessionOpenScrollDisposed) return
+    const handle = setTimeout(() => {
+      pendingSessionOpenScroll.delete(handle)
       if (!scroll || scroll.isDestroyed) return
       applySessionOpenScroll(respectUserScroll)
     }, 50)
+    pendingSessionOpenScroll.add(handle)
   }
 
 

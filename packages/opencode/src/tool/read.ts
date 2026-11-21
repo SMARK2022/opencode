@@ -9,7 +9,7 @@ import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
 import { readOutlineCached, type Outline } from "./read-outline"
 // page 和 outline 共用预算与解析器，不重复扫描完整尾部。
-import { createAuxiliaryBudget, readTextPage } from "@opencode-ai/core/tool/read-lines"
+import { createAuxiliaryBudget, readTextPage, type ReadPage } from "@opencode-ai/core/tool/read-lines"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
@@ -98,9 +98,39 @@ function isBlockedDevicePath(filePath: string): boolean {
 // }
 
 // 估算内容 token 数量，按文件类型使用不同的 byte/token 比率
-function estimateTokensForContent(content: string, ext: string): number {
+function estimateTokensForContent(utf8Bytes: number, ext: string): number {
   const ratio = TOKEN_BYTE_RATIOS[ext] ?? TOKEN_BYTE_RATIOS.default
-  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
+  return Math.ceil(utf8Bytes * ratio)
+}
+
+function readPageContent(file: ReadPage, limit: number, ext: string): Effect.Effect<string, Error> {
+  if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
+    return Effect.fail(
+      new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
+    )
+  }
+
+  // 首行无法交付时，按行光标无法向前，继续返回原偏移会重复同一页。
+  if (limit > 0 && file.raw.length === 0 && file.cut && file.more) {
+    return Effect.fail(new Error("Cannot return the full first requested line within the read budget."))
+  }
+
+  // Token 预算验证 - 根据文件类型估算 token 数
+  const content = file.raw.join("\n")
+  // 准入只放宽首行捕获；以最终 UTF-8 正文为准的整页检查仍然保留。
+  const estimatedTokens = estimateTokensForContent(Buffer.byteLength(content, "utf-8"), ext)
+  if (estimatedTokens > MAX_CONTENT_TOKENS) {
+    const lineCount = file.count
+    // 按比例计算建议 limit，帮助用户分批读取大文件
+    const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
+    return Effect.fail(
+      new Error(
+        `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
+          `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
+      ),
+    )
+  }
+  return Effect.succeed(content)
 }
 
 function findUnexpandedFileInContext(
@@ -557,35 +587,20 @@ export const ReadTool = Tool.define<
 
       // 每次 execute 仅创建一个预算；Effect 中断同时关闭底层 Node 流。
       const auxiliaryBudget = createAuxiliaryBudget()
+      const ext = path.extname(filepath).toLowerCase().slice(1)
+      const limit = params.limit ?? DEFAULT_READ_LIMIT
       const file = yield* Effect.promise((signal) =>
         readTextPage(filepath, {
-          limit: params.limit ?? DEFAULT_READ_LIMIT,
+          limit,
+          // 首行与整页共用现有 token 估算，避免引入第二套可接受上限。
+          firstLineAdmitsBytes: (bytes) => estimateTokensForContent(bytes, ext) <= MAX_CONTENT_TOKENS,
           offset: params.offset || 1,
           budget: auxiliaryBudget,
           signal,
         }),
       )
-      if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
-        return yield* Effect.fail(
-          new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
-        )
-      }
-
-      // Token 预算验证 - 根据文件类型估算 token 数
-      const content = file.raw.join("\n")
-      const ext = path.extname(filepath).toLowerCase().slice(1)
-      const estimatedTokens = estimateTokensForContent(content, ext)
-      if (estimatedTokens > MAX_CONTENT_TOKENS) {
-        const lineCount = file.count
-        // 按比例计算建议 limit，帮助用户分批读取大文件
-        const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
-        return yield* Effect.fail(
-          new Error(
-            `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
-              `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
-          ),
-        )
-      }
+      // 先验证正文是否可交付，再构造已读区间，避免不可交付的页成为去重证据。
+      const content = yield* readPageContent(file, limit, ext)
 
       // #142：构造当前读区间元数据供 stub/overlap
       // #142：当前文件 size

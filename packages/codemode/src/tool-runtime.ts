@@ -328,7 +328,8 @@ export const copyOut = (value: unknown, undefinedAsNull = false): unknown => {
     return null
   }
   if (Array.isArray(value)) {
-    return value.map((item) => copyOut(item, undefinedAsNull))
+    // JSON 结果以 null 表示空槽；宿主参数仍需保留空槽，供原生数组方法跳过。
+    return undefinedAsNull ? Array.from(value, (item) => copyOut(item, true)) : value.map((item) => copyOut(item))
   }
 
   if (value !== null && typeof value === "object" && !(value instanceof ToolReference)) {

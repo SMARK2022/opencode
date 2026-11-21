@@ -148,3 +148,119 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
          return;
        }
        if (this.isDestroyed)
+@@ -7222,7 +7238,7 @@
+   targetFrameTime = 1000 / this._targetFps;
+   minTargetFrameTime = 1000 / this._maxFps;
+   immediateRerenderRequested = false;
+-  updateScheduled = false;
++  activation = null;
+   liveRequestCounter = 0;
+   _controlState = "idle" /* IDLE */;
+   frameCallbacks = [];
+@@ -7756,7 +7772,8 @@
+     this.scheduleRenderTimer();
+   }
+   requestRender() {
+-    if (this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
++    // 子树在销毁期间仍会请求刷新，但此 renderer 已不能取得新帧。
++    if (this._isDestroyed || this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
+       return;
+     }
+     if (this.feedIdleRenderScheduled) {
+@@ -7775,27 +7792,36 @@
+       this.immediateRerenderRequested = true;
+       return;
+     }
+-    if (!this.updateScheduled && !this.renderTimeout) {
+-      this.updateScheduled = true;
++    if (!this.activation && !this.renderTimeout) {
++      // 一次帧身份和句柄一起保留，启动接替或挂起可以撤销旧帧。
++      const activation = { timeout: null };
++      this.activation = activation;
+       const now = this.normalizeClockTime(this.clock.now(), this.lastTime);
+       const elapsed = this.getElapsedMs(now, this.lastTime);
+       const delay = Math.max(this.minTargetFrameTime - elapsed, 0);
+       if (delay === 0) {
+-        process.nextTick(() => this.activateFrame());
++        process.nextTick(() => this.activateFrame(activation));
+         return;
+       }
+-      this.clock.setTimeout(() => this.activateFrame(), delay);
++      activation.timeout = this.clock.setTimeout(() => this.activateFrame(activation), delay);
+     }
+   }
+-  async activateFrame() {
+-    if (!this.updateScheduled) {
++  cancelActivation() {
++    const activation = this.activation;
++    this.activation = null;
++    if (activation?.timeout != null) this.clock.clearTimeout(activation.timeout);
++  }
++  async activateFrame(activation) {
++    if (this.activation !== activation) {
+       this.resolveIdleIfNeeded();
+       return;
+     }
++    activation.timeout = null;
+     try {
+       await this.loop();
+     } finally {
+-      this.updateScheduled = false;
++      // 在途帧只结算自己的记录；恢复后可能已经安排下一帧。
++      if (this.activation === activation) this.activation = null;
+       this.resolveIdleIfNeeded();
+     }
+   }
+@@ -7816,7 +7842,7 @@
+   isIdleNow() {
+     if (this._isDestroyed)
+       return true;
+-    return !this._isRunning && !this.rendering && !this.renderTimeout && !this.updateScheduled && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
++    return !this._isRunning && !this.rendering && !this.renderTimeout && !this.activation && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
+   }
+   resolveIdleIfNeeded() {
+     if (!this.isIdleNow())
+@@ -7839,7 +7865,7 @@
+     return {
+       isRunning: this._isRunning,
+       isRendering: this.rendering,
+-      hasScheduledRender: Boolean(this.renderTimeout || this.updateScheduled || this.immediateRerenderRequested)
++      hasScheduledRender: Boolean(this.renderTimeout || this.activation || this.immediateRerenderRequested)
+     };
+   }
+   get resolution() {
+@@ -9546,7 +9572,7 @@
+   internalStart() {
+     if (!this._isRunning && !this._isDestroyed) {
+       this._isRunning = true;
+-      this.updateScheduled = false;
++      this.cancelActivation();
+       if (this.memorySnapshotInterval > 0) {
+         this.startMemorySnapshotTimer();
+       }
+@@ -9560,7 +9586,7 @@
+   suspend() {
+     this._previousControlState = this._controlState;
+     this._controlState = "explicit_suspended" /* EXPLICIT_SUSPENDED */;
+-    this.updateScheduled = false;
++    this.cancelActivation();
+     this.internalPause();
+     if (this._terminalIsSetup) {
+       this.clearSplitStartupCursorSeed();
+@@ -9694,6 +9720,7 @@
+       this.clock.clearTimeout(this.renderTimeout);
+       this.renderTimeout = null;
+     }
++    this.cancelActivation();
+     this.themeModeState.cancelRefresh();
+     this._isRunning = false;
+     this.waitingForPixelResolution = false;
+@@ -9831,7 +9858,7 @@
+   async loop() {
+     if (this.rendering || this._isDestroyed)
+       return;
+-    this.renderTimeout = null;
++    // 手工帧接替现有连续帧时，必须先保留原句柄供清除。
+     this.rendering = true;
+     if (this.renderTimeout) {
+       this.clock.clearTimeout(this.renderTimeout);

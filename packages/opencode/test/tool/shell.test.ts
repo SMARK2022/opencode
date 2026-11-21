@@ -2651,6 +2651,13 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(0)
+        // 空 stdout 仍是空值；显示占位符不应成为脚本接收的正文。
+        expect(result.program?.value).toMatchObject({
+          content: "",
+          exit: 0,
+          truncated: false,
+          timedOut: false,
+        })
         expect(result.output).toContain("(no output)")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="info" reason="exit" exit_code="0"',
@@ -2696,6 +2703,12 @@ describe("tool.shell abort", () => {
         })
 
         expect(result.metadata.exit).toBe(7)
+        expect(result.program?.value).toMatchObject({
+          content: "plain output\n",
+          exit: 7,
+          truncated: false,
+          timedOut: false,
+        })
         expect(result.output).toContain("plain output")
         expect(result.output).toContain(
           '<opencode_notice type="execution" source="shell" severity="error" reason="exit" exit_code="7"',

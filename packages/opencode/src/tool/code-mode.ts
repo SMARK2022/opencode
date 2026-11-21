@@ -68,6 +68,10 @@ export const makeExecutionBudget = Effect.gen(function* () {
   return { wait, pause }
 })
 
+// 预跑与正式执行使用同一配额，每次调用由解释器根分别计数。
+const MAX_TOOL_CALLS = 1_024
+const MAX_LOOP_ITERATIONS = 100_000
+
 export const CODE_MODE_TOOL = "execute"
 
 export const Parameters = Schema.Struct({
@@ -159,7 +163,7 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
   const tree: Record<string, Record<string, import("@opencode-ai/codemode").Tool.Definition>> = {}
   for (const entry of catalog) {
     const namespace = (tree[entry.path[0]] ??= {})
-    namespace[entry.path[1]] = sandbox.Tool.make({
+    const definition = sandbox.Tool.make({
       description: entry.description,
       // 沿用 V1 原 JSON Schema 签名适配：对象原样透传，真实输入校验仍由工具拥有。
       input: entry.inputSchema as import("@opencode-ai/codemode").Tool.JsonSchema,
@@ -176,6 +180,8 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
           }),
         ),
     })
+    // 目录只展示公开字段，快捷形式仍沿用实际输入合同。
+    namespace[entry.path[1]] = { ...definition, inputContract: definition.input }
   }
   return tree
 })
@@ -289,7 +295,12 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           tools,
           environment: lease.environment,
           // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
-          limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
+          limits: {
+            timeoutMs: params.timeout ?? 600000,
+            maxToolCalls: MAX_TOOL_CALLS,
+            maxLoopIterations: MAX_LOOP_ITERATIONS,
+            maxLogBytes: outputLimits.maxBytes,
+          },
           fetch: host.fetch,
           waitForTimeout: host.waitForTimeout,
           onToolCallStart: ({ index, name, input }) =>
@@ -349,7 +360,12 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             snapshotEnvironment: true,
             // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
             sleep: () => Effect.void,
-            limits: { timeoutMs: 500, maxToolCalls: 1024, maxLogBytes: outputLimits.maxBytes },
+            limits: {
+              timeoutMs: 500,
+              maxToolCalls: MAX_TOOL_CALLS,
+              maxLoopIterations: MAX_LOOP_ITERATIONS,
+              maxLogBytes: outputLimits.maxBytes,
+            },
             // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
             fetch: host.fetch
               ? (url, init) =>
