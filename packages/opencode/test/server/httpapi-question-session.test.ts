@@ -39,10 +39,11 @@ function withHarness<A, E, R>(use: (input: {
     // 同一 MemoMap 同时供 typed HTTP 和直接服务调用使用，这是证明 daemon pending 身份一致的关键。
     const shared = HttpApiApp.createSharedServices()
     const app = yield* Layer.buildWithMemoMap(shared.layer, shared.memoMap, yield* Scope.Scope)
-    const handler = HttpRouter.toWebHandler(HttpApiApp.createRoutes(undefined, undefined, shared), {
+    const web = HttpRouter.toWebHandler(HttpApiApp.createRoutes(undefined, undefined, shared), {
       disableLogger: true,
       memoMap: shared.memoMap,
-    }).handler
+    })
+    yield* Effect.addFinalizer(() => Effect.promise(() => web.dispose()))
     const directory = yield* tmpdirScoped({ git: true })
     const instance = yield* InstanceStore.Service.use((svc) => svc.load({ directory })).pipe(Effect.provide(app))
     // 直接服务调用只补 InstanceRef；其余服务由 harness 边界统一提供，避免泛型依赖被错误吞掉。
@@ -51,7 +52,7 @@ function withHarness<A, E, R>(use: (input: {
     // viewer header 刻意指向当前测试目录；Session-ID 路由必须在此基础上继续解析请求归属。
     const request = (path: string, init?: RequestInit) =>
       Effect.promise(() =>
-        handler(
+        web.handler(
           new Request(`http://localhost${path}`, {
             ...init,
             headers: { "x-opencode-directory": directory, "content-type": "application/json", ...init?.headers },

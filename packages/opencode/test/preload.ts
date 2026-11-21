@@ -11,7 +11,10 @@ import { markPluginDependenciesReady } from "./fixture/plugin"
 const dir = path.join(os.tmpdir(), "opencode-test-data-" + process.pid)
 await fs.mkdir(dir, { recursive: true })
 afterAll(async () => {
+  // 默认 HTTP 服务持有独立的作用域，关闭实例不会释放它的后台任务。
+  const { HttpApiApp } = await import("../src/server/routes/instance/httpapi/server")
   const { AppRuntime } = await import("../src/effect/app-runtime")
+  await HttpApiApp.webHandler().dispose()
   await AppRuntime.dispose()
 
   const busy = (error: unknown) =>
