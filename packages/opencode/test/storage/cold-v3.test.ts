@@ -298,7 +298,12 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
       let changed = false
       // 首个 Part 批次由 checkpoint 武装；本次写入后不再接受后续 checkpoint。
       let partLeaseChecks = -1
-      const update = () => {
+      const beforeWrite = () => {
+        if (action === "cancel") {
+          controller.abort()
+          changed = true
+          return
+        }
         // 活跃写只修改 Session，保留原 Part 快照以单独验证提交时的资格复核。
         if (action === "activity") {
           database.sync.update(SessionTable).set({ time_updated: Date.now() }).where(eq(SessionTable.id, session.id)).run()
@@ -356,7 +361,7 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
               lease: {
                 assertOwned() {
                   // Part 首次检查进入读取；第二次确认已完成真实编码、尚未开启写事务。
-                  if (partLeaseChecks >= 0 && partLeaseChecks < 2 && ++partLeaseChecks === 2) update()
+                  if (partLeaseChecks >= 0 && partLeaseChecks < 2 && ++partLeaseChecks === 2) beforeWrite()
                 },
               },
               signal: controller.signal,
@@ -371,25 +376,14 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
                   task.cursor.lastID
                 )
                   return
-                if (action === "update" || action === "activity") {
+                if (action !== "delete") {
                   if (partLeaseChecks === -1) partLeaseChecks = 0
                   return
                 }
-                // 保留删除与取消原来的异步触发；两种写前重验夹具由 lease 单独接管。
+                // 删除仍在异步窗口触发；取消在编码完成后的写前检查触发。
                 mutation = setTimeout(() => {
                   changed = true
-                  if (action === "cancel") {
-                    // 取消复用真实AbortSignal，已算出的结果应在写入前被放弃。
-                    controller.abort()
-                    return
-                  }
-                  // 定时器只在同步SQL段之间执行；直接使用本例已绑定的同一连接，不读全局DB。
-                  const db = database.sync
-                    if (action === "delete") {
-                      // 真正删除行，能捕获把旧快照误当成upsert输入的回归。
-                      db.delete(PartTable).where(eq(PartTable.id, value.id)).run()
-                      return
-                    }
+                  database.sync.delete(PartTable).where(eq(PartTable.id, value.id)).run()
                 }, 0)
               },
             },
