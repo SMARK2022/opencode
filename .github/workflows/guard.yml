@@ -1,6 +1,6 @@
 name: guard
 # 机械门禁的 CI 侧：plan 根据改动决定测试平台和是否运行 A/B 基准。
-#   pull_request      第三方 PR 不依赖本地 hook。用目标分支的规则与基线检查，保留审批和置顶评论。
+#   pull_request      第三方 PR 不依赖本地 hook。用目标分支的规则与基线检查，保留大提交明示与置顶评论。
 #   workflow_dispatch 本地 pre-push 固定待推送的 SHA 和比较基准，在线上运行该计划。
 #   push dev1-smark   规则与契约仍验证；相同输入已有成功 preflight 时，复用平台测试和基准结果。
 #
@@ -11,7 +11,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('preflight base
 on:
   pull_request:
     branches: [dev1-smark]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened] # 标签不改 HEAD，不取消正在运行的 Guard。
   push:
     branches: [dev1-smark]
   workflow_dispatch:
@@ -110,7 +110,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      pull-requests: read # 读取 PR 的 approve，用于放行超出改动规模的提交
+      pull-requests: read # 读 PR 评论里的仓主大提交明示
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -145,13 +145,33 @@ jobs:
         run: |
           extra=()
           if [ "$MODE" = pr ]; then
-            # PR 不认提交信息里的放行标记（第三方 Agent 可以随便写）；超出改动规模时，需要维护者 approve 后点 Re-run
             extra+=(--no-trailer)
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" --paginate --slurp > "$RUNNER_TEMP/guard-reviews.json"
-            approved=$(jq --arg head "$PR_HEAD" \
-              '[.[][] | select(.state != "COMMENTED")] | group_by(.user.id) | map(sort_by(.submitted_at) | last) | [.[] | select(.state == "APPROVED" and .commit_id == $head and (.author_association == "OWNER" or .author_association == "MEMBER"))] | length' \
-              "$RUNNER_TEMP/guard-reviews.json")
-            [ "${approved:-0}" -gt 0 ] && extra+=(--allow-large)
+            if [ -n "$PR_HEAD" ] && [ "$(git rev-parse --verify HEAD^2 2>/dev/null)" = "$PR_HEAD" ]; then
+              if jq -e --arg head "$PR_HEAD" '
+                select(.repository.owner.type == "User" and .repository.owner.id != null and .repository.owner.id == .sender.id and .pull_request.head.sha == $head)
+                | (.action == "opened" or .action == "synchronize" or .action == "reopened")
+                  and .pull_request.user.id == .sender.id and .repository.id != null and .pull_request.head.repo.id == .repository.id
+              ' "$GITHUB_EVENT_PATH" >/dev/null; then
+                extra=()
+              else
+                owner_id=$(jq -r --arg head "$PR_HEAD" 'select(.pull_request.head.sha == $head) | .repository.owner.id // empty' "$GITHUB_EVENT_PATH")
+                if [ -n "$owner_id" ] && [ -n "$PR" ]; then
+                  gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" -f repo="${GITHUB_REPOSITORY#*/}" -F pr="$PR" -f query='query($owner: String!, $repo: String!, $pr: Int!, $endCursor: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $pr) { comments(first: 100, after: $endCursor) {
+                          nodes { body author { ... on User { databaseId } } editor { __typename } lastEditedAt }
+                          pageInfo { hasNextPage endCursor }
+                        } }
+                      } }' > "$RUNNER_TEMP/guard-comments.json"
+                  allowed=$(jq --argjson owner "$owner_id" --arg mark "Guard-Allow-Large: $PR_HEAD" '
+                    [.[] | if .errors then error("GitHub comments query failed") else .data.repository.pullRequest.comments.nodes[] end
+                      | select(.author.databaseId == $owner and has("lastEditedAt") and .lastEditedAt == null
+                        and has("editor") and .editor == null and .body == $mark)] | length
+                  ' "$RUNNER_TEMP/guard-comments.json")
+                  [ "$allowed" -gt 0 ] && extra+=(--allow-large)
+                fi
+              fi
+            fi
           elif git cat-file -e "$BASE:script/guard/baseline.json" 2>/dev/null; then
             git show "$BASE:script/guard/baseline.json" > "$RUNNER_TEMP/prev-baseline.json"
             extra+=(--previous-baseline "$RUNNER_TEMP/prev-baseline.json")
