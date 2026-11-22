@@ -12,7 +12,7 @@ import { TuiConfigProvider } from "../../../src/config"
 import { ThemeProvider } from "../../../src/context/theme"
 import { RouteProvider } from "../../../src/context/route"
 import { BlockTool, context } from "../../../src/routes/session"
-import { createSignal } from "solid-js"
+import { createSignal, onMount } from "solid-js"
 
 // preview存在性检查不能弃用刚构造的树；快照隔离其他测试遗留节点，只检查本次新增对象。
 // 排空正常延迟销毁后沿父链查root，保留源测试的永久脱树泄漏判据。
@@ -21,7 +21,24 @@ const stateDir = path.join(tmpdir(), `blocktool-preview-kv-${randomUUID()}`)
 await mkdir(stateDir, { recursive: true })
 await writeFile(path.join(stateDir, "kv.json"), "{}")
 
-function PreviewCard(props: { text: string }) {
+function PreviewContent(props: { text: string; onReady: () => void }) {
+  // 预览子树可能在存在性检查中被弃用，挂载通知由外层测试组件发出。
+  onMount(props.onReady)
+  return (
+    <BlockTool
+      title="bash"
+      autoReview={false}
+      // 固定超阈值尺寸让预览在首帧真实挂载，泄漏检查不再依赖调用方条件预览。
+      totalLines={30}
+      totalChars={1000}
+      preview={<text>{props.text}</text>}
+    >
+      <text>{`${props.text}\napplied`}</text>
+    </BlockTool>
+  )
+}
+
+function PreviewCard(props: { text: string; onReady: () => void }) {
   // 真实响应式 store 保证容器 use() 合同与生产 Session 一致。
   const [interaction, setInteraction] = createSignal<Record<string, boolean>>({})
   const value = {
@@ -38,16 +55,7 @@ function PreviewCard(props: { text: string }) {
             <ThemeProvider mode="dark" source={{ discover: async () => ({}) }}>
               <RouteProvider>
                 <context.Provider value={value}>
-                  <BlockTool
-                    title="bash"
-                    autoReview={false}
-                    // 固定超阈值尺寸让预览在首帧真实挂载，泄漏检查不再依赖调用方条件预览。
-                    totalLines={30}
-                    totalChars={1000}
-                    preview={<text>{props.text}</text>}
-                  >
-                    <text>{`${props.text}\napplied`}</text>
-                  </BlockTool>
+                  <PreviewContent text={props.text} onReady={props.onReady} />
                 </context.Provider>
               </RouteProvider>
             </ThemeProvider>
@@ -60,10 +68,11 @@ function PreviewCard(props: { text: string }) {
 
 test("preview card mounts without leaking discarded preview tree", async () => {
   const before = new Set((Renderable as { renderablesByNumber: Map<number, unknown> }).renderablesByNumber.keys())
-  const app = await testRender(() => <PreviewCard text="$ patch preview" />, { width: 60, height: 40, useThread: false })
+  const ready = Promise.withResolvers<void>()
+  const app = await testRender(() => <PreviewCard text="$ patch preview" onReady={ready.resolve} />, { width: 60, height: 40, useThread: false })
   try {
-    // Provider 初始化（KV/主题）需要沉淀——与 block-tool-visible-once 同款 100ms。
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // 帧等待只观察 renderer；异步 provider 尚未挂载时还没有帧可等。
+    await ready.promise
     await app.waitForFrame((frame) => frame.includes("patch preview"))
     // 预览可见且正文未挂载的帧证明检查覆盖的是容器 previewTree，而非另一份临时节点。
     expect(app.captureCharFrame()).toContain("Click to expand")
@@ -87,6 +96,8 @@ test("preview card mounts without leaking discarded preview tree", async () => {
     // 任何被存在性检查弃用的 preview 树都会沿父链无法回到 root，在这里直接暴露。
     expect(detached).toEqual([])
   } finally {
+    // 递归销毁会重新请求渲染，先暂停可阻止卸载产生新的帧计时器。
+    app.renderer.suspend()
     app.renderer.destroy()
     // 预览只有一棵树；Provider卸载后其真实native根也应退休。
     expect(app.renderer.root.isDestroyed).toBe(true)

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -10,6 +10,7 @@ import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session
 import { eq } from "drizzle-orm"
 import { drizzle } from "drizzle-orm/bun-sqlite"
 import { Effect, Option } from "effect"
+import { Statement } from "effect/unstable/sql"
 import { Session as SessionNs } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
@@ -637,13 +638,37 @@ describe("MessageV2.stream", () => {
       Effect.gen(function* () {
         const ids = yield* fill(sessionID, 60)
 
-        let heartbeat = false
-        setTimeout(() => { heartbeat = true }, 0) // 两页 hot rows 之间必须执行真实宏任务，而非仅依赖 Effect 微任务调度。
-        const items = yield* MessageV2.stream(sessionID)
-        expect(heartbeat).toBe(true) // 移除页间 Bun.sleep(0) 后，该回调只能在完整读取结束后运行。
-        expect(items).toHaveLength(60)
-        expect(items[0].info.id).toBe(ids[ids.length - 1])
-        expect(items[59].info.id).toBe(ids[0])
+        const pages: boolean[] = []
+        let yielded = false
+        const sleep = Bun.sleep
+        const items = yield* Effect.acquireUseRelease(
+          Effect.sync(() =>
+            spyOn(Bun, "sleep").mockImplementation((duration) => {
+              const pending = sleep(duration)
+              if (duration !== 0 || pages.length !== 1) return pending
+              // 记录原主机等待的完成，调用开始时第二页还不能读取。
+              return pending.then(() => {
+                yielded = true
+              })
+            }),
+          ),
+          () =>
+            MessageV2.stream(sessionID).pipe(
+              Effect.provideService(Statement.CurrentTransformer, (stmt) => {
+                const [sql] = stmt.compile()
+                // 仅记录带排序和上限的消息页查询，原 SQL 照常执行。
+                if (/from "message".*order by.*limit/i.test(sql)) pages.push(yielded)
+                return Effect.succeed(stmt)
+              }),
+            ),
+          // 在 Effect 中断时也恢复共享的 Bun 方法，避免污染下一例。
+          (spy) => Effect.sync(() => spy.mockRestore()),
+        )
+        expect(items.map((item) => item.info.id)).toEqual(ids.toReversed())
+        expect(items.map((item) => item.parts[0])).toEqual(
+          ids.toReversed().map((_, i) => expect.objectContaining({ type: "text", text: `m${ids.length - i - 1}` })),
+        )
+        expect(pages).toEqual([false, true])
       }),
     ),
   )

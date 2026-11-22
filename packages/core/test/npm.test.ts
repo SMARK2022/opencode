@@ -158,7 +158,12 @@ describe("Npm.install", () => {
     await writePackage(path.join(tmp.path, "prod-pkg"), { name: "prod-pkg" })
     await writePackage(path.join(tmp.path, "dev-pkg"), { name: "dev-pkg" })
 
-    await Npm.install(tmp.path)
+    // 配置夹具拥有此次安装的作用域，进程级入口会留下跨测试的日志资源。
+    await Npm.Service.use((npm) => npm.install(tmp.path)).pipe(
+      Effect.scoped,
+      Effect.provide(npmLayer(path.join(tmp.path, "cache"))),
+      Effect.runPromise,
+    )
 
     await expect(fs.stat(path.join(tmp.path, "node_modules", "prod-pkg"))).resolves.toBeDefined()
     await expect(fs.stat(path.join(tmp.path, "node_modules", "dev-pkg"))).rejects.toThrow()
