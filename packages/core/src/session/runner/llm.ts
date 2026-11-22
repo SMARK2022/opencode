@@ -10,7 +10,7 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { Cause, DateTime, Effect, Fiber, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
 import { and, asc, desc, eq, isNotNull, lte, or } from "drizzle-orm"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
@@ -583,17 +583,24 @@ const layer = Layer.effect(
             ).pipe(FiberSet.run(toolFibers))
           }),
         ),
-        // 对整个消费 Effect 计一次总期限，不能用会被 chunks 重置的 Stream.timeout。
-        (effect) => model.timeout === false ? effect : Effect.timeoutOrElse(effect, {
-          // 原生provider turn与AISDK使用相同的十分钟缺省总期限。
-          duration: model.timeout ?? 600_000,
-          // 只创建本次到期的运输错误；原 provider cause 与既有 flush/助手/用量结算保持。
-          orElse: () => Effect.fail(new LLMError({
-            module: "SessionRunner",
-            method: "stream",
-            reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
-          })),
-        }),
+        (effect) => {
+          const timeout = model.timeout
+          if (timeout === false) return effect
+          return Effect.scoped(Effect.gen(function* () {
+            // 先把整段消费的期限挂到作用域，取消时无需等竞速分支完成注册。
+            const deadline = yield* Effect.forkScoped(
+              // 默认十分钟与 AISDK 对齐；流式分片不重置这次总期限。
+              Effect.sleep(timeout ?? 600_000).pipe(
+                Effect.andThen(Effect.suspend(() => Effect.fail(new LLMError({
+                  module: "SessionRunner",
+                  method: "stream",
+                  reason: new TransportReason({ message: "Provider request timed out", kind: "timeout" }),
+                })))),
+              ),
+            )
+            return yield* Effect.raceFirst(effect, Fiber.join(deadline))
+          }))
+        },
         // 成功 EOF 保留默认残片通知；只有失败/中断 cleanup 使用退出安全模式。
         Effect.onExit(exit => withPublication(publisher.flush(exit._tag === "Failure"))),
         )
