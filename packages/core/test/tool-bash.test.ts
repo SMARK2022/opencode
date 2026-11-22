@@ -908,12 +908,14 @@ describe("BashTool", () => {
     ),
   )
 
-  it.live("retains raw Bash output through canonical settlement and bounds diagnostic frames", () =>
+  const executable = () => `${Shell.ps(Shell.acceptable()) ? "& " : ""}"${process.execPath}"`
+  const raw = "repeat payload with meaningful width\n".repeat(400)
+
+  it.live("bounds diagnostic frames and verifies visible Bash output compression", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => Effect.gen(function* () {
         // 同一测试观察真实 chunk、CRLF 跨块和末帧收尾，不用复制分帧算法当 oracle。
-        const executable = `${Shell.ps(Shell.acceptable()) ? "& " : ""}"${process.execPath}"`
         const diag = new BashDiagnosticCollector()
         for (let i = 0; i < 100; i++) diag.push("x".repeat(8192))
         diag.push("\r")
@@ -1142,7 +1144,6 @@ describe("BashTool", () => {
           }))
         }
         // 收益针对原始窗口，false 与不合算候选都必须原样通过，不能误报节省。
-        const raw = "repeat payload with meaningful width\n".repeat(400)
         const compressed = compressVisibleOutput(raw, { enabled: true })
         expect(compressed.stats.applied).toBe(true)
         expect(compressed.stats.savingRatio).toBe(compressed.stats.savedBytes / Buffer.byteLength(raw))
@@ -1190,10 +1191,19 @@ describe("BashTool", () => {
         expect(renderDiagnosticAppendix(snapshot, { durationMs: 3000, exitCode: 1, visibleOutput: "error: split diagnostic" })).not.toContain("opencode_excerpt")
         expect(compressed.stats.repeatedLineGroups).toBe(1)
         expect(compressed.stats.compressedBytes).toBe(Buffer.byteLength(compressed.text))
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("retains raw Bash output across compression modes and stream decoding", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
         // 三种覆盖都经过 Core Bash、AppProcess 和 registry/store，不能只测试纯转换器。
         for (const mode of ["default", "parameter", "config"] as const) {
           reset()
-          const command = `${executable} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
+          const command = `${executable()} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(400))"`
           yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
             expect((yield* toolDefinitions(registry))[0]?.description.includes("Short harness markers")).toBe(mode !== "config")
             const settled = yield* settleTool(registry, call({ command, ...(mode === "parameter" ? { compress_output: false } : {}) }))
@@ -1217,7 +1227,7 @@ describe("BashTool", () => {
         reset()
         const stdoutClixml = '<Objs><S S="Output">actual-stdout</S></Objs>'
         const stderrClixml = '<Objs><S S="Error">actual-stderr</S></Objs>'
-        const clixmlCommand = `${executable} -e "process.stdout.write(String.fromCharCode(${Array.from(stdoutClixml, (char) => char.charCodeAt(0)).join(",")}));process.stderr.write(String.fromCharCode(${Array.from(stderrClixml, (char) => char.charCodeAt(0)).join(",")}))"`
+        const clixmlCommand = `${executable()} -e "process.stdout.write(String.fromCharCode(${Array.from(stdoutClixml, (char) => char.charCodeAt(0)).join(",")}));process.stderr.write(String.fromCharCode(${Array.from(stderrClixml, (char) => char.charCodeAt(0)).join(",")}))"`
         yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
           const settled = yield* settleTool(registry, call({ command: clixmlCommand }))
           const text = settled.output?.content.filter((part) => part.type === "text").map((part) => part.text).join("") ?? ""
@@ -1231,9 +1241,18 @@ describe("BashTool", () => {
           expect(saved).toContain(stdoutClixml)
           expect(saved).toContain(stderrClixml)
         }), LayerNode.compile(AppProcess.node))
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("preserves full raw files and visible tails when Bash output exceeds capture limits", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
         // 无 LF 的尾部超过 capture 上限，诊断仍看全流，磁盘原文不能只保存内存前缀。
         reset()
-        const command = `${executable} -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`
+        const command = `${executable()} -e "process.stdout.write('x'.repeat(${BashTool.MAX_CAPTURE_BYTES + 8192})+'RAW-END')"`
         yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
           const settled = yield* settleTool(registry, call({ command, compress_output: false }))
           expect(settled.output?.structured).toMatchObject({ truncated: true, diagnosticDiscardedChars: BashTool.MAX_CAPTURE_BYTES + 8192 + 7 - 4096 })
@@ -1251,7 +1270,7 @@ describe("BashTool", () => {
         // 淘汰穿过中文多字节字符时仍保留最终普通结果，不以raw文件代替模型可见性。
         reset()
         const unicode = "中".repeat(Math.ceil(BashTool.MAX_CAPTURE_BYTES / 3) + 100) + "终结-END"
-        const unicodeCommand = `${executable} -e "process.stdout.write('中'.repeat(${Math.ceil(BashTool.MAX_CAPTURE_BYTES / 3) + 100})+'终结-END')"`
+        const unicodeCommand = `${executable()} -e "process.stdout.write('中'.repeat(${Math.ceil(BashTool.MAX_CAPTURE_BYTES / 3) + 100})+'终结-END')"`
         yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
           const settled = yield* settleTool(registry, call({ command: unicodeCommand, compress_output: false }))
           const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
@@ -1265,7 +1284,7 @@ describe("BashTool", () => {
         // 滚动窗口仍进入原压缩器，最终构建结果和压缩收益必须同时可见。
         reset()
         const repeated = "repeat payload with meaningful width\n".repeat(40000) + "BUILD-COMPLETE\n"
-        const repeatedCommand = `${executable} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(40000)+'BUILD-COMPLETE\\n')"`
+        const repeatedCommand = `${executable()} -e "process.stdout.write('repeat payload with meaningful width\\n'.repeat(40000)+'BUILD-COMPLETE\\n')"`
         yield* withTool(tmp.path, (registry) => Effect.gen(function* () {
           const settled = yield* settleTool(registry, call({ command: repeatedCommand }))
           const text = settled.output?.content.filter(part => part.type === "text").map(part => part.text).join("") ?? ""
@@ -1275,6 +1294,15 @@ describe("BashTool", () => {
           if (!retained) throw new Error("expected retained compressed tail")
           expect(yield* Effect.promise(() => fs.readFile(retained, "utf8"))).toBe(repeated)
         }), LayerNode.compile(AppProcess.node))
+      }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("preserves published Bash diagnostics when a later capture cannot be stored", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.gen(function* () {
         // 正文恰好占满字节预算，中间错误会被最终状态与恢复标记挤出 head/tail。
         reset()
         // 每行连同换行固定85字节，使根因始终位于当前预算中部，最后再补齐不足一行的字节。
@@ -1324,7 +1352,7 @@ describe("BashTool", () => {
             Effect.tapError((error) => Effect.sync(() => observed.push(error))),
           ) })
         })).pipe(Layer.provide(LayerNode.compile(AppProcess.node)))
-        const failedCommand = `${executable} -e "process.stdout.write('x'.repeat(${ToolOutputStore.MAX_BYTES + 1}))"`
+        const failedCommand = `${executable()} -e "process.stdout.write('x'.repeat(${ToolOutputStore.MAX_BYTES + 1}))"`
         // 前面已发布的日志仍属于恢复数据，失败收尾只删除本次未发布文件。
         const directory = path.join(tmp.path, ToolOutputStore.MANAGED_DIRECTORY)
         const retainedBefore = yield* Effect.promise(() => fs.readdir(directory))
