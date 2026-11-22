@@ -65,6 +65,7 @@
     "fuzzysort": "catalog:",
     "gray-matter": "4.0.3",
     "jsonc-parser": "3.3.1",
+    "lovely-mermaid": "0.3.3",
     "opentui-spinner": "catalog:",
     "remeda": "catalog:",
     "strip-ansi": "7.1.2",

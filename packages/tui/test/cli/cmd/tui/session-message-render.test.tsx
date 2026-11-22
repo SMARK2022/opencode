@@ -267,13 +267,13 @@ test("execute renders its child summary without a duplicate child tool row", asy
 
 test("legacy message rail continues through internal gaps and breaks between messages", async () => {
   const first = { ...assistant("msg_legacy_parts", 1), finish: "tool-calls" }
-  const second = { ...assistant("msg_legacy_next", 2), finish: "tool-calls" }
+  const second = { ...assistant("msg_legacy_next", 2), finish: "tool-calls", time: { created: 2 } }
   await withRenderedSession([first, second], {
     [first.id]: [textPart("part_legacy_text", first.id, "Legacy text"),
       completedToolPart("part_legacy_read", first.id, "read", { filePath: "alpha.ts" }),
       completedToolPart("part_legacy_grep", first.id, "grep", { pattern: "needle" }, { matches: 1 })],
     [second.id]: [textPart("part_legacy_next", second.id, "Next message")],
-  }, async (app) => {
+  }, async (app, emit, ctx) => {
     await waitForFrame(app, (frame) => frame.includes('Grep "needle"') && frame.includes("Next message"))
     // 旧版帧的内部空行带消息线；单行连续工具紧排，跨消息的空行留在边框外。
     // 原生 text 的 padding 不额外占列，预期图标位置采用旧 JSX 实测值，避免凭属性重复加宽。
@@ -283,7 +283,37 @@ test("legacy message rail continues through internal gaps and breaks between mes
     expect(messageFrame(app, second.id)).toEqual(["┃   Next message"])
     const next = messageRoot(app, second.id)
     expect(app.captureCharFrame().split("\n")[next.screenY - 1].slice(next.screenX, next.screenX + next.width).trim()).toBe("")
-  }, { width: 100, height: 24 })
+    // 用同一正文 Part 收到真实更新；闭合前的源文也必须出现在用户帧中。
+    const part = (text: string) => textPart("part_legacy_next", second.id, text)
+    const prefix = "Next message **普通** Price $20.\n\n"
+    const diagram = "flowchart LR\nA[Start] --> B[End]"
+    const open = prefix + "```mermaid\n" + diagram
+    emit(partUpdatedEvent("evt_legacy_rich_open", part(open)))
+    const openFrame = await waitForFrame(app, (frame) => frame.includes("A[Start] --> B[End]"))
+    // 金额与数学分隔符共享美元符号，普通金额必须留在同一富文本路径中。
+    expect(openFrame).toContain("普通 Price $20.")
+    expect(openFrame).not.toContain("├───▶")
+    // 尾标证明最后一片已进入现有渲染路径；随后检查原文确已换成图和排版公式。
+    emit(partUpdatedEvent("evt_legacy_rich_close", part(open + "\n```\n\nFormula $x^2$\n\nRICH_SESSION_END")))
+    const closedFrame = await waitForFrame(app, (frame) => frame.includes("RICH_SESSION_END"))
+    expect(closedFrame).toContain("普通 Price $20.")
+    expect(closedFrame).toContain("Next message")
+    expect(closedFrame).toContain("│ Start ├───▶│ End │")
+    expect(closedFrame).not.toContain("A[Start] --> B[End]")
+    expect(closedFrame).toContain("Formula x²")
+    // 处理器先保存最终正文，再公布完成时间；流式尾块在此边界之前必须完成排版。
+    emit({
+      directory, project: "proj_test",
+      payload: { id: "evt_legacy_rich_complete", type: "message.updated", properties: {
+        sessionID: second.sessionID, info: { ...second, finish: "stop", time: { created: 2, completed: 3 } },
+      } },
+    })
+    const terminal = await waitForFrame(app, () => ctx.sync.data.message[sid]?.some(
+      (message) => message.id === second.id && message.role === "assistant" && !!message.time.completed,
+    ) === true)
+    expect(terminal).toContain("│ Start ├───▶│ End │")
+    expect(terminal).toContain("Formula x²")
+  }, { width: 100, height: 30 })
 })
 
 test("legacy message first visible spacing follows hidden tools and partial searches live", async () => {
