@@ -321,8 +321,28 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
         changed = true
       }
       let ticks = 0
-      // 这里只验证事件循环仍有调度机会，tick数量不是压缩吞吐基准。
-      const timer = setInterval(() => ticks++, 1)
+      // 其余变体保留原主线程调度观察；更新例只认实际 Part 编码的宿主回执。
+      const timer = action === "update" ? undefined : setInterval(() => ticks++, 1)
+      const postMessage = Worker.prototype.postMessage
+      let partReply = false
+      let detach: (() => void) | undefined
+      if (action === "update") {
+        Worker.prototype.postMessage = function (this: Worker, ...args: Parameters<typeof postMessage>) {
+          const [request] = args
+          // 首次 Part lease 后才接受 pack，避免前序 Message 编码替本例通过。
+          if (!detach && partLeaseChecks === 1 && request?.op === "pack" && request.input?.owner === "part") {
+            const reply = (message: { id: number; error?: string }) => {
+              if (message.id !== request.id) return
+              partReply = this.threadId > 0 && message.error === undefined
+              this.off("message", reply)
+            }
+            // 先于现有回执处理记证，观察时原维护仍未结算。
+            this.prependListener("message", reply)
+            detach = () => this.off("message", reply)
+          }
+          return Reflect.apply(postMessage, this, args)
+        }
+      }
       try {
         const result = yield* Effect.promise(() =>
           runMaintenance(database,
@@ -378,10 +398,14 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
         expect(result.type === "task" && result.task.status).toBe(action === "cancel" ? "interrupted" : "completed")
       } finally {
         // 清理调度器，使共享测试进程中的下一条用例不接收本条的延迟写入。
-        clearInterval(timer)
+        if (timer) clearInterval(timer)
+        // Worker 原型由同进程其他测试共享，失败也须还原入口并撤掉本例监听。
+        if (action === "update") Worker.prototype.postMessage = postMessage
+        detach?.()
         if (mutation) clearTimeout(mutation)
       }
-      expect(ticks).toBeGreaterThan(0)
+      if (action === "update") expect(partReply).toBe(true)
+      else expect(ticks).toBeGreaterThan(0)
       if (action !== "preserve") {
         expect(changed).toBe(true)
         const row = yield* withDb((db) => db.select().from(PartTable).where(eq(PartTable.id, value.id)).get())
