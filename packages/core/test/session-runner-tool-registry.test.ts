@@ -322,13 +322,16 @@ describe("ToolRegistry", () => {
       let constructions = 0
       let fastCloses = 0
       let healthy = false
-      // id=1 建立完整连接，id=2 永久挂起，构造部分成功后被中断的真实连接池。
+      // id=1 建立完整连接，id=2 等待传输关闭，构造部分成功后被中断的真实连接池。
       class MemoryClient extends Client {
         id = ++constructions
-        override async connect(..._args: Parameters<Client["connect"]>) {
+        override async connect(...[transport]: Parameters<Client["connect"]>) {
           if (this.id === 2) {
+            const { promise, reject } = Promise.withResolvers<never>()
+            // 在就绪前接上关闭回调，让生产中断结算这次合成握手。
+            transport.onclose = () => reject(new Error("Fixture transport closed"))
             await Effect.runPromise(Deferred.succeed(hangingStarted, undefined))
-            return new Promise<never>(() => {})
+            return promise
           }
           const pair = InMemoryTransport.createLinkedPair()
           await server.connect(pair[1])
@@ -441,15 +444,17 @@ describe("ToolRegistry", () => {
       expect((yield* pending.startAuth("pending")).authorizationUrl).toContain("/authorize")
 
       const hangingStarted = yield* Deferred.make<void>()
+      const hangingConnect = Promise.withResolvers<never>()
       class HangingClient extends Client {
         override async connect(..._args: Parameters<Client["connect"]>) {
-          // 永久挂起让状态 generation 保持未完成，才能覆盖失败后直接 dispose。
           await Effect.runPromise(Deferred.succeed(hangingStarted, undefined))
-          return new Promise<never>(() => {})
+          return hangingConnect.promise
         }
       }
       // 失败 owner 使用独立 Scope，避免测试宿主把成功与失败 finalizer 混在一起。
       const failedScope = yield* Scope.make()
+      // 合成握手挂起到失败 owner 收尾，随后由持有该 Promise 的夹具结算。
+      yield* Scope.addFinalizer(failedScope, Effect.sync(() => hangingConnect.reject(new Error("Fixture scope closed"))))
       const failed = yield* McpConnection.make({
         directory: process.cwd(),
         Client: HangingClient,

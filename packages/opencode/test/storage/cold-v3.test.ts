@@ -56,23 +56,39 @@ test("cold reader decodes and validates payloads off the calling thread", async 
   const raw = Buffer.from(ColdCodec.canonical({
     version: 1,
     owner: "message",
-    fields: { text: "cold reader payload ".repeat(200_000) }, // 大字段让同步解码期间的定时器差异具备可观察性。
+    fields: { text: "cold reader payload ".repeat(200_000) },
   }))
   const payload = Bun.zstdCompressSync(raw) // 使用真实 zstd 帧，而不是伪造 Worker 返回值。
-  let heartbeat = false // Worker 解码完成前，主线程定时器必须先得到执行。
-  setTimeout(() => { heartbeat = true }, 0)
+  const hash = ColdCodec.digest("message", raw)
+  const postMessage = Worker.prototype.postMessage
+  let detach: (() => void) | undefined
+  let offThread = false
+  Worker.prototype.postMessage = function (this: Worker, ...args: Parameters<typeof postMessage>) {
+    const [request] = args
+    // 老测试的 timer 只能证明主线程调度；配对这个冷包的请求与回复才能证明离线程。
+    if (request?.op === "decode" && request.input?.owner === "message" && request.input.payload?.hash === hash) {
+      // 同一个 Worker 可以承接其他读取；只接受本次 id 的回执。
+      const reply = (message: { id: number }) => {
+        if (message.id !== request.id) return
+        offThread = this.threadId > 0
+        this.off("message", reply)
+      }
+      // 在发送前登记，避免快速回复先于测试观察点。
+      this.on("message", reply)
+      detach = () => this.off("message", reply)
+    }
+    // 原 transfer list 仍交给真实 Worker，测试不替换解码。
+    return Reflect.apply(postMessage, this, args)
+  }
   const result = await ColdCodec.decodeColdPayloads([{
     owner: "message",
-    payload: {
-      hash: ColdCodec.digest("message", raw),
-      kind: "message",
-      codec: "zstd",
-      payload,
-      raw_bytes: raw.byteLength,
-      compressed_bytes: payload.byteLength,
-    },
-  }])
-  expect(heartbeat).toBe(true) // 该断言直接拒绝主线程同步解压行为。
+    payload: { hash, kind: "message", codec: "zstd", payload, raw_bytes: raw.byteLength, compressed_bytes: payload.byteLength },
+  }]).finally(() => {
+    // 后续失败与恢复检查使用未拦截的池；首读出错时也还原观察点。
+    Worker.prototype.postMessage = postMessage
+    detach?.()
+  })
+  expect(offThread).toBe(true)
   expect(result[0]?.envelope?.fields.text).toContain("cold reader payload") // 执行位置变化不能改变恢复后的字段内容。
   await expect(ColdCodec.decodeColdPayloads([{
     owner: "message",
@@ -280,6 +296,30 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
       const controller = new AbortController()
       let mutation: ReturnType<typeof setTimeout> | undefined
       let changed = false
+      // 首个 Part 批次由 checkpoint 武装；本次写入后不再接受后续 checkpoint。
+      let partLeaseChecks = -1
+      const update = () => {
+        // 活跃写只修改 Session，保留原 Part 快照以单独验证提交时的资格复核。
+        if (action === "activity") {
+          database.sync.update(SessionTable).set({ time_updated: Date.now() }).where(eq(SessionTable.id, session.id)).run()
+          changed = true
+          return
+        }
+        // 绕开自动更新时间，只让业务内容成为快照重验的差异。
+        database.sync.update(PartTable)
+          .set({
+            time_updated: PartTable.time_updated,
+            data: {
+              type: "tool",
+              tool: value.tool,
+              callID: value.callID,
+              state: { ...value.state, output: "updated output" },
+            },
+          })
+          .where(eq(PartTable.id, value.id))
+          .run()
+        changed = true
+      }
       let ticks = 0
       // 这里只验证事件循环仍有调度机会，tick数量不是压缩吞吐基准。
       const timer = setInterval(() => ticks++, 1)
@@ -293,7 +333,12 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
               batchSize: 10,
             }),
             {
-              lease: { assertOwned() {} },
+              lease: {
+                assertOwned() {
+                  // Part 首次检查进入读取；第二次确认已完成真实编码、尚未开启写事务。
+                  if (partLeaseChecks >= 0 && partLeaseChecks < 2 && ++partLeaseChecks === 2) update()
+                },
+              },
               signal: controller.signal,
               checkpoint: async (task) => {
                 // 在Part阶段首次扫描前安排一次变化，避免后续checkpoint重复写入夹具。
@@ -306,7 +351,11 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
                   task.cursor.lastID
                 )
                   return
-                // 阶段发布后安排真实写入，异步编码让写入发生于快照与提交之间。
+                if (action === "update" || action === "activity") {
+                  if (partLeaseChecks === -1) partLeaseChecks = 0
+                  return
+                }
+                // 保留删除与取消原来的异步触发；两种写前重验夹具由 lease 单独接管。
                 mutation = setTimeout(() => {
                   changed = true
                   if (action === "cancel") {
@@ -321,27 +370,6 @@ for (const action of ["preserve", "update", "delete", "activity", "cancel"] as c
                       db.delete(PartTable).where(eq(PartTable.id, value.id)).run()
                       return
                     }
-                    if (action === "activity") {
-                      // owner内容保持原样，单独检验Session重新活跃后的资格复核。
-                      db.update(SessionTable)
-                        .set({ time_updated: Date.now() })
-                        .where(eq(SessionTable.id, session.id))
-                        .run()
-                      return
-                    }
-                    // 显式同列赋值覆盖Drizzle的onUpdate，确保此替换确实保留快照时间。
-                    db.update(PartTable)
-                      .set({
-                        time_updated: PartTable.time_updated,
-                        data: {
-                          type: "tool",
-                          tool: value.tool,
-                          callID: value.callID,
-                          state: { ...value.state, output: "updated output" },
-                        },
-                      })
-                      .where(eq(PartTable.id, value.id))
-                      .run()
                 }, 0)
               },
             },
