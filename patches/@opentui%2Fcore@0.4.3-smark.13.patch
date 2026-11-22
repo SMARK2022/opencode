@@ -1,3 +1,89 @@
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -7757,4 +7757,4 @@
+   requestRender() {
+-    if (this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
++    if (this._isDestroyed || this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
+       return;
+     }
+@@ -7776,4 +7776,4 @@
+       return;
+     }
+-    if (!this.updateScheduled && !this.renderTimeout) {
++    if (!this.updateScheduled && this.renderTimeout === null) {
+       this.updateScheduled = true;
+@@ -7784,5 +7784,8 @@
+         return;
+       }
+-      this.clock.setTimeout(() => this.activateFrame(), delay);
++      this.renderTimeout = this.clock.setTimeout(() => {
++        this.renderTimeout = null;
++        this.activateFrame();
++      }, delay);
+     }
+   }
+@@ -7793,7 +7796,7 @@
+     }
++    this.updateScheduled = false;
+     try {
+       await this.loop();
+     } finally {
+-      this.updateScheduled = false;
+       this.resolveIdleIfNeeded();
+     }
+@@ -7816,4 +7819,4 @@
+     if (this._isDestroyed)
+       return true;
+-    return !this._isRunning && !this.rendering && !this.renderTimeout && !this.updateScheduled && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
++    return !this._isRunning && !this.rendering && this.renderTimeout === null && !this.updateScheduled && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
+   }
+@@ -7839,4 +7842,4 @@
+       isRunning: this._isRunning,
+       isRendering: this.rendering,
+-      hasScheduledRender: Boolean(this.renderTimeout || this.updateScheduled || this.immediateRerenderRequested)
++      hasScheduledRender: this.renderTimeout !== null || this.updateScheduled || this.immediateRerenderRequested
+     };
+@@ -9625,5 +9628,5 @@
+   internalPause() {
+     this._isRunning = false;
+-    if (this.renderTimeout) {
++    if (!this.updateScheduled && this.renderTimeout !== null) {
+       this.clock.clearTimeout(this.renderTimeout);
+       this.renderTimeout = null;
+@@ -9644,6 +9647,6 @@
+         this.memorySnapshotTimer = null;
+       }
+-      if (this.renderTimeout) {
++      if (this.renderTimeout !== null) {
+         this.clock.clearTimeout(this.renderTimeout);
+         this.renderTimeout = null;
+       }
+@@ -9668,4 +9671,5 @@
+     if (this._destroyCleanupPrepared)
+       return;
+     this._destroyCleanupPrepared = true;
++    this.updateScheduled = false;
+     if (this._usesProcessStdout) {
+@@ -9690,6 +9694,6 @@
+       this.memorySnapshotTimer = null;
+     }
+-    if (this.renderTimeout) {
++    if (this.renderTimeout !== null) {
+       this.clock.clearTimeout(this.renderTimeout);
+       this.renderTimeout = null;
+     }
+@@ -9830,8 +9834,8 @@
+   async loop() {
+     if (this.rendering || this._isDestroyed)
+       return;
+-    this.renderTimeout = null;
+     this.rendering = true;
+-    if (this.renderTimeout) {
++    if (this.renderTimeout !== null) {
++      this.updateScheduled = false;
+       this.clock.clearTimeout(this.renderTimeout);
+       this.renderTimeout = null;
 diff --git a/index.js b/index.js
 --- a/index.js
 +++ b/index.js

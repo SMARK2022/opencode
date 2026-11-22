@@ -1041,11 +1041,20 @@ export function Session() {
     } else if (pinAllowed()) scroll.scrollTo(scroll.scrollHeight)
   }
 
+  let openScrollTimers: Set<ReturnType<typeof setTimeout>> | undefined = new Set()
+  onCleanup(() => {
+    openScrollTimers?.forEach(timer => clearTimeout(timer))
+    openScrollTimers = undefined
+  })
   function scheduleSessionOpenScroll(respectUserScroll = false) {
-    setTimeout(() => {
-      if (!scroll || scroll.isDestroyed) return
+    // 同步可能在卸载后才返回；这时不再预约。存活时各次导航保留自己的滚动意图。
+    const timers = openScrollTimers
+    if (!timers) return
+    const timer = setTimeout(() => {
+      timers.delete(timer)
       applySessionOpenScroll(respectUserScroll)
     }, 50)
+    timers.add(timer)
   }
 
 
