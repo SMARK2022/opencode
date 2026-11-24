@@ -1,29 +1,49 @@
 diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+index 145e773..324423c 100644
 --- a/index-b5dpwnes.js
 +++ b/index-b5dpwnes.js
-@@ -7757,4 +7757,4 @@
+@@ -7755,7 +7755,7 @@ Captured external output:
+     this.scheduleRenderTimer();
+   }
    requestRender() {
 -    if (this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
 +    if (this._isDestroyed || this._controlState === "explicit_suspended" /* EXPLICIT_SUSPENDED */) {
        return;
      }
-@@ -7776,4 +7776,4 @@
+     if (this.feedIdleRenderScheduled) {
+@@ -7774,27 +7774,34 @@ Captured external output:
+       this.immediateRerenderRequested = true;
        return;
      }
 -    if (!this.updateScheduled && !this.renderTimeout) {
+-      this.updateScheduled = true;
 +    if (!this.updateScheduled && this.renderTimeout === null) {
-       this.updateScheduled = true;
-@@ -7784,5 +7784,8 @@
++      // suspend 后的新申请有独立身份，迟到的 nextTick 不能领取它。
++      const activation = {};
++      this.updateScheduled = activation;
+       const now = this.normalizeClockTime(this.clock.now(), this.lastTime);
+       const elapsed = this.getElapsedMs(now, this.lastTime);
+       const delay = Math.max(this.minTargetFrameTime - elapsed, 0);
+       if (delay === 0) {
+-        process.nextTick(() => this.activateFrame());
++        process.nextTick(() => this.activateFrame(activation));
          return;
        }
 -      this.clock.setTimeout(() => this.activateFrame(), delay);
 +      this.renderTimeout = this.clock.setTimeout(() => {
++        // 先核对身份，过期回调不能抹掉当前帧持有的句柄。
++        if (this.updateScheduled !== activation) return;
 +        this.renderTimeout = null;
-+        this.activateFrame();
++        this.activateFrame(activation);
 +      }, delay);
      }
    }
-@@ -7793,7 +7796,7 @@
+-  async activateFrame() {
+-    if (!this.updateScheduled) {
++  async activateFrame(activation) {
++    if (this.updateScheduled !== activation) {
+       this.resolveIdleIfNeeded();
+       return;
      }
 +    this.updateScheduled = false;
      try {
@@ -32,26 +52,36 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
 -      this.updateScheduled = false;
        this.resolveIdleIfNeeded();
      }
-@@ -7816,4 +7819,4 @@
+   }
+@@ -7815,7 +7822,7 @@ Captured external output:
+   isIdleNow() {
      if (this._isDestroyed)
        return true;
 -    return !this._isRunning && !this.rendering && !this.renderTimeout && !this.updateScheduled && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
 +    return !this._isRunning && !this.rendering && this.renderTimeout === null && !this.updateScheduled && !this.feedIdleRenderScheduled && !this.immediateRerenderRequested;
    }
-@@ -7839,4 +7842,4 @@
+   resolveIdleIfNeeded() {
+     if (!this.isIdleNow())
+@@ -7838,7 +7845,7 @@ Captured external output:
+     return {
        isRunning: this._isRunning,
        isRendering: this.rendering,
 -      hasScheduledRender: Boolean(this.renderTimeout || this.updateScheduled || this.immediateRerenderRequested)
-+      hasScheduledRender: this.renderTimeout !== null || this.updateScheduled || this.immediateRerenderRequested
++      hasScheduledRender: this.renderTimeout !== null || this.updateScheduled !== false || this.immediateRerenderRequested
      };
-@@ -9625,5 +9628,5 @@
+   }
+   get resolution() {
+@@ -9624,7 +9631,7 @@ Captured external output:
+   }
    internalPause() {
      this._isRunning = false;
 -    if (this.renderTimeout) {
 +    if (!this.updateScheduled && this.renderTimeout !== null) {
        this.clock.clearTimeout(this.renderTimeout);
        this.renderTimeout = null;
-@@ -9644,6 +9647,6 @@
+     }
+@@ -9643,7 +9650,7 @@ Captured external output:
+         this.clock.clearInterval(this.memorySnapshotTimer);
          this.memorySnapshotTimer = null;
        }
 -      if (this.renderTimeout) {
@@ -59,13 +89,16 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
          this.clock.clearTimeout(this.renderTimeout);
          this.renderTimeout = null;
        }
-@@ -9668,4 +9671,5 @@
+@@ -9668,6 +9675,7 @@ Captured external output:
      if (this._destroyCleanupPrepared)
        return;
      this._destroyCleanupPrepared = true;
 +    this.updateScheduled = false;
      if (this._usesProcessStdout) {
-@@ -9690,6 +9694,6 @@
+       process.removeListener("SIGWINCH", this.sigwinchHandler);
+     }
+@@ -9689,7 +9697,7 @@ Captured external output:
+       this.clock.clearInterval(this.memorySnapshotTimer);
        this.memorySnapshotTimer = null;
      }
 -    if (this.renderTimeout) {
@@ -73,7 +106,7 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
        this.clock.clearTimeout(this.renderTimeout);
        this.renderTimeout = null;
      }
-@@ -9830,8 +9834,8 @@
+@@ -9830,9 +9838,9 @@ Captured external output:
    async loop() {
      if (this.rendering || this._isDestroyed)
        return;
@@ -84,6 +117,7 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
 +      this.updateScheduled = false;
        this.clock.clearTimeout(this.renderTimeout);
        this.renderTimeout = null;
+     }
 diff --git a/index.js b/index.js
 --- a/index.js
 +++ b/index.js

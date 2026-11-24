@@ -160,6 +160,18 @@ export class ToolRuntimeError extends Error {
   }
 }
 
+class ResultRepresentationError extends ToolRuntimeError {
+  constructor(readonly reason: "depth" | "shape", message: string) {
+    super("InvalidDataValue", message)
+  }
+}
+
+class HostRepresentationText {
+  constructor(readonly value: unknown, readonly text: (reason: ResultRepresentationError["reason"]) => string) {}
+}
+
+export const hostRepresentationText = (value: unknown, text: (reason: ResultRepresentationError["reason"]) => string): unknown => new HostRepresentationText(value, text)
+
 const isDefinition = <R>(value: HostTool<R> | Definition<R> | HostTools<R>): value is Definition<R> =>
   isToolDefinition<R>(value)
 
@@ -202,7 +214,7 @@ const copyBounded = (
   preserveSandboxValues: boolean,
 ): unknown => {
   if (depth > MAX_VALUE_DEPTH) {
-    throw new ToolRuntimeError("InvalidDataValue", `${label} exceeds the maximum value depth of ${MAX_VALUE_DEPTH}.`)
+    throw new ResultRepresentationError("depth", `${label} exceeds the maximum value depth of ${MAX_VALUE_DEPTH}.`)
   }
   if (
     value === null ||
@@ -304,7 +316,7 @@ const copyBounded = (
 
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) {
-    throw new ToolRuntimeError("InvalidDataValue", `${label} must contain plain objects only.`)
+    throw new ResultRepresentationError("shape", `${label} must contain plain objects only.`)
   }
 
   const copied: SafeObject = Object.create(null) as SafeObject
@@ -328,7 +340,8 @@ export const copyOut = (value: unknown, undefinedAsNull = false): unknown => {
     return null
   }
   if (Array.isArray(value)) {
-    return value.map((item) => copyOut(item, undefinedAsNull))
+    // JSON 结果以 null 表示空槽；宿主参数仍需保留空槽，供原生数组方法跳过。
+    return undefinedAsNull ? Array.from(value, (item) => copyOut(item, true)) : value.map((item) => copyOut(item))
   }
 
   if (value !== null && typeof value === "object" && !(value instanceof ToolReference)) {
@@ -351,14 +364,22 @@ const definitions = <R>(
   return entries
 }
 
+const representationTextOutput = Symbol("CodeMode ordinary-text output")
+
+export const withRepresentationTextOutput = <R>(definition: Definition<R>): Definition<R> =>
+  Object.assign({}, definition, { [representationTextOutput]: true })
+
 const describeDefinition = <R>(path: string, definition: Definition<R>): ToolDescription => {
   // 所有模型界面复用唯一紧凑签名；字段说明仍作为搜索索引，不再生成第二种展示。
   const input = inputTypeScript(definition)
+  const output = outputTypeScript(definition)
+  const includeText = representationTextOutput in definition && output !== "string" && output !== "unknown"
+  const signatureOutput = includeText ? `${output} | string` : output
   // 沿官方调用示例显示对象参数；空对象签名对应运行时的零参规范化。
   return {
     path,
     description: definition.description,
-    signature: `${toolExpression(path)}(${input === "{}" ? "" : `input: ${input}`}): Promise<${outputTypeScript(definition)}>`,
+    signature: `${toolExpression(path)}(${input === "{}" ? "" : `input: ${input}`}): Promise<${signatureOutput}>`,
   }
 }
 
@@ -748,9 +769,17 @@ export const make = <R>(
     )
   }
 
-  const decodeOutput = (value: unknown, name: string) =>
+  const decodeOutput = (value: unknown, name: string, representationText?: HostRepresentationText["text"]) =>
     Effect.try({
-      try: () => copyIn(value, `Result from tool '${name}'`),
+      try: () => {
+        const label = `Result from tool '${name}'`
+        try {
+          return copyIn(value, label)
+        } catch (error) {
+          if (representationText && error instanceof ResultRepresentationError) return representationText(error.reason)
+          throw error
+        }
+      },
       catch: () => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}'.`),
     })
 
@@ -796,12 +825,14 @@ export const make = <R>(
           return yield* observeEnd(
             Effect.gen(function* () {
               const raw = yield* runHost(Effect.suspend(() => tool.run(describedInput)))
+              const fallback = raw instanceof HostRepresentationText ? raw : undefined
+              const value = fallback ? fallback.value : raw
               const result = yield* Effect.try({
-                try: () => decodeToolOutput(tool, raw),
+                try: () => decodeToolOutput(tool, value),
                 catch: () => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}'.`),
               })
               // 先验证业务输出，再把原始文本来源带入沙箱副本；别名不污染可选字段。
-              return yield* decodeOutput(withRawText(result, rawText(raw)), name)
+              return yield* decodeOutput(withRawText(result, rawText(value)), name, fallback?.text)
             }),
             currentCall,
           )

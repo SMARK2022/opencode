@@ -630,7 +630,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         ? servers.find((name) => item.id.startsWith(name + "_")) ?? (item.id.includes("_") ? item.id.slice(0, item.id.indexOf("_")) : item.id)
         : "$opencode"
       const local = entry && item.id.startsWith(server + "_") ? item.id.slice(server.length + 1) : item.id
-      // 文字工具已有 output:string 合同；远端声明保持原状，原生结构化结果复用原 codec。
+      // 目录保留完整的 MCP 协议定义（含根引用）；超深文本行为由脚本描述交付。
       return {
         id: item.id,
         path: [server, local],
@@ -639,6 +639,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         runtimeParameters: item.runtimeParameters,
         inputSchema: ToolJsonSchema.fromTool(item),
         outputSchema: entry ? McpCatalog.schemas(entry.def).output : (item.output ?? Schema.String),
+        ...(entry && { mcpStructured: true }),
       }
     }))
   for (const item of Object.values(eligible)) {

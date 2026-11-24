@@ -789,6 +789,9 @@ it.instance("execute composes native glob and read with no MCP server", () =>
     // 第二次 read 专门覆盖模型 stub 与 JS 数据接收者的差异。
     const instance = yield* TestInstance
     yield* Effect.promise(() => Bun.write(path.join(instance.directory, "note.txt"), "hello execute"))
+    const longFile = path.join(instance.directory, "long-result.log")
+    const prefix = `needle${"x".repeat(1_993)}`
+    yield* Effect.promise(() => Bun.write(longFile, `needle before\n${prefix}😀${"x".repeat(70 * 1024)}\nneedle after\n`))
     const { tools } = yield* resolveTools()
     expect(tools.execute).toBeDefined()
     expect(tools.read).toBeDefined()
@@ -804,8 +807,9 @@ it.instance("execute composes native glob and read with no MCP server", () =>
       const again = await tools.$opencode.read({filePath:found.files[0].path});
       const matched = await tools.$opencode.grep({pattern:"hello", path:found.files[0].path});
       const empty = await tools.$opencode.grep({pattern:"absent", path:found.files[0].path});
+      const long = await tools.$opencode.grep({pattern:"needle",path:${JSON.stringify(longFile)}});
       const catalog = await search({query:"glob", namespace:"$opencode"});
-      return {files:found, file, again:again.content, matched, empty, signature:catalog.items[0].signature};
+      return {files:found, file, again:again.content, matched, empty, long:long.matches.map(match=>[match.line,match.content]), signature:catalog.items[0].signature};
     `,
           },
           { toolCallId: "execute-files", abortSignal: new AbortController().signal, messages: [] },
@@ -852,6 +856,7 @@ it.instance("execute composes native glob and read with no MCP server", () =>
       timedOut: false,
     })
     expect(data.empty).toEqual({ matches: [], totalMatches: 0, truncated: false, partial: false, timedOut: false })
+    expect(data.long).toEqual([[1, "needle before\n"], [2, `${prefix}...`], [3, "needle after\n"]])
   }),
 )
 
@@ -1393,8 +1398,8 @@ it.instance("custom tools use their existing argument validator before body effe
   expect(data).toMatchObject({ valid: "3", invalid: expect.stringContaining("invalid arguments") })
   // 同一注册入口同时覆盖旧文本插件与显式结构化插件，不能把所有插件统一改成对象。
   expect(data.structured).toEqual({ value: 4 })
-  // 原文本准确描述为string；宿主临时字段没有变成程序对象的额外属性。
-  expect(data.signature).toContain("Promise<string>")
+  // 无声明的插件既可交付文本，也可交付显式程序值。
+  expect(data.signature).toContain("Promise<unknown>")
   // 合法调用先建立独立磁盘证据，随后以文件仍为 3 证明校验位于副作用之前。
   expect(yield* Effect.promise(() => Bun.file(path.join(directory, "body.txt")).text())).toBe("3")
 }))
@@ -1469,7 +1474,7 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
       process.platform === "win32"
         ? "New-Item -ItemType Directory -Path 'generated-cwd' | Out-Null"
         : "mkdir generated-cwd"
-    const where = process.platform === "win32" ? "(Get-Location).Path" : "pwd"
+    const where = process.platform === "win32" ? "(Get-Location).Path; exit 7" : "pwd; exit 7"
     // 目录名由 JS 表达式产生，真实 Shell 负责创建；第二次调用验证实际进程 cwd。
     const result = yield* Effect.promise(() =>
       Promise.resolve(
@@ -1477,8 +1482,9 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
           {
             code: `
     const directory = "generated" + "-cwd";
-    await tools.$opencode.bash({command:${JSON.stringify(create)}});
-    return (await tools.$opencode.bash({command:${JSON.stringify(where)}, workdir:directory})).content;
+    const created = await tools.$opencode.bash({command:${JSON.stringify(create)}});
+    const located = await tools.$opencode.bash({command:${JSON.stringify(where)}, workdir:directory});
+    return {created, located};
   `,
           },
           { toolCallId: "execute-directory", abortSignal: new AbortController().signal, messages: [] },
@@ -1487,7 +1493,10 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
     )
     if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected directory receipt")
     // 第二个 shell 仍须消费前一步创建的真实工作目录，不能只匹配环境输出。
-    expect(scriptResult(result).output.replaceAll("\\", "/")).toContain(
+    const values = JSON.parse(scriptResult(result).output)
+    expect(values.created).toMatchObject({ content: "", exit: 0, truncated: false, timedOut: false })
+    expect(values.located).toMatchObject({ exit: 7, truncated: false, timedOut: false })
+    expect(values.located.content.replaceAll("\\", "/").replace(/\r?\n$/, "")).toBe(
       path.join(instance.directory, "generated-cwd").replaceAll("\\", "/"),
     )
   }),
