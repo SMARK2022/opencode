@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { PermissionAuto } from "@opencode-ai/core/permission/auto"
 import { Context, Effect, Fiber, Layer } from "effect"
 import { createOpenAI } from "@ai-sdk/openai"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -74,10 +75,11 @@ const REVIEWER_HOOK_HEADER = "x-reviewer-hook"
 const sessionLayer = Layer.mock(Session.Service)({})
 // #327：带 sessionID 的 review 会经 MessageV2.page 读 transcript——最小 drizzle 链 mock；
 // 空消息窗 + 存在的 session 行让 reviewer 视为空历史并正常返回决策。
-const emptyReviewerDb = (() => {
+const emptyReviewerDb = (model: Session.Info["model"]) => {
   const chain = {
     orderBy: () => ({ limit: () => ({ all: () => Effect.succeed([]) }) }),
-    get: () => Effect.succeed({ id: SessionID.make("session_parent") }),
+    get: () => Effect.succeed({ id: SessionID.make("session_parent"), model }),
+    limit: () => ({ get: () => Effect.succeed(undefined) }),
   }
   // 这些用例验证审批流的收尾；空历史夹具仍须执行事务体，并区分有无 LIMIT 的两种取证查询。
   const rows = { orderBy: () => ({ all: () => [], limit: () => ({ all: () => [] }) }) }
@@ -88,7 +90,7 @@ const emptyReviewerDb = (() => {
     transaction: <A>(body: () => A) => body(),
   }
   return { db: db as never, sync: sync as never }
-})()
+}
 
 // #497：closure 用例的 fixture 注册表——it 实例与 body 共享同一 fixture（单一实例，committed barrier 才可观测）。
 const closureFixtures = new Map<"pending" | "completed" | "drain", ReturnType<typeof reviewerClosureFixture>>([
@@ -647,7 +649,7 @@ describe("permission reviewer service", () => {
 // provider（zhipuai），而父会话实际使用的是 openai/gpt-5。当前实现会让
 // reviewer 走 defaultModel → zhipuai → getModel 失败 → fallback user；
 // 修复后 reviewer 应跟随父会话模型走 openai 路径。
-function parentSessionModelFixture() {
+function parentSessionModelFixture(live?: { session: Session.Interface; db: Database.Interface }) {
   const bodies: ReviewerRequestBody[] = []
   const requests: CapturedReviewerRequest[] = []
   const parentModel = reviewerModel(OPENAI_PROVIDER_ID)
@@ -707,9 +709,7 @@ function parentSessionModelFixture() {
   }
   const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
     ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
@@ -736,9 +736,9 @@ function parentSessionModelFixture() {
       Layer.provide(provider.layer),
       Layer.provide(authLayer({ type: "api", key: "test-key" })),
       Layer.provide(pluginLayer()),
-      Layer.provide(sessionLayer),
+      Layer.provide(live ? Layer.succeed(Session.Service, live.session) : sessionLayer),
       // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, live?.db ?? emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -794,9 +794,7 @@ function explicitModelOverrideFixture() {
   }
   const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
     ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
@@ -828,7 +826,7 @@ function explicitModelOverrideFixture() {
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -901,9 +899,7 @@ function staleParentModelFixture() {
   }
   const partStore = sessionPartStore()
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
     ...partStore,  // #497：getPart/updatePart 共享 durable store——生产代码新增权威读取边界
@@ -932,7 +928,7 @@ function staleParentModelFixture() {
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // #327：reviewer layer 依赖 Database（#206 谱系）——与旧 fixture 相同的空 mock，测试不触真实库
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -984,9 +980,7 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
     title: "Auto permission review",
   }
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input?: any) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (msg) => Effect.succeed(msg),
     // #497：捕获仍推 parts 数组供断言；getPart/updatePart 共享同一 durable store——
@@ -1023,7 +1017,7 @@ function reviewerTokenCaptureFixture(authInfo: Auth.Info) {
       Layer.provide(sessionLayer),
       // #261 谱系：PermissionReviewer.layer 依赖 Database（session 表读取），
       // 空链 mock 闭合 R=Service（同 emptyReviewerDb 先例）。
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -1080,9 +1074,7 @@ function reviewerPersistResendFixture() {
     title: "Auto permission review",
   }
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (message) =>
       Effect.sync(() => {
@@ -1107,7 +1099,7 @@ function reviewerPersistResendFixture() {
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // 596：reviewer layer 依赖 Database（#206 谱系）——空 mock 闭合，persist 路径不触真实库
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -1418,10 +1410,8 @@ function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = 
     title: "Auto permission review",
   }
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     // 父级transcript读取不伪造消息；durable补扫走精确Part读取，不借用最近消息窗口。
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (message) =>
       Effect.sync(() => {
@@ -1475,7 +1465,7 @@ function reviewerTimeoutClosureFixture(options: { failErrorWrites?: boolean } = 
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -1521,9 +1511,7 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
   }
   // #497：review 带 sessionID 时 resolveImplicitReviewerModel 会走 findMessage——mock none。
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     messages: () => Effect.succeed([]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (message) => Effect.succeed(message),
     findMessage: () => Effect.succeed(Option.none()),
@@ -1557,7 +1545,7 @@ function reviewerClosureFixture(block: "pending" | "completed" | "drain") {
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -1623,11 +1611,9 @@ function parentToolPartReviewFixture(seed: MessageV2.WithParts) {
     title: "Auto permission review",
   }
   const sessionLayer = Layer.mock(Session.Service)({
-    get: () => Effect.succeed(parentSession),
     // #531：messages 必须真正返回种子消息——updateToolAutoReview 经 #208 的
     // session.messages 读父 ToolPart；返回空数组会让提升 no-op，测试沦为双绿空洞。
     messages: () => Effect.succeed([seed]),
-    children: () => Effect.succeed([]),
     create: (input) => Effect.succeed({ ...childSession, ...input } as Session.Info),
     updateMessage: (message) => Effect.succeed(message),
     findMessage: () => Effect.succeed(Option.none()),
@@ -1642,7 +1628,7 @@ function parentToolPartReviewFixture(seed: MessageV2.WithParts) {
       Layer.provide(pluginLayer()),
       Layer.provide(sessionLayer),
       // #497：reviewer layer 依赖 Database（#206 谱系）——空链 mock 闭合 R。
-      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb)),
+      Layer.provide(Layer.succeed(Database.Service, emptyReviewerDb(parentSession.model))),
     ),
   }
 }
@@ -1783,6 +1769,29 @@ describe("permission reviewer evidence", () => {
       [InstanceStore.bootstrapNode, Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))],
     ],
   ))
+
+  evidence.instance("strict review selects its model and reuses its child without request accounting", () => Effect.gen(function* () {
+    const session = yield* Session.Service
+    const db = yield* Database.Service
+    const parent = yield* session.create({ agent: "auto", model: { providerID: OPENAI_PROVIDER_ID, id: ModelV2.ID.make("gpt-5") } })
+    yield* session.create({ parentID: parent.id, agent: "build" })
+    const fixture = parentSessionModelFixture({ session, db })
+    const input = { ...reviewInput("strict-read", { filePath: "sample.ts" }, parent.id), permission: "read", patterns: ["sample.ts"], strict: true }
+    for (let i = 0; i < 2; i++) {
+      using queries = spyOn(db.sync.$client, "query")
+      const decision = yield* PermissionReviewer.Service.use(reviewer => PermissionAuto.evaluate(input, reviewer)).pipe(Effect.provide(fixture.layer))
+      expect(decision).toMatchObject({ action: "allow", source: "reviewer" })
+      const reads = queries.mock.calls.map(([sql]) => sql).filter(sql => /^select .*from "session"/is.test(sql))
+      expect(reads).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^select "model" from "session"/i),
+        expect.stringMatching(/^select "id", "directory" from "session"/i),
+      ]))
+      expect(reads.some(sql => /\b(?:tokens_input|cost|event)\b/i.test(sql))).toBe(false)
+    }
+    const children = yield* session.children(parent.id)
+    expect(children.filter(child => child.agent === "permission-reviewer")).toHaveLength(1)
+    expect(fixture.bodies).toHaveLength(2)
+  }))
 
   const addUser = (sessions: Session.Interface, sessionID: SessionID, created: number, text: string) =>
     Effect.gen(function* () {

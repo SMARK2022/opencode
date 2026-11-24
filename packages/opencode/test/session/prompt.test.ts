@@ -4,7 +4,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
 import { expect, setSystemTime, spyOn, test } from "bun:test"
@@ -6548,6 +6548,36 @@ it.instance(
   { git: true },
 )
 
+measuredPreflight.instance("pure V1 detail ignores revisions when there is no competing request", () => Effect.gen(function* () {
+  const sessions = yield* Session.Service
+  const database = yield* Database.Service
+  const chat = yield* sessions.create({ title: "Request projection" })
+  yield* user(chat.id, "current user")
+  const expected = (yield* sessions.get(chat.id)).request
+  expect(expected?.messageID).toBeDefined()
+  const median = Effect.fnUntraced(function* () {
+    const times: number[] = []
+    for (let i = 0; i < 7; i++) {
+      const start = performance.now()
+      const info = yield* sessions.get(chat.id)
+      times.push(performance.now() - start)
+      expect(info.request).toEqual(expected)
+    }
+    return times.toSorted((a, b) => a - b)[3]
+  })
+  const short = yield* median()
+  yield* Database.withSync(database, sync => sync.transaction(tx => {
+    // 同一用户的修订追加到同一 durable 序列，不增加新的用量或请求候选。
+    tx.run(sql`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<28185),
+      source AS (SELECT data FROM event WHERE aggregate_id=${chat.id} AND type='message.updated.1' LIMIT 1)
+      INSERT INTO event(id,aggregate_id,type,seq,data)
+      SELECT 'evt_revision_'||i, ${chat.id}, 'message.updated.1',
+        (SELECT seq FROM event_sequence WHERE aggregate_id=${chat.id})+i, source.data FROM n,source`)
+    tx.run(sql`UPDATE event_sequence SET seq=seq+28185 WHERE aggregate_id=${chat.id}`)
+  }))
+  expect(yield* median()).toBeLessThan(short * 4 + 8)
+}))
+
 measuredPreflight.instance(
   "reuses a 2048-turn prefix before Provider dispatch",
   () =>
@@ -6592,6 +6622,21 @@ measuredPreflight.instance(
       const providers = yield* ProviderSvc.Service
       const model = yield* providers.getModel(ref.providerID, ref.modelID)
       const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      // 冷暖两臂使用同一份历史；保留冷读结果，模拟生产单槽在下一步仍持有 proof。
+      const evict = yield* sessions.create({ title: "Other proof window" })
+      const coldProof: number[] = []
+      const warmProof: number[] = []
+      for (let i = 0; i < 5; i++) {
+        yield* MessageV2.promptWindowProof(evict.id)
+        const start = performance.now()
+        const first = yield* MessageV2.promptWindowProof(chat.id)
+        const middle = performance.now()
+        const second = yield* MessageV2.promptWindowProof(chat.id)
+        coldProof.push(middle - start)
+        warmProof.push(performance.now() - middle)
+        expect(second.messages).toEqual(first.messages)
+      }
+      expect(warmProof.toSorted((a, b) => a - b)[2]).toBeLessThan(coldProof.toSorted((a, b) => a - b)[2] * 0.5)
       const full = yield* MessageV2.toModelMessagesEffect(history, model)
       const chunks = yield* MessageV2.toModelMessageChunksEffect(history, model)
       // cache 只改变转换分块，不允许改变 Provider body 的 role/content/tool 顺序。

@@ -7,10 +7,14 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID } from "../../src/session/schema"
+import { MessageID, PartID } from "../../src/session/schema"
 import { EventPaths } from "../../src/server/routes/instance/httpapi/groups/event"
 import { resetDatabase } from "../fixture/db"
-import { disposeAllInstances, TestInstance } from "../fixture/fixture"
+import { disposeAllInstances, provideTmpdirServer, TestInstance } from "../fixture/fixture"
+import { reply, TestLLMServer } from "../lib/llm-server"
+import { testProviderConfig } from "../lib/test-provider"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
 import { httpApiLayer, requestInDirectory } from "./httpapi-layer"
 import { GlobalBus } from "../../src/bus/global"
@@ -397,6 +401,67 @@ describe("event HttpApi", () => {
       yield* Queue.shutdown(reader) // 健全 reader 在断言结束后统一关闭，后台 fiber 不留挂起任务。
     }
   }), { git: true, config: { formatter: false, lsp: false } })
+
+  it.live("five TCP readers receive every provider delta and the next frame on their original streams", () =>
+    provideTmpdirServer(({ dir, llm }) => Effect.gen(function* () {
+      const created = yield* requestInDirectory("/session", dir, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "burst" }),
+      })
+      const session = Schema.decodeUnknownSync(SessionV1.SessionInfo)(yield* created.json)
+      const bus = yield* EventV2Bridge.Service
+      const source: Array<typeof EventData.Type> = []
+      const type = SessionV1.Event.PartDelta.type
+      const off = yield* bus.listen(event => Effect.sync(() => {
+        if (event.type === type) source.push({ id: event.id, type, properties: Schema.decodeUnknownSync(SessionV1.Event.PartDelta.data)(event.data) })
+      }))
+      yield* Effect.addFinalizer(() => off)
+      const streams = []
+      for (const path of ["/global/event", "/event", "/global/event", "/event", "/global/event"]) {
+        const response = yield* requestInDirectory(path, dir)
+        const queue = yield* Queue.unbounded<typeof EventData.Type>()
+        yield* response.stream.pipe(
+          Stream.decodeText(),
+          Stream.pipeThroughChannel(Sse.decodeDataSchema(Schema.Unknown)),
+          Stream.runForEach(({ data }) => {
+            const payload = typeof data === "object" && data && "payload" in data ? data.payload : data
+            if (!payload || typeof payload !== "object" || !("type" in payload)) return Effect.void
+            if (payload.type !== "server.connected" && payload.type !== type) return Effect.void
+            return Queue.offer(queue, Schema.decodeUnknownSync(EventData)(payload))
+          }),
+          Effect.forkScoped,
+        )
+        expect((yield* readEvent(queue)).type).toBe("server.connected")
+        streams.push(queue)
+      }
+      // 两个标记与 provider delta 经过同一个输入；兼容快照在合并流中没有跨输入顺序保证。
+      const marker = (delta: string) => bus.publish(SessionV1.Event.PartDelta, {
+        sessionID: session.id, messageID: MessageID.ascending(), partID: PartID.ascending(), field: "text", delta,
+      })
+      const nextDelta = Effect.fnUntraced(function* (queue: Queue.Dequeue<typeof EventData.Type>) {
+        for (;;) {
+          const frame = yield* readEvent(queue)
+          if (frame.type === type) return frame
+        }
+      })
+      yield* marker("ready")
+      for (const queue of streams) expect(yield* nextDelta(queue)).toEqual(source[0])
+      const pieces = Array.from({ length: 512 }, (_, i) => `[${i}]`)
+      const burst = reply()
+      for (const piece of pieces) burst.text(piece)
+      yield* llm.push(burst.stop())
+      const response = yield* requestInDirectory(`/session/${session.id}/message`, dir, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent: "build", model: { providerID: "test", modelID: "test-model" }, parts: [{ type: "text", text: "burst" }] }),
+      })
+      expect(response.status).toBe(200)
+      yield* response.json
+      yield* marker("follow")
+      expect(source).toHaveLength(pieces.length + 2)
+      for (const queue of streams) {
+        for (const frame of source.slice(1)) expect(yield* nextDelta(queue)).toEqual(frame)
+      }
+    }), { config: testProviderConfig }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
 
   it.instance("native viewer HTTP and both SSE transports preserve identity order and complete data", () => Effect.gen(function* () {
     const instance = yield* TestInstance

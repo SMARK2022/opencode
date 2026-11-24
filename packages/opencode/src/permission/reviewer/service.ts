@@ -10,6 +10,8 @@ import { Auth } from "@/auth"
 import { Plugin } from "@/plugin"
 import { buildBaseProviderMap, isOpenaiOauthProvider } from "@/provider/alias"
 import { SessionRetry } from "@/session/retry"
+import { and, eq } from "drizzle-orm"
+import { SessionTable } from "@opencode-ai/core/session/sql"
 import { Database } from "@opencode-ai/core/database/database"
 
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -344,17 +346,10 @@ export const layer = Layer.effect(
     function parentSessionModel(sessionID: SessionID | undefined) {
       return Effect.gen(function* () {
         if (!sessionID) return yield* provider.defaultModel()
-        // session.get 和 findMessage 是 best-effort：如果 session 不存在或
-        // message store 不可用，不能让 reviewer 直接不可用，应回退到 defaultModel。
-        const exit = yield* Effect.exit(session.get(sessionID))
-        if (Exit.isSuccess(exit)) {
-          const s = exit.value
-          if (s.model) {
-            return {
-              providerID: s.model.providerID,
-              modelID: s.model.id,
-            }
-          }
+        const exit = yield* Effect.exit(database.db.select({ model: SessionTable.model }).from(SessionTable)
+          .where(eq(SessionTable.id, sessionID)).get())
+        if (Exit.isSuccess(exit) && exit.value?.model) {
+          return { providerID: ProviderV2.ID.make(exit.value.model.providerID), modelID: ModelV2.ID.make(exit.value.model.id) }
         }
         // 旧 session 或 projector 未写入 model 时，用最近 user message 的 model
         const match = yield* session
@@ -398,7 +393,9 @@ export const layer = Layer.effect(
     function getReviewerSession(parentID: SessionID, model: Provider.Model) {
       return reviewerSessionLock(parentID).withPermits(1)(Effect.gen(function* () {
         // #208：优先复用已有 permission-reviewer 子会话——每次审查创建新 transcript 会丢失前序请求/决策上下文
-        const existing = (yield* session.children(parentID)).find((item) => item.agent === "permission-reviewer")
+        const existing = yield* database.db.select({ id: SessionTable.id, directory: SessionTable.directory }).from(SessionTable)
+          .where(and(eq(SessionTable.parent_id, parentID), eq(SessionTable.agent, "permission-reviewer")))
+          .limit(1).get().pipe(Effect.orDie)
         if (existing) return existing
         // #208：单个子会话镜像 Codex guardian trunk——后续审查追加新请求/决策轮次
         return yield* session.create({
@@ -422,7 +419,7 @@ export const layer = Layer.effect(
     // #209：记录 reviewer 请求为可见用户消息——metadata 标记防止被误认为人类授权
     // #214：reviewID 写入 metadata——审计/导出代码可按逻辑审查导航，无需解析安全敏感的合成 prompt
     function recordReviewerRequest(input: {
-      session: Session.Info
+      session: Pick<Session.Info, "id">
       model: Provider.Model
       reviewID: string
       text: string
@@ -459,7 +456,7 @@ export const layer = Layer.effect(
     // #209：runReviewerAgent——有子会话时持久化流式 part，无子会话时仅提取 assessment
     // #214：reviewID 透传到 runReviewerStream——最终决策 part metadata 需 mirror 此 ID
     function runReviewerAgent(input: {
-      session: Session.Info | undefined
+      session: Pick<Session.Info, "id" | "directory"> | undefined
       model: Provider.Model
       reviewID: string
       parentID: MessageID | undefined

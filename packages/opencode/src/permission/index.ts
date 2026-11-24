@@ -15,10 +15,18 @@ import { PermissionCircuitBreaker } from "./reviewer/circuit-breaker"
 import * as Option from "effect/Option"
 import { Shell } from "@opencode-ai/core/shell"
 import { Session } from "@/session/session"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionTable } from "@opencode-ai/core/session/sql"
+import { NotFoundError } from "@/storage/storage"
+import { eq } from "drizzle-orm"
 
 export const Event = PermissionV1.Event
 
 export interface Interface {
+  readonly sessionRules: (id: PermissionV1.AskInput["sessionID"]) => Effect.Effect<{
+    agent: string | null
+    permission: PermissionV1.Ruleset
+  }, NotFoundError>
   readonly ask: (input: PermissionV1.AskInput) => Effect.Effect<void, PermissionV1.Error>
   readonly beginExecute: (input: {
     sessionID: PermissionV1.AskInput["sessionID"]
@@ -65,6 +73,13 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Pe
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
+    const database = yield* Database.Service
+    const sessionRules = Effect.fn("Permission.sessionRules")(function* (id: PermissionV1.AskInput["sessionID"]) {
+      const row = yield* database.db.select({ agent: SessionTable.agent, permission: SessionTable.permission })
+        .from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie)
+      if (!row) return yield* new NotFoundError({ message: `Session not found: ${id}` })
+      return { agent: row.agent, permission: row.permission ?? [] }
+    })
     const events = yield* EventV2Bridge.Service
     const config = yield* Config.Service
     const state = yield* InstanceState.make<State>(
@@ -94,7 +109,7 @@ const layer = Layer.effect(
       const sessions = Option.getOrUndefined(yield* Effect.serviceOption(Session.Service))
       // Session 缺失只表示没有可补充上下文，不向公共 ask 泄漏新的 NotFound 错误。
       const current = sessions
-        ? yield* sessions.get(request.sessionID).pipe(Effect.catchTag("NotFoundError", () => Effect.void))
+        ? yield* sessionRules(request.sessionID).pipe(Effect.catchTag("NotFoundError", () => Effect.void))
         : undefined
       const cfg = yield* config.get()
       // 普通工具已交付 metadata.agent；仅缺省 synthetic 请求才回退当前 Session/default。
@@ -456,7 +471,7 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.info)
     })
 
-    return Service.of({ ask, beginExecute, reply, list })
+    return Service.of({ ask, beginExecute, reply, list, sessionRules })
   }),
 )
 
@@ -558,6 +573,6 @@ export function visibleTools<T>(tools: Record<string, T>, ruleset: PermissionV1.
 // #199：Permission.node 声明对 session cache 和 circuit breaker 的依赖，使
 // #199：builder 在构建 Permission 层时自动提供这些服务。reviewer 不在此声明——
 // #199：它是可选协作者，通过 serviceOption 访问，缺失时退回 ask 路径。
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node, Config.node] })
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Database.node, EventV2Bridge.node, PermissionSessionCache.node, PermissionCircuitBreaker.node, Config.node] })
 
 export * as Permission from "."

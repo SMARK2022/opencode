@@ -49,6 +49,7 @@ const fakePlugin = Plugin.Service.of({
 } satisfies Plugin.Interface)
 
 const fakePermission = Permission.Service.of({
+  sessionRules: () => Effect.die("Unexpected session read in direct tool timing test"),
   ask: () => Effect.void,
   beginExecute: () => Effect.die("Unexpected execute in direct tool timing test"),
   reply: () => Effect.void,

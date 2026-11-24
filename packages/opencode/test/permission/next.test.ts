@@ -1,5 +1,5 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
-import { test, expect } from "bun:test"
+import { test, expect, spyOn } from "bun:test"
 import os from "os"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -18,13 +18,13 @@ import { TestConfig } from "../fixture/config"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { ProjectV2 } from "@opencode-ai/core/project"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Session } from "../../src/session/session"
-import { Storage } from "../../src/storage/storage"
+import { Database } from "@opencode-ai/core/database/database"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 const env = AppNodeBuilder.build(
-  LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+  LayerNode.group([Session.node, SessionProjector.node, Database.node, Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
   [[InstanceStore.bootstrapNode, noopBootstrap]],
 )
 // #199：带确定性 reviewer 和真实 session cache 的独立 env，在不启动 provider model 的情况下
@@ -142,7 +142,7 @@ const failingReviewedConfigEnv = AppNodeBuilder.build(
   ],
 )
 const contextConfigEnv = AppNodeBuilder.build(
-  LayerNode.group([Permission.node, Config.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+  LayerNode.group([Session.node, SessionProjector.node, Permission.node, Config.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
   [
     [InstanceStore.bootstrapNode, noopBootstrap],
     [Config.node, TestConfig.layer({ get: () => Effect.succeed({
@@ -2031,12 +2031,10 @@ it.instance(
   { git: true },
 )
 
-function sessionFixture(agent: string | undefined, permission: NonNullable<Session.Info["permission"]> = []): Session.Info {
-  return {
-    id: SessionID.descending(), slug: "permission-test", projectID: ProjectV2.ID.make("project_test"), directory: ".",
-    title: "permission test", version: "1", agent, permission, time: { created: 0, updated: 0 },
-  }
-}
+const sessionFixture = Effect.fnUntraced(function* (agent: string | undefined, permission: NonNullable<Session.Info["permission"]> = []) {
+  const sessions = yield* Session.Service
+  return yield* sessions.create({ agent, permission })
+})
 
 function raceSynthetic<R>(effect: Effect.Effect<void, PermissionV1.Error, R>) {
   return Effect.gen(function* () {
@@ -2055,81 +2053,91 @@ function raceSynthetic<R>(effect: Effect.Effect<void, PermissionV1.Error, R>) {
 
 it.instance("ask - synthetic permission uses current auto session without direct manual pending", () =>
   Effect.gen(function* () {
-    const info = sessionFixture("auto")
+    const info = yield* sessionFixture("auto")
     // 空 ruleset 模拟真实 synthetic producer；general auto 应直接完成，不能伪造 ReviewStarted。
     const first = yield* raceSynthetic(ask({
       sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
       always: [], metadata: {}, ruleset: [],
-    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    }))
     expect(first).toBe("auto")
   }),
 )
 
 contextConfig.instance("ask - synthetic permission discovers custom default agent auto action", () =>
   Effect.gen(function* () {
-    const info = sessionFixture(undefined)
+    const info = yield* sessionFixture(undefined)
     // default_agent 不必叫 auto；只有现有 agent 配置中的 auto action 才决定自动上下文。
     const first = yield* raceSynthetic(ask({
       sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
       always: [], metadata: {}, ruleset: [],
-    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    }))
     expect(first).toBe("auto")
   }),
 )
 
 it.instance("ask - synthetic permission inherits session-only auto ceiling", () =>
   Effect.gen(function* () {
-    const info = sessionFixture("build", [{ permission: "workflow_tool_approval", pattern: "*", action: "auto" }])
+    const info = yield* sessionFixture("build", [{ permission: "workflow_tool_approval", pattern: "*", action: "auto" }])
     // 当前 agent 不是 auto，Session ceiling 仍必须独立提供自动上下文。
     const first = yield* raceSynthetic(ask({
       sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
       always: [], metadata: {}, ruleset: [],
-    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    }))
     expect(first).toBe("auto")
   }),
 )
 
 it.instance("ask - auto effective rules keep session deny after caller agent ask", () =>
   Effect.gen(function* () {
-    const info = sessionFixture("auto", [{ permission: "doom_loop", pattern: "*", action: "deny" }])
+    const info = yield* sessionFixture("auto", [{ permission: "doom_loop", pattern: "*", action: "deny" }])
     // auto 补齐规则时 Session deny 最后，caller 的 Agent ask 不能把它覆盖成自动放行。
     const error = yield* fail(ask({
       sessionID: info.id, permission: "doom_loop", patterns: ["tool"],
       always: [], metadata: {}, ruleset: [{ permission: "doom_loop", pattern: "*", action: "ask" }],
-    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    }))
     expect(error).toBeInstanceOf(PermissionV1.DeniedError)
   }),
 )
 
 contextConfig.instance("ask - non-auto synthetic request keeps original rules despite config allow", () =>
   Effect.gen(function* () {
-    const info = sessionFixture("build")
+    const info = yield* sessionFixture("build")
     // 非 auto 不使用补齐规则裁决；HEAD 的空 caller ruleset 仍应产生人工审批。
     const first = yield* raceSynthetic(ask({
       sessionID: info.id, permission: "workflow_tool_approval", patterns: ["tool"],
       always: [], metadata: { agent: "build" }, ruleset: [],
-    }).pipe(Effect.provide(Layer.mock(Session.Service, { get: () => Effect.succeed(info) }))))
+    }))
     expect(first).toBe("ask")
   }),
 )
 
 it.instance("ask - missing session preserves caller rules without leaking NotFound", () =>
   Effect.gen(function* () {
-    const missing = Layer.mock(Session.Service, {
-      get: () => Effect.fail(new Storage.NotFoundError({ message: "missing session" })),
-    })
     yield* ask({
       sessionID: SessionID.descending(), permission: "read", patterns: ["note.txt"],
       always: [], metadata: {}, ruleset: [{ permission: "read", pattern: "*", action: "allow" }],
-    }).pipe(Effect.provide(missing))
+    })
     // 无 Session 可补充时，空 caller ruleset 仍按原合同进入人工审批，而不是抛 NotFound。
     const first = yield* raceSynthetic(ask({
       sessionID: SessionID.descending(), permission: "workflow_tool_approval", patterns: ["tool"],
       always: [], metadata: {}, ruleset: [],
-    }).pipe(Effect.provide(missing)))
+    }))
     expect(first).toBe("ask")
   }),
 )
+
+it.instance("rule matching reads session rules without usage", () => Effect.gen(function* () {
+  const chat = yield* sessionFixture("build", [{ permission: "grep", pattern: "*", action: "allow" }])
+  const database = yield* Database.Service
+  using queries = spyOn(database.sync.$client, "query")
+  yield* ask({ sessionID: chat.id, permission: "grep", patterns: ["sample"], always: [], metadata: {}, ruleset: chat.permission ?? [] })
+  const reads = queries.mock.calls.map(([sql]) => sql).filter(sql => /from "session"/i.test(sql))
+  expect(reads).not.toHaveLength(0)
+  for (const sql of reads) {
+    expect(sql).toContain('"permission"')
+    expect(sql).not.toMatch(/\b(?:tokens_input|cost|event)\b/i)
+  }
+}))
 
 reviewed.instance("cache - isolates metadata payloads and bypasses structured input", () =>
   Effect.gen(function* () {

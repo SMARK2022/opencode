@@ -8,6 +8,7 @@ import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { EventApi } from "../groups/event"
+import { burstCapacity, eventOffer, subscribeEvents } from "@opencode-ai/server/handlers/event"
 import { EventClients } from "@opencode-ai/server/event-clients"
 
 const CLIENT_EVENT_CAPACITY = 256
@@ -37,14 +38,15 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
     const instance = yield* InstanceState.context
     const workspaceID = yield* InstanceState.workspaceID
     // 注册先于 server.connected，容量溢出会失败当前响应并触发客户端重连刷新。
-    const input = yield* EventV2.allBounded(events, CLIENT_EVENT_CAPACITY, event =>
+    const input = yield* subscribeEvents(events, event =>
       event.location?.directory === instance.directory &&
       (event.location.workspaceID === undefined || event.location.workspaceID === workspaceID),
     )
     const stream = input.pipe(
       Stream.map((event) => ({ id: event.id, type: event.type, properties: event.data, source: event })),
     )
-    const compatibility = yield* Queue.dropping<{ id: string; type: string; properties: unknown }, EventV2.SubscriberOverflowError>(CLIENT_EVENT_CAPACITY)
+    const compatibility = yield* Queue.dropping<{ id: string; type: string; properties: unknown }, EventV2.SubscriberOverflowError>(burstCapacity)
+    const offer = yield* eventOffer(compatibility, () => Queue.failCauseUnsafe(compatibility, Cause.fail(new EventV2.SubscriberOverflowError({ capacity: CLIENT_EVENT_CAPACITY }))))
     const listener = (event: {
       directory?: string
       workspace?: string
@@ -55,12 +57,11 @@ function eventResponse(events: EventV2.Interface, clients: EventClients.Interfac
       const snapshot = event.payload.type === "session.updated" && event.payload.metadata?.projection === true
       if (!snapshot && event.payload.type !== "server.instance.disposed") return
       if (snapshot && event.workspace !== undefined && event.workspace !== workspaceID) return
-      const accepted = Queue.offerUnsafe(compatibility, {
+      offer({
         id: event.payload.id ?? eventID(),
         type: snapshot ? "session.updated" : "server.instance.disposed",
         properties: event.payload.properties ?? {},
       })
-      if (!accepted) Queue.failCauseUnsafe(compatibility, Cause.fail(new EventV2.SubscriberOverflowError({ capacity: CLIENT_EVENT_CAPACITY })))
     }
     // 与Core listener一样在响应前注册；退出随同一Scope退订，不丢首包前的请求投影。
     yield* Effect.acquireRelease(

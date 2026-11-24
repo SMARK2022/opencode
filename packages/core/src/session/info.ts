@@ -59,24 +59,30 @@ export const selection = (sessionID: SessionSchema.ID) => ({
             AND terminal.seq > e.seq AND json_extract(terminal.data, '$.messageID') = json_extract(e.data, '$.messageID')
             AND terminal.type IN ('session.next.compaction.ended.1', 'session.next.compaction.failed.1'))
       ORDER BY e.seq DESC LIMIT 1
+    ), rival AS (
+      SELECT *, (kind = 'compaction' OR promoted_seq IS NOT NULL) AS started
+      FROM (SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction)
+      ORDER BY started DESC, position DESC, time_created DESC, id DESC LIMIT 1
+    ), winning_rival AS MATERIALIZED (
+      SELECT r.id, r.time_created, r.promoted_seq, r.kind FROM rival r
+      WHERE NOT EXISTS (
+        SELECT 1 FROM v1_request v WHERE (
+          EXISTS (SELECT 1 FROM message a WHERE a.session_id = ${sessionID}
+            AND json_extract(a.data, '$.role') = 'assistant' AND json_extract(a.data, '$.parentID') = +v.id),
+          coalesce((
+            WITH updates AS NOT MATERIALIZED (
+              SELECT e.seq FROM event e WHERE e.aggregate_id = ${sessionID} AND e.type = 'message.updated.1'
+                AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
+            )
+            -- 后段无匹配，或前段已存在该用户的更新，则 V1 首次序号早于竞争者。
+            SELECT coalesce((SELECT seq FROM updates WHERE seq < r.position ORDER BY seq DESC LIMIT 1), seq)
+            FROM updates WHERE seq >= r.position ORDER BY seq LIMIT 1
+          ), -1), v.time_created, v.id
+        ) >= (r.started, r.position, r.time_created, r.id)
+      )
     ), current_request AS (
-      -- V1 首次用户写入与 native admission/promotion 共用 Session event 序列，修订不重新接管身份。
-      -- 迁移清过 event/input/native message 而保留 V1 message；无事件的旧用户属于序列开始前。
-      SELECT * FROM (
-        SELECT v.*, coalesce(min(e.seq), -1) AS position
-        FROM v1_request v LEFT JOIN event e
-          ON e.aggregate_id = ${sessionID} AND e.type = 'message.updated.1'
-          AND json_extract(e.data, '$.info.id') = v.id AND json_extract(e.data, '$.info.role') = 'user'
-        GROUP BY v.id
-        UNION ALL SELECT * FROM native_request UNION ALL SELECT * FROM active_compaction) candidates
-      -- 混合入口同样优先已开始的请求；无回复V1输入不能压过正在执行的native轮次。
-      -- 活跃压缩拥有真实独立估算，继续以其durable位置参与最新执行请求选择。
-      ORDER BY CASE WHEN kind = 'compaction' THEN 1 WHEN kind = 'native' THEN promoted_seq IS NOT NULL ELSE EXISTS (
-        SELECT 1 FROM message a WHERE a.session_id = ${sessionID}
-          AND json_extract(a.data, '$.role') = 'assistant'
-          -- SQLite 一元 + 只移除列亲和、不转换 ID，让 JSON 表达式索引参与等值查找。
-          AND json_extract(a.data, '$.parentID') = +candidates.id
-      ) END DESC, position DESC, time_created DESC, id DESC LIMIT 1
+      SELECT * FROM winning_rival
+      UNION ALL SELECT * FROM v1_request WHERE NOT EXISTS (SELECT 1 FROM winning_rival)
     ), assistants AS MATERIALIZED (
       -- 固定一次请求的助手集合，避免后续各项统计重复展开整段历史。
       -- 先固定唯一请求再点查其助手，禁止规划器反向扫描整段消息后才过滤请求。

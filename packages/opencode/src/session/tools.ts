@@ -165,7 +165,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       }, val.delivery),
     ask: (req) => Effect.gen(function* () {
       // 工具执行期间可修改 Session 规则；实际权限请求使用最新值而非目录生成时的快照。
-      const latest = execution ? yield* sessions.get(input.session.id) : input.session
+      const latest = execution ? yield* permission.sessionRules(input.session.id) : input.session
       return yield* (execution?.review ?? permission).ask({
           ...req,
           // #230：permission reviewer 以 metadata.agent 为稳定信号——集中在此写入使 apply_patch/write/edit/插件共享同一安全路径
@@ -225,10 +225,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   }))
                 }),
                 begin: (code, calls) => Effect.gen(function* () {
-                  const current = yield* sessions.get(input.session.id)
+                  const current = yield* permission.sessionRules(input.session.id)
                   review = yield* permission.beginExecute({
                     sessionID: input.session.id, tool: { messageID: ctx.messageID, callID: options.toolCallId },
-                    code, calls, ruleset: Permission.merge(input.agent.permission, current.permission ?? []),
+                    code, calls, ruleset: Permission.merge(input.agent.permission, current.permission),
                     agent: input.agent.name, stop: (reason) => controller.abort(reason),
                   })
                 }).pipe(Effect.orDie),
@@ -236,7 +236,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   if (signal.aborted) return yield* Effect.interrupt
                   const approved = review
                   if (!approved) return yield* Effect.die("execute preparation must precede invocation")
-                  const current = yield* sessions.get(input.session.id)
+                  const current = yield* permission.sessionRules(input.session.id)
                   const selected = ToolSelection.filter(inventory, input.agent.permission, current.permission, input.userTools)[id]
                   const remote = mcpTools[id] ? (yield* mcp.tools())[id] : undefined
                   // MCP 重连后使用当前 entry，旧 catalog 只约束可用名称而不保留失效连接。
@@ -282,7 +282,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
                   ).pipe(Effect.onExit(() => Effect.gen(function* () {
                     if (!child.partID) return
                     // 每个子调用只读取一次结算记录，避免连续调用反复水合整段历史。
-                    const part = yield* sessions.getPart({ sessionID: current.id, messageID: ctx.messageID, partID: child.partID })
+                    const part = yield* sessions.getPart({ sessionID: input.session.id, messageID: ctx.messageID, partID: child.partID })
                     // 结算 owner 的状态也涵盖中断和 hook 失败，不用解释器回调推测结果。
                     if (part?.type === "tool") settled.push(part)
                   })), Effect.catchCause((cause) => {

@@ -1705,98 +1705,100 @@ export const warmExecutionWindow = Effect.fn("MessageV2.warmExecutionWindow")(fu
 // #557：Prompt window 结构 proof——只读 SQLite 原始文本与 cold locator，不 thaw/hydrate；
 // boundary identity 是 Provider window 的结构版本，成功 Compaction 改写 boundary 后必须完整 miss。
 export type PromptWindowProof = {
-  boundary: string
-  messages: Array<{ id: MessageID; key: string }>
+  readonly boundary: string
+  readonly messages: ReadonlyArray<{ readonly id: MessageID; readonly key: string }>
 }
 
-  // #557：proof 是 cache 唯一 admission 依据——不读 thaw 后的业务对象，避免自身成为预热源。
-export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(function* (sessionID: SessionID) {
-  const { db, sync } = yield* Database.Service
-  const boundary = yield* Database.withSync({ db, sync }, () => CompactionBoundary.latest(sync, sessionID))
-  const cutoffID = boundary?.tailStartID ?? boundary?.markerID
-  const cutoff = cutoffID
-    ? yield* db
-        .select({ id: MessageTable.id, time: MessageTable.time_created })
-        .from(MessageTable)
-        .where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, cutoffID)))
-        .get()
-        .pipe(Effect.orDie)
-    : undefined
-  // cutoff row 缺失时不猜测半个 Compaction window，boundary key 已迫使 caller miss。
-  const messageRows = yield* db
-    .select({
-      id: MessageTable.id,
-      timeCreated: MessageTable.time_created,
-      timeUpdated: MessageTable.time_updated,
-      data: sql<string>`cast(${MessageTable.data} as text)`,
-      coldRef: MessageTable.cold_ref,
-      coldKey: sql<string>`hex(${MessageTable.cold_key})`,
-    })
-    .from(MessageTable)
-    .where(
-      cutoff
-        ? and(eq(MessageTable.session_id, sessionID), atOrNewer(cutoff))
-        : eq(MessageTable.session_id, sessionID),
-    )
-    .orderBy(MessageTable.time_created, MessageTable.id)
-    .all()
-    .pipe(Effect.orDie)
-  // time_updated 覆盖同一 Message ID 的原位更新；time_created 决定 common-prefix 的 persisted 顺序。
-  const partRows = yield* db
-    .select({
-      messageID: sql<MessageID>`${PartTable.message_id}`,
-      id: sql<PartID>`${PartTable.id}`,
-      timeCreated: sql<number>`${PartTable.time_created}`,
-      timeUpdated: sql<number>`${PartTable.time_updated}`,
-      data: sql<string>`cast(${PartTable.data} as text)`,
-      coldRef: sql<string | null>`${PartTable.cold_ref}`,
-      coldKey: sql<string>`hex(${PartTable.cold_key})`,
-      coldStats: sql<string>`cast(${PartTable.cold_stats} as text)`,
-    })
-    // 无统计信息时 SQLite 会误选 session 索引，逐次扫描整段历史；沿已有消息索引只读窗口 Part。
-    .from(sql`${PartTable} indexed by part_message_id_id_idx`)
-    .innerJoin(MessageTable, eq(PartTable.message_id, MessageTable.id))
-    // 同一 join 同时承载完整历史与 cutoff 窗口，避免两个 proof 查询形状漂移。
-    .where(
-      and(
-        eq(PartTable.session_id, sessionID),
-        eq(MessageTable.session_id, sessionID),
-        ...(cutoff ? [atOrNewer(cutoff)] : []),
-      ),
-    )
-    .orderBy(MessageTable.time_created, MessageTable.id, PartTable.id)
-    .all()
-    .pipe(Effect.orDie)
-  const parts = new Map<MessageID, unknown[]>()
-  for (const row of partRows) {
-    // Part ID 顺序覆盖 pending→running→terminal 的同 row replacement；primitive worktree marker 变化也必须让对应 Message proof miss。
-    const list = parts.get(row.messageID) ?? []
-    list.push([row.id, row.timeCreated, row.timeUpdated, row.data, row.coldRef, row.coldKey, row.coldStats])
-    parts.set(row.messageID, list)
+type ProofHint = { proof?: WeakRef<PromptWindowProof> }
+const proofSlot = Symbol("promptWindowProof")
+
+function watchProofWrites(tx: Pick<Database.Interface["sync"], "run">) {
+  tx.run("create temp table prompt_proof_watch(session text, version integer, floor text)")
+  for (const [table, owner] of [["message", "id"], ["part", "message_id"]]) {
+    for (const [op, sides] of [["insert", ["NEW"]], ["update", ["OLD", "NEW"]], ["delete", ["OLD"]]] as const) {
+      const changes = sides.map(side => `update prompt_proof_watch set floor=${side}.${owner}
+        where session=${side}.session_id and (floor is null or floor>${side}.${owner});`)
+      tx.run(`create temp trigger proof_${table}_${op} after ${op} on main.${table} begin ${changes.join("\n")} end`)
+    }
   }
-  const messages: PromptWindowProof["messages"] = []
-  // 在两条消息之间检查八毫秒的时间预算；短窗口无需等待，长窗口让出主线程时保留原校验键和顺序。
+}
+
+function proofWindow(tx: Parameters<Parameters<Database.Interface["sync"]["transaction"]>[0]>[0], sessionID: SessionID,
+  previous: PromptWindowProof | undefined, floor: string | null) {
+  const active = CompactionBoundary.latest(tx, sessionID)
+  const boundary = JSON.stringify(active ?? null)
+  const cutoffID = active && (active.tailStartID ?? active.markerID)
+  const cutoff = cutoffID && tx.select({ id: MessageTable.id, time: MessageTable.time_created })
+    .from(MessageTable).where(and(eq(MessageTable.session_id, sessionID), eq(MessageTable.id, cutoffID))).get()
+  const known = new Map(previous?.boundary === boundary ? previous.messages.map(item => [item.id, item] as const) : [])
+  const ids = tx.select({ id: MessageTable.id, clean: sql<number | null>`${MessageTable.id} < ${floor}` })
+    .from(MessageTable).where(and(eq(MessageTable.session_id, sessionID), cutoff ? atOrNewer(cutoff) : undefined))
+    .orderBy(MessageTable.time_created, MessageTable.id).all()
+  const needed: { id: MessageID; key: string }[] = []
+  const messages = ids.map(({ id, clean }) => {
+    const old = clean && known.get(id)
+    if (old) return old
+    const item = { id, key: "" }
+    needed.push(item)
+    return item
+  })
+  return { boundary, messages, needed }
+}
+
+export const promptWindowProof = Effect.fn("MessageV2.promptWindowProof")(function* (sessionID: SessionID) {
+  const database = yield* Database.Service
+  const hint: ProofHint = {}
+  const data = yield* Database.withSync(database, (sync) => {
+    const connection: typeof sync.$client & { [proofSlot]?: ProofHint } = sync.$client
+    const last = connection[proofSlot]
+    const result = sync.transaction(
+      (tx) => {
+        if (!last) watchProofWrites(tx)
+        const version = tx.get<{ data_version: number }>("pragma main.data_version").data_version
+        const previous = last?.proof?.deref()
+        const watch =
+          previous &&
+          tx.get<{ floor: string | null }>(
+            sql`select floor from temp.prompt_proof_watch where session=${sessionID} and version=${version}`,
+          )
+        if (previous && watch && watch.floor === null) return { previous }
+        const window = proofWindow(tx, sessionID, watch && previous, watch ? watch.floor : null)
+        const selected = sql`json_each(${JSON.stringify(window.needed.map(item => item.id))})`
+        const rows = tx.values<[number, MessageID, ...unknown[]]>(sql`
+        select s.key,m.id,m.time_created,m.time_updated,cast(m.data as text),m.cold_ref,hex(m.cold_key)
+        from ${selected} s cross join message m where m.id=s.value`)
+        const parts = tx.values<[MessageID, ...unknown[]]>(sql`
+        select message_id,id,time_created,time_updated,cast(data as text),cold_ref,hex(cold_key),cast(cold_stats as text)
+        from part indexed by part_message_id_id_idx where session_id=${sessionID} and message_id in (select value from ${selected}) order by message_id,id`)
+        tx.run(
+          sql`insert or replace into temp.prompt_proof_watch(rowid,session,version) values(1,${sessionID},${version})`,
+        )
+        return { ...window, rows, parts }
+      },
+      { behavior: "deferred" },
+    )
+    // 编码让出前先替换当前快照，较早完成的编码不能发布到新快照。
+    if (!result.previous) connection[proofSlot] = hint
+    return result
+  })
+  if (data.previous) return data.previous
+  const parts = new Map<MessageID, unknown[][]>()
+  for (const [id, ...part] of data.parts) {
+    const list = parts.get(id)
+    if (list) list.push(part)
+    else parts.set(id, [part])
+  }
   let nextYield = performance.now() + 8
-  for (const row of messageRows) {
+  for (const [index, ...row] of data.rows) {
     if (performance.now() >= nextYield) {
       yield* Effect.promise(() => Bun.sleep(0))
       nextYield = performance.now() + 8
     }
-    messages.push({
-      id: row.id,
-      // zstd(level 1)转latin1无损保存完整tuple，保留exact相等且不让warm槽重复常驻原文。
-      key: encodeProofKey(JSON.stringify([
-        row.id,
-        row.timeCreated,
-        row.timeUpdated,
-        row.data,
-        row.coldRef,
-        row.coldKey,
-        parts.get(row.id) ?? [],
-      ])),
-    })
+    data.needed[index].key = encodeProofKey(JSON.stringify([...row, parts.get(row[0]) ?? []]))
   }
-  return { boundary: JSON.stringify(boundary ?? null), messages }
+  const proof: PromptWindowProof = { boundary: data.boundary, messages: data.messages }
+  hint.proof = new WeakRef(proof)
+  return proof
 })
 
 // #557：首个 mismatch 必须 inclusive hydrate，同一 Assistant 新增 Part 才会替换旧版本；
