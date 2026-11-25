@@ -548,12 +548,13 @@ try {
       // 当前UI以agent/model标签表达运行态；fixture的一秒延迟保证该状态可被真实frame捕获。
       // 这里不匹配日志字符串，避免--print-logs改变测试结果。
       const frame = capture(terminal)
-      return frame.includes("Build · Artifact Smoke Model") ? frame : undefined
+      if (frame.includes("Auto · Artifact Smoke Model")) {
+        return frame
+      }
     },
     "compiled TUI did not render a busy spinner",
     15_000,
   )
-  // Build/模型标签是当前production spinner的可观察busy状态；直接spinner intrinsic另有单测覆盖。
   await waitFor(
     () => {
       const frame = capture(terminal)
@@ -567,6 +568,16 @@ try {
   if (spinnerGlyphs.some((indicator) => completed.includes(indicator))) {
     throw new Error("compiled TUI retained spinner glyph after model completion")
   }
+  const url = `${sessionResponse.url}/${session.id}/message`
+  const response = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(2_000),
+  })
+  const [{ info }] = await response.json()
+  if (info.role !== "user" || info.agent !== "auto")
+    throw new Error("Unexpected TUI agent")
+  if (`${info.model.providerID}/${info.model.modelID}` !== "test/test-model")
+    throw new Error("Wrong initial TUI model")
   if (targetLiveness) {
     await waitFor(
       () => {

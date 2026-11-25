@@ -163,6 +163,7 @@ export const {
       }
       config: Config
       session: Session[]
+      pageReady: Record<string, true | undefined>
       session_status: {
         [sessionID: string]: SessionStatus
       }
@@ -207,6 +208,7 @@ export const {
       provider: [],
       provider_default: {},
       session: [],
+      pageReady: {},
       session_status: {},
       session_diff: {},
       todo: {},
@@ -409,6 +411,7 @@ export const {
       // 正文租约归还时同步释放贡献，下次正常加载不能沿用旧页的测量结果。
       releaseAccounting(sessionID)
       fullSyncedSessions.delete(sessionID)
+      setStore("pageReady", sessionID, undefined)
       const completed = new Set(
         (store.message[sessionID] ?? [])
           .filter((message) => message.role !== "assistant" || message.time.completed !== undefined)
@@ -461,6 +464,7 @@ export const {
             const match = search(draft.session, sessionID, (item) => item.id)
             if (match.found) draft.session.splice(match.index, 1)
             delete draft.message[sessionID]
+            delete draft.pageReady[sessionID]
             delete draft.todo[sessionID]
             delete draft.session_diff[sessionID]
             delete draft.session_status[sessionID]
@@ -1691,6 +1695,7 @@ export const {
                   if (parts.some((part) => tracker.parts.has(part.id))) continue
                   delete draft.part[key]
                 }
+                draft.pageReady[sessionID] = true
               }),
             )
             // session.sync 从 DB 创建/更新 parts 后，replay 在 parts 到达前缓冲的 delta。

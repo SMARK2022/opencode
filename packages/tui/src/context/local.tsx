@@ -1,6 +1,12 @@
 import { createStore } from "solid-js/store"
 import { createSimpleContext } from "./helper"
-import { batch, createEffect, createMemo, untrack } from "solid-js"
+import {
+  batch,
+  createEffect,
+  createMemo,
+  createSignal,
+  untrack,
+} from "solid-js"
 import { useSync } from "./sync"
 import { useEvent } from "./event"
 import path from "path"
@@ -13,6 +19,12 @@ import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
 import { usePermission } from "./permission"
+import type { UserMessage } from "@opencode-ai/sdk/v2"
+
+type Choice = {
+  agent?: string
+  model?: UserMessage["model"]
+}
 
 export type LocalTheme = {
   secondary: RGBA
@@ -72,6 +84,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       selection.sessionID = route.data.type === "session" ? route.data.sessionID : undefined
       selection.initialized = true
     }
+    const [ready, init] = createSignal(false)
+    const [picks, setPick] =
+      createStore<Partial<Record<string, Choice>>>()
+    function id() {
+      const r = route.data
+      if (r.type === "session") return r.sessionID
+      return ""
+    }
+    const picked = () => picks[id()]
+    const pick = (v: Choice) => setPick(id(), v)
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
@@ -92,6 +114,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const [agentStore, setAgentStore] = createStore({
         current: undefined as string | undefined,
       })
+      const find = (name?: string) =>
+        agents().find((a) => a.name === name)
       const colors = createMemo(() => [
         theme.secondary,
         theme.accent,
@@ -106,17 +130,27 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return agents()
         },
         current() {
-          return agents().find((x) => x.name === agentStore.current) ?? agents().at(0)
+          const name = picked()?.agent
+          if (name) return find(name)
+          if (!ready() && id()) return
+          return (
+            find(agentStore.current) ??
+            find(sync.data.config.default_agent ?? "auto") ??
+            agents()[0]
+          )
         },
-        set(name: string) {
+        set(name: string, manual = false) {
           if (!agents().some((x) => x.name === name))
             return toast.show({
               variant: "warning",
               message: `Agent not found: ${name}`,
               duration: 3000,
             })
-          selectSession()
+          const m = manual && model.current()
+          if (manual) pick({ agent: name })
+          if (!manual) selectSession()
           setAgentStore("current", name)
+          if (m) model.set(m)
         },
         move(direction: 1 | -1) {
           batch(() => {
@@ -126,8 +160,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (next < 0) next = agents().length - 1
             if (next >= agents().length) next = 0
             const value = agents()[next]
-            selectSession()
-            setAgentStore("current", value.name)
+            this.set(value.name, true)
           })
         },
         color(name: string) {
@@ -248,6 +281,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
 
       const currentModel = createMemo(() => {
+        const m = picked()?.model
+        if (m) return m
+        if (!ready() && id()) return
         const a = agent.current()
         return (
           getFirstValidModel(
@@ -259,6 +295,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
 
       return {
+        restore(m: UserMessage["model"]) {
+          const choice = picked()?.model
+          const variant =
+            choice?.modelID === m.modelID &&
+            choice.providerID === m.providerID
+              ? choice.variant
+              : undefined
+          const key = `${m.providerID}/${m.modelID}`
+          setModelStore(
+            "variant",
+            key,
+            variant ?? m.variant,
+          )
+          this.set(m)
+        },
         current: currentModel,
         get ready() {
           return modelStore.ready
@@ -333,7 +384,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           setModelStore("recent", recentModels(next, modelStore.recent))
           save()
         },
-        set(model: { providerID: string; modelID: string }, options?: { recent?: boolean }) {
+        set(
+          model: UserMessage["model"],
+          options?: { recent?: boolean; manual?: boolean },
+        ) {
           batch(() => {
             if (!isModelValid(model)) {
               toast.show({
@@ -343,10 +397,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               })
               return
             }
+            if (options?.manual) {
+              const variant = this.variant.selected(model)
+              pick({ model: { ...model, variant } })
+            }
             const a = agent.current()
             if (!a) return
-            selectSession()
-            setModelStore("model", a.name, model)
+            if (!options?.manual) selectSession()
+            setModelStore("model", a.name, {
+              ...model,
+            })
             if (options?.recent) {
               setModelStore("recent", recentModels(model, modelStore.recent))
               save()
@@ -377,10 +437,15 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           })
         },
         variant: {
-          selected() {
-            const m = currentModel()
+          selected(m = currentModel()) {
             if (!m) return undefined
             const key = `${m.providerID}/${m.modelID}`
+            const manual = picked()?.model
+            if (
+              manual?.modelID === m.modelID &&
+              manual.providerID === m.providerID &&
+              manual.variant
+            ) return manual.variant
             return modelStore.variant[key]
           },
           current() {
@@ -400,7 +465,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           set(value: string | undefined) {
             const m = currentModel()
             if (!m) return
-            selectSession()
+            pick({
+              model: {
+                ...m,
+                variant: value ?? "default",
+              },
+            })
             const key = `${m.providerID}/${m.modelID}`
             setModelStore("variant", key, value ?? "default")
             save()
@@ -432,23 +502,23 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       if (selection.sessionID !== sessionID) {
         selection.sessionID = sessionID
         selection.initialized = false
+        init(false)
       }
       // 等待启动数据和本地 variant 读盘，避免空历史及持久化竞态。
       if (!sessionID || selection.initialized || sync.status === "loading" || !model.ready) return
-      const msg = sync.data.message[sessionID]?.findLast((message) => message.role === "user")
-      if (!msg || msg.role !== "user") return
+      if (!sync.data.pageReady[sessionID]) return
 
       // 只等待首次历史；恢复写入不订阅选择，Prompt 重挂载也不再触发。
       untrack(() => {
         selection.initialized = true
+        const msg = sync.data.message[sessionID]?.findLast(
+          (message) => message.role === "user",
+        )
+        init(true)
+        if (!msg || msg.role !== "user") return
         const isPrimaryAgent = agent.list().some((item) => item.name === msg.agent)
-        if (!msg.agent || !isPrimaryAgent) return
-        // 保留命令行 agent 优先级及现有模型、variant setter。
-        if (!args.agent) agent.set(msg.agent)
-        if (msg.model) {
-          model.set(msg.model)
-          model.variant.set(msg.model.variant)
-        }
+        if (!args.agent && isPrimaryAgent) agent.set(msg.agent)
+        model.restore(msg.model)
       })
     })
 
@@ -575,6 +645,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     })
 
     const result = {
+      handoff() {
+        const value = picked()
+        const copy = {
+          ...value,
+          model: value?.model && { ...value.model },
+        }
+        return (id: string) => setPick(id, copy)
+      },
       model,
       agent,
       mcp,

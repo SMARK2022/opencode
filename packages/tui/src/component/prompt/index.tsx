@@ -1156,10 +1156,11 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
-    const variant = local.model.variant.current()
+    const variant = local.model.variant.selected()
     let sessionID = props.sessionID
     let finishMoveProgress = false
     if (sessionID == null) {
+      const adopt = local.handoff()
       const selectedWorkspace = workspace.selection()
       const workspaceID = selectedWorkspace?.type === "existing" ? selectedWorkspace.workspaceID : undefined
 
@@ -1191,6 +1192,7 @@ export function Prompt(props: PromptProps) {
       }
 
       sessionID = res.data.id
+      adopt(sessionID)
     }
 
     const inputText = expandTrackedPastedText(

@@ -38,6 +38,15 @@ import { PromptVoiceRecorder } from "../../../../src/prompt-voice-recorder"
 import { createEventSource, createFetch, directory, json, wait, worktree } from "./sync-fixture"
 
 const sessionID = "ses_prompt_transport"
+const info = {
+  id: sessionID,
+  directory,
+  projectID: "proj_test",
+  slug: "test",
+  title: "Test",
+  version: "1",
+  time: { created: 1, updated: 1 },
+}
 
 const model = {
   id: "model",
@@ -85,16 +94,11 @@ test("failed TUI prompt submission keeps the draft text", async () => {
 
   // #192：/config/providers 和 /provider 返回测试 model——LocalProvider 初始化需要
   // #192：/agent 返回 general agent——Prompt 组件需要可用 agent 列表
-  // #192：/message 和 /prompt_async 都抛异常——覆盖两种提交路径
   await withPrompt(
     (url) => {
       if (url.pathname === "/config/providers") return json({ providers: [provider], default: { provider: model.id } })
       if (url.pathname === "/provider") return json({ all: [provider], default: { provider: model.id }, connected: [] })
       if (url.pathname === "/agent") return json([agent])
-      if (url.pathname === `/session/${sessionID}/message`) {
-        attempts += 1
-        throw new Error("simulated transport failure")
-      }
       if (url.pathname === `/session/${sessionID}/prompt_async`) {
         attempts += 1
         throw new Error("simulated transport failure")
@@ -678,6 +682,54 @@ test("keeps short retry details left-aligned and error-colored", async () => {
   )
 })
 
+test.each([
+  ["default", "auto"], ["configured", "build"],
+  ["disabled", "build"], ["explicit", "plan"],
+])("submit from home: %s", async (kind, name) => {
+  await using tmp = await tmpdir()
+  await Bun.write(`${tmp.path}/kv.json`, "{}")
+  const manual = kind === "explicit"
+  const providerID = provider.id
+  const selected = { providerID, modelID: manual ? "gpt" : model.id }
+  const base = { providerID, modelID: model.id }
+  const models = { model, gpt: { ...model, id: "gpt" } }
+  const posts: unknown[] = []
+  const transport: FetchHandler = async (url, request) => {
+    if (url.pathname === "/config/providers") {
+      const providers = [{ ...provider, models }]
+      return json({ providers, default: {} })
+    }
+    if (url.pathname === "/agent") {
+      return json([
+        { ...agent, name: "build" },
+        { ...agent, name: "auto", hidden: kind === "disabled" },
+        { ...agent, name: "plan", model: base },
+      ])
+    }
+    if (url.pathname === "/config" && kind === "configured") {
+      return json({ default_agent: "build" })
+    }
+    if (request?.method !== "POST") return
+    posts.push(await request.json())
+    return json(info)
+  }
+  await withPrompt(transport, async (prompt, route, app, _, local) => {
+    if (manual) {
+      local.model.set(selected, { manual: true })
+      local.agent.set("plan", true)
+    }
+    const frame = await settlePromptFrame(app)
+    prompt.set({ input: "hello", parts: [] })
+    prompt.submit()
+    if (manual) local.agent.set("build", true)
+    await wait(() => route.data.type === "session")
+    expect(posts[0]).toMatchObject({ agent: name, model: { providerID, id: selected.modelID } })
+    expect(posts[1]).toMatchObject({ agent: name, model: selected })
+    expect(frame.toLowerCase()).toContain(`${name} ·`)
+    if (manual) expect(local.agent.current()?.name).toBe("plan")
+  }, tmp.path, { initialRoute: { type: "home" }, promptSessionID: undefined })
+})
+
 type FetchHandler = Parameters<typeof createFetch>[0]
 // #491：状态必须经过 SDK event source 进入 SyncProvider，测试不能直接写 store 绕过生产消费链。
 type PromptContext = { emit: ReturnType<typeof createEventSource>["emit"]; sync: ReturnType<typeof useSync> }
@@ -707,6 +759,7 @@ async function withPrompt(
     route: ReturnType<typeof useRoute>,
     app: Awaited<ReturnType<typeof testRender>>,
     context: PromptContext,
+    local: ReturnType<typeof useLocal>,
   ) => Promise<void>,
   state: string,
   options: {
@@ -716,7 +769,16 @@ async function withPrompt(
     promptWidth?: number
   } = {},
 ) {
-  const calls = createFetch(override)
+  const calls = createFetch(async (url, request, init) => {
+    const response = await override?.(url, request, init)
+    if (response) return response
+    const base = `/session/${sessionID}`
+    if (url.pathname === base) return json(info)
+    if (url.pathname === `${base}/goal`) return json({})
+    for (const key of ["message", "todo", "diff"]) {
+      if (url.pathname === `${base}/${key}`) return json([])
+    }
+  })
   const events = createEventSource()
   let prompt!: PromptRef
   let sync!: ReturnType<typeof useSync>
@@ -760,8 +822,9 @@ async function withPrompt(
   try {
     await mounted
     await wait(() => sync.status === "complete" && local.model.ready)
+    if (route.data.type === "session") await sync.session.sync(route.data.sessionID)
     // #491：只把 renderer 传给需要断言用户可见帧的测试；既有 transport 测试会自然忽略后两个参数。
-    await run(prompt, route, app, { emit: events.emit, sync })
+    await run(prompt, route, app, { emit: events.emit, sync }, local)
   } finally {
     app.renderer.destroy()
   }

@@ -17,7 +17,7 @@ import { LocalProvider, useLocal } from "../../../../src/context/local"
 import { LocationProvider } from "../../../../src/context/location"
 import { PermissionProvider } from "../../../../src/context/permission"
 import { ProjectProvider } from "../../../../src/context/project"
-import { PromptRefProvider } from "../../../../src/context/prompt"
+import { PromptRefProvider, usePromptRef } from "../../../../src/context/prompt"
 import { RouteProvider } from "../../../../src/context/route"
 import { SDKProvider } from "../../../../src/context/sdk"
 import { SyncProvider, useSync } from "../../../../src/context/sync"
@@ -59,11 +59,11 @@ function completedToolPart(id: string, messageID: string, tool: string, input: R
   return { ...part, tool, state: { ...part.state, input, metadata } }
 }
 type App = Awaited<ReturnType<typeof testRender>>
-type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap> }
+type Context = { sync: ReturnType<typeof useSync>; local: ReturnType<typeof useLocal>; keymap: ReturnType<typeof useOpencodeKeymap>; prompt: ReturnType<typeof usePromptRef> }
 
 async function withRenderedSession(messages: Array<UserMessage | AssistantMessage>, parts: Record<string, Part[]>,
   run: (app: App, emit: ReturnType<typeof createEventSource>["emit"], ctx: Context) => Promise<void>, size = { width: 80, height: 24 },
-  override?: Parameters<typeof createFetch>[0]) {
+  override?: Parameters<typeof createFetch>[0], renderPrompt = false) {
   await using tmp = await tmpdir()
   await Bun.write(`${tmp.path}/kv.json`, JSON.stringify({ thinking_mode: "show" }))
   const events = createEventSource()
@@ -88,7 +88,7 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
   })
   let ctx: Context | undefined
   function Probe() {
-    const value = { sync: useSync(), local: useLocal(), keymap: useOpencodeKeymap() }
+    const value = { sync: useSync(), local: useLocal(), keymap: useOpencodeKeymap(), prompt: usePromptRef() }
     onMount(() => { ctx = value })
     return <Session />
   }
@@ -97,6 +97,7 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
     const config = createTuiResolvedConfig()
     const keymap = createDefaultOpenTuiKeymap(renderer)
     const runtime = createPluginRuntime()
+    if (renderPrompt) runtime.Slot = (props) => props.children ?? null
     onCleanup(registerOpencodeKeymap(keymap, renderer, config))
     onCleanup(() => runtime.clear())
     // 挂真实Session，不启动app或插件host；驻留、跟随与重测仍由生产renderAfter驱动。
@@ -115,10 +116,9 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
   registerOpencodeSpinner()
   const app = await testRender(() => <Harness />, { ...size, footerHeight: 0, useThread: false })
   try {
-    // 有用户历史时只恢复一次 model；等原子重命名完成后，临时目录才可被 teardown 删除。
-    await waitForFrame(app, async () =>
-      Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready && ctx.sync.data.message[sid]?.length) &&
-      (!messages.some((message) => message.role === "user") || await Bun.file(`${tmp.path}/model.json`).exists()),
+    await waitForFrame(app, () =>
+      Boolean(ctx && ctx.sync.status === "complete" && ctx.local.model.ready &&
+        (renderPrompt ? ctx.prompt.current : ctx.sync.data.pageReady[sid])),
     )
     if (!ctx) throw new Error("Session harness did not mount")
     await run(app, events.emit, ctx)
@@ -128,6 +128,52 @@ async function withRenderedSession(messages: Array<UserMessage | AssistantMessag
     engine.detach()
   }
 }
+
+test("next request keeps the chosen model after refreshing an older turn and undoing", async () => {
+  const first = user("msg_first", 1)
+  const gpt = { providerID: provider.id, modelID: "gpt" }
+  const last = { ...user("msg_last", 2), model: gpt }
+  const history = [{ ...user("msg_old", 0), model: gpt }]
+  const page = Promise.withResolvers<void>()
+  let loading = false
+  const requests: unknown[] = []
+  await withRenderedSession(history, { msg_last: [textPart("prt_retry", last.id, "retry")] }, async (app, emit, ctx) => {
+    await waitForFrame(app, () => loading)
+    const prompt = ctx.prompt.current!
+    prompt.set({ input: "first", parts: [] })
+    emit({ directory, payload: { id: "evt_live", type: "message.updated", properties: { sessionID: sid, info: first } } })
+    await waitForFrame(app, () => ctx.sync.data.message[sid]?.at(-1)?.id === first.id)
+    prompt.submit()
+    await pumpFrames(app, 2)
+    expect(requests).toBeEmpty()
+    page.resolve()
+    await waitForFrame(app, () => ctx.sync.data.pageReady[sid] === true)
+    prompt.submit()
+    await waitForFrame(app, () => requests.length === 1)
+    expect(requests[0]).toMatchObject({ model: first.model })
+    ctx.local.model.set(gpt, { manual: true })
+    expect(ctx.sync.data.message[sid].at(-1)).toMatchObject({ model: first.model })
+    history.push(first, last)
+    await ctx.sync.session.sync(sid, { force: true })
+    ctx.keymap.dispatchCommand("session.undo")
+    await pumpFrames(app, 2)
+    expect(ctx.prompt.current?.current.input).toBe("retry")
+    prompt.submit()
+    await waitForFrame(app, () => requests.length === 2)
+    expect(requests[1]).toMatchObject({ agent: "general", model: gpt })
+  }, undefined, async (url, request, init) => {
+    if (url.pathname.endsWith("/message")) {
+      loading = true
+      await page.promise
+    }
+    if (url.pathname === "/config/providers") {
+      const models = { model, gpt: { ...model, id: "gpt" } }
+      return json({ providers: [{ ...provider, models }], default: {} })
+    }
+    if (url.pathname.endsWith("/prompt_async")) requests.push(await request?.json())
+    if (request?.method === "POST") return json({})
+  }, true)
+})
 
 async function pumpFrames(app: App, rounds: number) {
   for (let i = 0; i < rounds; i++) {
