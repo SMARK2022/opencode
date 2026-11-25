@@ -126,7 +126,7 @@ bun script/guard/gate.ts push
 2. **Ruleset**（Settings → Rules → Rulesets → New branch ruleset，目标 `dev1-smark`）：
    - Require a pull request before merging，勾选 Require review from Code Owners
    - Require status checks to pass：`guard-required`，以及 test.yml 里你要求必过的任务。`guard-required` 始终执行，要求规则、所需性能基准或所选平台矩阵实际成功；必跑任务跳过、取消、缺失都会失败。
-   - PR 里的提交超出改动规模时，`规则与契约` 会失败。CI 不认 PR 提交信息里的放行标记（第三方 Agent 可以随便写）；维护者对当前 PR head approve 后，再在 checks 里点 Re-run failed jobs；新提交或撤销批准会重新阻断。
+   - 仓主更新自己在同仓开的 PR 时，Guard 读取当前提交的 `Guard-Allow-Large: 理由`。其他 PR 不采信提交里的标记；仓主可在 PR 留下一条未编辑的 `Guard-Allow-Large: <完整 head SHA>` 评论，再在该 SHA 的 checks 中点 Re-run failed jobs。新提交要重新明示，普通标签变动不重跑 Guard。
    - Block force pushes
    - Bypass list：Repository admin，模式选 Always。这样你本地直接 push 不受影响（本地 hook 是权威），PR 走 CI。
    - **注意**：第三方 Agent 如果用你本人的 token，它也是 admin，也会绕过。给 Agent 用单独的机器人账号或 GitHub App（非 admin、只有写权限）。

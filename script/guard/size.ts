@@ -46,7 +46,7 @@ function judge(change: Change, opts: Options, out: SizeHit[], notes: string[]) {
   if (!found.length) return
   const reason = opts.ignoreTrailer ? undefined : change.message?.match(trailer)?.[1]
   if (opts.allowLarge || reason) {
-    notes.push(`${change.label}：超出改动规模，${reason ? `已按 ${ALLOW_LARGE_TRAILER} 放行（${reason.trim()}）` : "已由审批放行"}`)
+    notes.push(`${change.label}：超出改动规模，${reason ? `已按 ${ALLOW_LARGE_TRAILER} 放行（${reason.trim()}）` : "已由仓主放行"}`)
     return
   }
   for (const f of found) out.push({ ...f, warn: opts.warnOnly })

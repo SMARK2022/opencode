@@ -9,7 +9,7 @@
 //
 // 改动规模（size.ts，不读基线）：暂存区模式需要 --message <提交信息文件>（commit-msg 阶段）；
 // --commit 配合 --changed-since 时逐个提交判定；--files 时只提示。
-//   --allow-large  已由审批放行（CI：PR 有维护者 approve）   --no-trailer  不认提交信息里的放行标记（CI 的 PR 模式）
+//   --allow-large  已由仓主明示放行   --no-trailer  不认提交信息里的放行标记（普通 PR 模式）
 //
 // 输出：--json <file>  --markdown <file>（可指向 $GITHUB_STEP_SUMMARY）  --annotate [--diff-base <ref>]
 import path from "node:path"

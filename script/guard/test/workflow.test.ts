@@ -7,8 +7,18 @@ import { mkdtemp, rm } from "node:fs/promises"
 test("工作流汇总拒绝缺失、跳过或失败的必需任务", async () => {
   const file = path.resolve(import.meta.dir, "../../../.github/workflows/guard.yml")
   const workflow = YAML.parse(await Bun.file(file).text()) as {
+    on: { pull_request: { types: string[] } }
     jobs: { result: { steps: { run?: string }[] } }
   }
+  const events = [
+    { action: "synchronize", head: "A" },
+    { action: "labeled", head: "A" },
+    { action: "unlabeled", head: "A" },
+    { action: "synchronize", head: "B" },
+  ]
+  expect(events.filter(({ action }) => workflow.on.pull_request.types.includes(action)).map(({ head }) => head)).toEqual([
+    "A", "B",
+  ])
   const script = workflow.jobs.result.steps.find((step) => step.run)?.run
   expect(script).toBeDefined()
   const cases = [
@@ -39,130 +49,86 @@ test("工作流汇总拒绝缺失、跳过或失败的必需任务", async () =>
   }
 })
 
-test("工作流审批读取全部页面，并按当前提交与各审核人最新有效意见放行", async () => {
+test("规则检查只在仓主明确授权当前提交时放行改动规模", async () => {
   const file = path.resolve(import.meta.dir, "../../../.github/workflows/guard.yml")
   const workflow = YAML.parse(await Bun.file(file).text()) as {
     jobs: { rules: { steps: { name?: string; run?: string }[] } }
   }
   const script = workflow.jobs.rules.steps.find((step) => step.name === "规则检查")?.run
-  expect(script).toBeDefined()
+  if (!script) throw new Error("缺少规则检查步骤")
   const head = "1".repeat(40)
-  const review = (id: number, state: string, changes: Record<string, unknown> = {}) => ({
-    user: { id },
-    state,
-    commit_id: head,
-    author_association: "OWNER",
-    submitted_at: "2026-01-01T00:00:00Z",
-    ...changes,
-  })
+  const repo = { id: 10, private: false, owner: { id: 40, type: "User" } }
+  const event = {
+    action: "synchronize",
+    repository: repo,
+    sender: { id: 40 },
+    pull_request: { user: { id: 40 }, head: { sha: head, repo } },
+  }
+  const other = { ...event, sender: { id: 41 } }
+  const grant = { body: `Guard-Allow-Large: ${head}`, author: { databaseId: 40 }, editor: null, lastEditedAt: null }
+  const page = (nodes: object[]) => ({ data: { repository: { pullRequest: { comments: { nodes } } } } })
   const cases = [
-    { pages: [[]], approved: false },
-    { pages: [[review(1, "APPROVED")]], approved: true },
-    { pages: [[review(1, "COMMENTED")], [review(2, "APPROVED", { author_association: "MEMBER" })]], approved: true },
-    {
-      pages: [[review(1, "APPROVED")], [review(1, "CHANGES_REQUESTED", { submitted_at: "2026-01-02T00:00:00Z" })]],
-      approved: false,
-    },
-    {
-      pages: [[review(1, "DISMISSED", { submitted_at: "2026-01-02T00:00:00Z" })], [review(1, "APPROVED")]],
-      approved: false,
-    },
-    {
-      pages: [[review(1, "APPROVED"), review(1, "COMMENTED", { submitted_at: "2026-01-02T00:00:00Z" })]],
-      approved: true,
-    },
-    { pages: [[review(1, "APPROVED", { commit_id: "2".repeat(40) })]], approved: false },
-    {
-      pages: [
-        [
-          review(1, "APPROVED"),
-          review(1, "APPROVED", { submitted_at: "2026-01-02T00:00:00Z", commit_id: "2".repeat(40) }),
-        ],
-      ],
-      approved: false,
-    },
-    { pages: [[review(1, "APPROVED", { author_association: "CONTRIBUTOR" })]], approved: false },
-    { pages: [[review(1, "APPROVED")]], approved: false, status: 9 },
-    { raw: "invalid JSON", approved: false, status: 0 },
+    { input: event, expected: "trailer" },
+    { input: other, expected: "default" },
+    { input: event, checkout: "2".repeat(40), expected: "default" },
+    { input: other, pages: [page([]), page([grant])], expected: "grant" },
+    { input: other, pages: [page([{ ...grant, lastEditedAt: "2026-01-01" }])], expected: "default" },
+    { input: other, pages: [page([{ ...grant, editor: { __typename: "User" } }])], expected: "default" },
+    { input: other, pages: [page([{ ...grant, editor: undefined }])], expected: "default" },
+    { input: other, pages: [page([{ ...grant, author: { databaseId: 41 } }])], expected: "default" },
+    { input: other, pages: [page([{ ...grant, body: "Guard-Allow-Large: " + "2".repeat(40) }])], expected: "default" },
+    { input: other, pages: [page([{ ...grant, body: "提及 " + grant.body }])], expected: "default" },
+    { input: other, pages: [{ errors: [{ message: "Forbidden" }] }], expected: "failure" },
+    { input: other, apiStatus: 9, expected: "failure" },
   ]
   const dir = await mkdtemp(path.join(os.tmpdir(), "guard-workflow-"))
   try {
-    await Bun.write(
-      path.join(dir, "check.ts"),
-      `
-      const file = Bun.file(process.env.CHECK_ARGS!)
-      const previous = await file.exists() ? await file.text() : ""
-      await Bun.write(file, previous + JSON.stringify(process.argv.slice(2)) + "\\n")
-    `,
-    )
-    for (const [index, entry] of cases.entries()) {
-      const pages = path.join(dir, `pages-${index}.json`)
-      const calls = Bun.file(path.join(dir, `calls-${index}.jsonl`))
-      await Bun.write(pages, entry.raw ?? JSON.stringify(entry.pages))
-      const result = Bun.spawnSync(
-        [
-          "bash",
-          "--noprofile",
-          "--norc",
-          "-e",
-          "-c",
-          `
+    await Bun.write(path.join(dir, "check.ts"), 'console.log(JSON.stringify(process.argv.slice(2)))')
+    const input = path.join(dir, "event.json")
+    const comments = path.join(dir, "comments.json")
+    for (const entry of cases) {
+      await Bun.write(input, JSON.stringify(entry.input))
+      await Bun.write(comments, JSON.stringify(entry.pages ?? [page([])]))
+      const result = Bun.spawnSync(["bash", "--noprofile", "--norc", "-e", "-c", `
+        git() { printf '%s\n' "$CHECKOUT_HEAD"; }
         gh() {
-          local slurp=0 filter=0
-          for arg in "$@"; do
-            case "$arg" in
-              --slurp) slurp=1 ;;
-              --jq|--template) filter=1 ;;
-            esac
-          done
-          if [ "$slurp" -eq 1 ] && [ "$filter" -eq 1 ]; then
-            echo 'the --slurp option is not supported with --jq or --template' >&2
-            return 2
-          fi
-          if [ "$API_STATUS" -ne 0 ]; then
-            echo 'reviews unavailable' >&2
-            return "$API_STATUS"
-          fi
-          cat "$REVIEW_PAGES"
+          if [ "$2" != graphql ]; then printf '[[]]'; return; fi
+          if [ "$API_STATUS" -ne 0 ]; then return "$API_STATUS"; fi
+          cat "$COMMENT_PAGES"
         }
         ${script}
-      `,
-        ],
-        {
-          cwd: dir,
-          env: {
-            ...process.env,
-            PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
-            MODE: "pr",
-            BASE: "HEAD",
-            DIR: dir,
-            PR: "9",
-            PR_HEAD: head,
-            GITHUB_REPOSITORY: "example/repo",
-            GITHUB_STEP_SUMMARY: path.join(dir, "summary.md"),
-            RUNNER_TEMP: dir,
-            CHECK_ARGS: calls.name,
-            REVIEW_PAGES: pages,
-            API_STATUS: String(entry.status ?? 0),
-          },
-          stdout: "pipe",
-          stderr: "pipe",
+      `], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
+          MODE: "pr",
+          BASE: "base",
+          DIR: dir,
+          PR: "9",
+          PR_HEAD: head,
+          GITHUB_REPOSITORY: "example/repo",
+          GITHUB_EVENT_PATH: input,
+          GITHUB_STEP_SUMMARY: path.join(dir, "summary.md"),
+          RUNNER_TEMP: dir,
+          CHECKOUT_HEAD: entry.checkout ?? head,
+          COMMENT_PAGES: comments,
+          API_STATUS: String(entry.apiStatus ?? 0),
         },
-      )
-      if (entry.status || entry.raw) {
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      if (entry.expected === "failure") {
         expect(result.exitCode).toBeGreaterThan(0)
-        expect(await calls.exists()).toBe(false)
+        expect(result.stdout.toString()).toBe("")
         continue
       }
-      expect({ index, code: result.exitCode, err: result.stderr.toString() }).toEqual({ index, code: 0, err: "" })
-      const checks: string[][] = (await calls.text())
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
+      expect({ code: result.exitCode, error: result.stderr.toString() }).toEqual({ code: 0, error: "" })
+      const checks: string[][] = result.stdout.toString().trim().split("\n").map((line) => JSON.parse(line))
       expect(checks).toHaveLength(2)
       for (const args of checks) {
-        expect(args.includes("--no-trailer")).toBe(true)
-        expect(args.includes("--allow-large")).toBe(entry.approved)
+        const decision = args.includes("--allow-large") ? "grant" : args.includes("--no-trailer") ? "default" : "trailer"
+        expect(decision).toBe(entry.expected)
       }
     }
   } finally {
