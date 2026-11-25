@@ -247,3 +247,808 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
          return;
        }
        if (this.isDestroyed)
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+index 06e5929..78d3ae1 100644
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3481,12 +3481,43 @@ class CodeRenderable extends TextBufferRenderable {
+       resolve?.();
+     }
+   }
++  setMarkdownLiteralRanges(ranges) {
++    const previous = this._markdownLiteralRanges ?? [];
++    // 以首个实质变化比较源范围、字形、链接，而非临时数组的引用。
++    const different = Math.min(previous.length, ranges.length);
++    let i = 0;
++    for (; i < different; i++) {
++      const a = previous[i], b = ranges[i];
++      if (a.start !== b.start || a.end !== b.end || a.text !== b.text || a.link?.url !== b.link?.url)
++        break;
++    }
++    if (i === previous.length && i === ranges.length)
++      return;
++    this._markdownLiteralRanges = ranges;
++    const first = Math.min(previous[i]?.start ?? Infinity, ranges[i]?.start ?? Infinity);
++    // 公式尾部变化不能使已稳定的 native 高亮缓存回到起点。
++    if (first < (this._prefixCache?.end ?? 0)) {
++      this._prefixCache = undefined;
++      this._cachedHighlights = [];
++    }
++    // 唤醒同正文的新链接或数学语义；旧异步回执不能覆盖新范围。
++    this._cacheGeneration++;
++    this._highlightsDirty = true;
++    this.requestRender();
++  }
++  markdownLiteralBoundary(offset) {
++    // 一段公式需要一个完整的字面 chunk，没有对应的局部源码切片。
++    const range = this._markdownLiteralRanges?.find(({ start, end }) => start < offset && offset < end);
++    return range?.start ?? offset;
++  }
+   async commitStreamingResult(content, result, snapshot, cacheGeneration) {
+     const filetype = this._filetype;
+     if (!filetype)
+       return;
+     const cacheEnd = this._onHighlight ? 0 : this._prefixCache?.end ?? 0;
+-    const clipStart = Math.min(result.changedStart, result.tailStart, cacheEnd);
++    // 主线程保存的样式缓存边界不能切进字面公式，worker 仍按正常方式高亮。
++    const tailStart = this.markdownLiteralBoundary(result.tailStart);
++    const clipStart = Math.min(result.changedStart, tailStart, cacheEnd);
+     this._cachedHighlights = [
+       ...this._cachedHighlights.filter((highlight) => highlight[1] <= clipStart),
+       ...result.highlights
+@@ -3513,15 +3544,15 @@ class CodeRenderable extends TextBufferRenderable {
+     if (!this._onHighlight && cache && cache.end <= clipStart) {
+       chunks = [...cache.chunks, ...this.convertHighlightRegion(content, highlights, cache.end, content.length)];
+       this._prefixCache = {
+-        end: result.tailStart,
+-        chunks: [...cache.chunks, ...this.convertHighlightRegion(content, highlights, cache.end, result.tailStart)]
++        end: tailStart,
++        chunks: [...cache.chunks, ...this.convertHighlightRegion(content, highlights, cache.end, tailStart)]
+       };
+     } else {
+       chunks = this.convertHighlightRegion(content, highlights, 0, content.length);
+-      this._prefixCache = this._onHighlight ? undefined : { end: result.tailStart, chunks: this.convertHighlightRegion(content, highlights, 0, result.tailStart) };
++      this._prefixCache = this._onHighlight ? undefined : { end: tailStart, chunks: this.convertHighlightRegion(content, highlights, 0, tailStart) };
+     }
+     const renderedLineSources = this._onChunks ? undefined : this.getConcealLinesSourceMap(content, highlights);
+-    if (highlights.length > 0 || this._onChunks || this._baseHighlight) {
++    if (highlights.length > 0 || this._onChunks || this._baseHighlight || this._markdownLiteralRanges?.length) {
+       chunks = await this.transformChunks(chunks, { content, filetype, syntaxStyle: this._syntaxStyle, highlights });
+       if (snapshot !== this._highlightSnapshotId || cacheGeneration !== this._cacheGeneration) {
+         this.requestRender();
+@@ -3538,6 +3569,32 @@ class CodeRenderable extends TextBufferRenderable {
+     this.commitStreamingVisible();
+   }
+   convertHighlightRegion(content, highlights, start, end) {
++    const ranges = this._markdownLiteralRanges;
++    // 无公式的高亮仍走原始区域转换，不经历富文本分割。
++    if (!ranges?.length || !ranges.some((range) => range.start < end && range.end > start))
++      return this.convertMarkdownSourceRegion(content, highlights, start, end);
++    const chunks = [];
++    let cursor = start;
++    for (const range of ranges) {
++      if (range.end <= start || range.start >= end)
++        continue;
++      // 输出原样式的前后区间，只替换真正覆盖 LaTeX 定界符的部分。
++      if (cursor < range.start)
++        chunks.push(...this.convertMarkdownSourceRegion(content, highlights, cursor, range.start));
++      if (start <= range.start) {
++        // 从现有样式继承前景/属性，保留强调和复用原有主题。
++        const [style] = this.convertMarkdownSourceRegion(content, highlights, range.start, range.end);
++        // 公式字形作为字面 chunk，不受 conceal 开关影响；其它正文仍使用原转换器。
++        chunks.push({ ...style, __isChunk: true, text: range.text, link: range.link ?? style?.link });
++      }
++      cursor = range.end;
++    }
++    // 公式之后的原始行仍负责折行、连接和 conceal，不剥除用户原有反斜杠。
++    if (cursor < end)
++      chunks.push(...this.convertMarkdownSourceRegion(content, highlights, cursor, end));
++    return chunks;
++  }
++  convertMarkdownSourceRegion(content, highlights, start, end) {
+     if (start === 0 && end === content.length) {
+       return treeSitterToTextChunks(content, highlights, this._syntaxStyle, {
+         enabled: this._conceal,
+diff --git a/index.js b/index.js
+index 6bc2672..df61a83 100644
+--- a/index.js
++++ b/index.js
+@@ -6141,13 +6141,14 @@ var x = class u {
+         e = e.substring(r.raw.length), t2.push(r);
+         continue;
+       }
++      // 富文本模式只补回被吞掉的重复定义 raw，仍由 Marked 的定义解析决定，而非二次匹配。
+       if (r = this.tokenizer.def(e)) {
+         e = e.substring(r.raw.length);
+         let s = t2.at(-1);
+         s?.type === "paragraph" || s?.type === "text" ? (s.raw += (s.raw.endsWith(`
+ `) ? "" : `
+ `) + r.raw, s.text += `
+-` + r.raw, this.inlineQueue.at(-1).src = s.text) : this.tokens.links[r.tag] || (this.tokens.links[r.tag] = { href: r.href, title: r.title }, t2.push(r));
++` + r.raw, this.inlineQueue.at(-1).src = s.text) : (this.tokens.links[r.tag] ? (this.keepDuplicateReferences && t2.push({ type: "opencode_reference_trivia", raw: r.raw })) : (this.tokens.links[r.tag] = { href: r.href, title: r.title }, t2.push(r)));
+         continue;
+       }
+       if (r = this.tokenizer.table(e)) {
+@@ -7903,8 +7904,98 @@ class TextTableRenderable extends Renderable {
+ // src/renderables/markdown-parser.ts
+-function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2) {
++function createMarkdownLexer(extensions) {
++  if (!extensions)
++    return (source) => x.lex(source, { gfm: true });
++  // 选项只配置这一个 Markdown 实例，不注册到其他消息使用的 bundled 默认 lexer。
++  const marked = new B({ gfm: true, extensions });
++  return (source, links) => {
++    // 同一 Marked 实例承接数学语义，高亮正文仍由原生 Markdown owner 更新。
++    const lexer = new x({ ...marked.defaults });
++    // 重复定义原来会消耗而省略 raw；保留不可见 trivia 后，下次追加仍能对齐原始前缀。
++    lexer.keepDuplicateReferences = true;
++    if (links)
++      Object.assign(lexer.tokens.links, links);
++    return lexer.lex(source);
++  };
++}
++// 引用定义跟随稳定 token 的寿命，避免每片增量重新遍历整个旧引用和列表。
++const markdownDefinitions = new WeakMap;
++// 只有生效的引用语义改变后才绕过 raw 相同的旧节点快路径。
++const dirtyMarkdownReferences = new WeakSet;
++function readMarkdownDefinitions(token) {
++  let definitions = markdownDefinitions.get(token);
++  if (definitions)
++    return definitions;
++  definitions = [];
++  if (token.type === "def")
++    definitions.push(token);
++  for (const child of token.items ?? token.tokens ?? []) {
++    definitions.push(...readMarkdownDefinitions(child));
++  }
++  markdownDefinitions.set(token, definitions);
++  return definitions;
++}
++function reuseMarkdownDefinitions(tokens) {
++  const links = Object.create(null);
++  for (const token of tokens) {
++    // 和 Marked 的定义顺序一致：首个有效 href 获得该标号。
++    for (const ref of readMarkdownDefinitions(token)) {
++      links[ref.tag] ??= { href: ref.href, title: ref.title };
++    }
++  }
++  return links;
++}
++function sameMarkdownDefinitions(before, after) {
++  return Object.keys(before).length === Object.keys(after).length &&
++    Object.keys(before).every((tag) => before[tag].href === after[tag]?.href && before[tag].title === after[tag]?.title);
++}
++function sameMarkdownLinkTokens(before, after) {
++  if (before.type === "link" && before.href !== after.href)
++    return false;
++  const left = markdownNodeTokens(before), right = markdownNodeTokens(after);
++  let same = left.length === right.length;
++  for (let i = 0; i < Math.min(left.length, right.length); i++) {
++    if (left[i].type !== right[i].type || !sameMarkdownLinkTokens(left[i], right[i])) {
++      dirtyMarkdownReferences.add(right[i]);
++      same = false;
++    }
++  }
++  return same;
++}
++function markdownNodeTokens(token) {
++  return token.type === "table" ? [...token.header, ...token.rows.flat()] : token.items ?? token.tokens ?? [];
++}
++function markdownLiteralRanges(token, content) {
++  const ranges = [];
++  let cursor = 0;
++  const add = (child, limit, link) => {
++    const raw = child.raw;
++    const start = typeof raw === "string" ? content.indexOf(raw, cursor) : -1;
++    // 内层 token 不能跨越其父范围，例如从链接标题误匹配到紧随其后的公式。
++    const found = start >= 0 && start + raw.length <= limit;
++    if (found)
++      cursor = start;
++    const end = found ? start + raw.length : limit;
++    if (child.type === "opencode_math_inline" && found) {
++      ranges.push({ start, end, text: child.text, link });
++    } else {
++      for (const item of markdownNodeTokens(child))
++        // 公式可能位于链接标签内；文字替换不改变这个片段原有的点击目标。
++        add(item, end, child.type === "link" ? { url: child.href } : link);
++    }
++    if (found)
++      cursor = end;
++  };
++  // 原生块路径已去掉容器前缀，沿实际绘制正文匹配 token，不能从数据库原文猜偏移。
++  // 非数学叶子也推进游标；链接目标或代码示例中的相同公式字面量不能被替换。
++  for (const child of markdownNodeTokens(token))
++    add(child, content.length);
++  return ranges;
++}
++function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2, richLexer) {
++  const lex = richLexer ?? ((source) => x.lex(source, { gfm: true }));
+   if (!prevState || prevState.tokens.length === 0) {
+     try {
+-      const tokens = x.lex(newContent, { gfm: true });
++      const tokens = lex(newContent);
+       return {
+         content: newContent,
+         tokens,
+@@ -7933,28 +8024,45 @@ function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2) {
+   }
+   reuseCount = Math.max(0, reuseCount - trailingUnstable);
+   offset = 0;
+-  for (let i = 0;i < reuseCount; i++) {
++  for (let i = 0; i < reuseCount; i++) {
+     offset += prevState.tokens[i].raw.length;
+   }
+-  const stableTokens = prevState.tokens.slice(0, reuseCount);
+-  const remainingContent = newContent.slice(offset);
+-  if (!remainingContent) {
+-    return {
+-      content: newContent,
+-      tokens: stableTokens,
+-      stableTokenCount: stableTokens.length
+-    };
+-  }
++  let stableTokens = prevState.tokens.slice(0, reuseCount);
+   try {
+-    const newTokens = x.lex(remainingContent, { gfm: true });
++    // 旧尾部可能含正在编辑的定义。只继承稳定 token 拥有的定义。
++    const inherited = richLexer ? reuseMarkdownDefinitions(stableTokens) : undefined;
++    let newTokens = lex(newContent.slice(offset), inherited);
++    if (richLexer && !sameMarkdownDefinitions(prevState.tokens.links, newTokens.links)) {
++      // 新定义可能让之前的 [label] 立即成为链接。只回退到第一个可能受影响的块。
++      const first = stableTokens.findIndex((token) => token.type !== "def" && token.raw.includes("["));
++      if (first >= 0) {
++        stableTokens = stableTokens.slice(0, first);
++        offset = stableTokens.reduce((total, token) => total + token.raw.length, 0);
++        newTokens = lex(newContent.slice(offset), reuseMarkdownDefinitions(stableTokens));
++        for (let i = 0; i < newTokens.length && first + i < reuseCount; i++) {
++          const old = prevState.tokens[first + i], next = newTokens[i];
++          if (old.raw !== next.raw || old.type !== next.type)
++            break;
++          // 定义导致重分词后，依然保留语义未变化的节点身份。
++          if (sameMarkdownLinkTokens(old, next))
++            newTokens[i] = old;
++          else
++            dirtyMarkdownReferences.add(next);
++        }
++      }
++    }
++    const tokens = [...stableTokens, ...newTokens];
++    // 新的文档定义表和同一轮生效 token 一起发布。
++    if (richLexer)
++      tokens.links = newTokens.links;
+     return {
+       content: newContent,
+-      tokens: [...stableTokens, ...newTokens],
+-      stableTokenCount: trailingUnstable === 0 ? stableTokens.length + newTokens.length : stableTokens.length
++      tokens,
++      stableTokenCount: trailingUnstable === 0 ? tokens.length : stableTokens.length
+     };
+   } catch {
+     try {
+-      const fullTokens = x.lex(newContent, { gfm: true });
++      const fullTokens = lex(newContent);
+       return { content: newContent, tokens: fullTokens, stableTokenCount: 0 };
+     } catch {
+       return { content: newContent, tokens: [], stableTokenCount: 0 };
+@@ -8010,6 +8118,9 @@ class MarkdownRenderable extends Renderable {
+   _treeSitterClient;
+   _tableOptions;
+   _renderNode;
++  _markdownExtensions;
++  _richLexer;
++  _parsedBlockquoteTokens;
+   _internalBlockMode;
+   _parseState = null;
+   _streaming = false;
+@@ -8042,6 +8153,9 @@ class MarkdownRenderable extends Renderable {
+     this._treeSitterClient = options.treeSitterClient;
+     this._tableOptions = options.tableOptions;
+     this._renderNode = options.renderNode;
++    this._markdownExtensions = options.markdownExtensions;
++    // 构造时装配词法配置；不调用会触发布局重算的运行时 setter。
++    this._richLexer = options.markdownExtensions ? createMarkdownLexer(options.markdownExtensions) : undefined;
+     this._streaming = options.streaming ?? this._contentDefaultOptions.streaming;
+     this._internalBlockMode = options.internalBlockMode ?? this._contentDefaultOptions.internalBlockMode;
+     this.updateBlocks();
+@@ -8113,7 +8227,8 @@ class MarkdownRenderable extends Renderable {
+       return;
+     if (this._streaming !== value) {
+       this._streaming = value;
+-      this.updateBlocks(true);
++      // 完成态收束尾部；原地刷新原生子节点，不触发主题首次装配的普通节点重建。
++      this.updateBlocks(true, this.usesRichTokens());
+     }
+   }
+   get tableOptions() {
+@@ -8135,6 +8250,20 @@ class MarkdownRenderable extends Renderable {
+     this.updateBlocks(true);
+     this.requestRender();
+   }
++  get markdownExtensions() {
++    return this._markdownExtensions;
++  }
++  set markdownExtensions(extensions) {
++    if (extensions === this._markdownExtensions)
++      return;
++    this._markdownExtensions = extensions;
++    this._richLexer = extensions ? createMarkdownLexer(extensions) : undefined;
++    this._parseState = null;
++    // 更改词法配置才淘汰旧块；宽度和流式完成继续使用同一批节点。
++    this.clearBlockStates();
++    this.updateBlocks(true);
++    this.requestRender();
++  }
+   get internalBlockMode() {
+     return this._internalBlockMode;
+   }
+@@ -8175,7 +8304,8 @@ class MarkdownRenderable extends Renderable {
+     return this.createChunk(text, "default");
+   }
+   createInitialStyledText(token) {
+-    if (!this._streaming)
++    // 富文本初次绘制也需要字面数学 seed，直到异步高亮交付同一正文。
++    if (!this._streaming && !this.usesRichTokens())
+       return;
+     const chunks = [];
+     if ("tokens" in token && Array.isArray(token.tokens)) {
+@@ -8203,6 +8333,7 @@ class MarkdownRenderable extends Renderable {
+   }
+   renderInlineToken(token, chunks) {
+     switch (token.type) {
++      case "opencode_math_inline":
+       case "text":
+         chunks.push(this.createDefaultChunk(token.text));
+         break;
+@@ -8299,6 +8430,7 @@ class MarkdownRenderable extends Renderable {
+   }
+   renderInlineTokenWithStyle(token, chunks, styleGroup, link2) {
+     switch (token.type) {
++      case "opencode_math_inline":
+       case "text":
+         chunks.push(this.createChunk(token.text, styleGroup, link2));
+         break;
+@@ -8323,9 +8455,9 @@ class MarkdownRenderable extends Renderable {
+     renderable.marginTop = marginTop;
+     renderable.marginBottom = marginBottom;
+   }
+-  createMarkdownCodeRenderable(content, id, marginBottom = 0, onChunks = this._linkifyMarkdownChunks, baseHighlight, initialStyledText) {
++  createMarkdownCodeRenderable(content, id, marginBottom = 0, onChunks = this._linkifyMarkdownChunks, baseHighlight, initialStyledText, token) {
+     const currentSeed = this.getCurrentMarkdownSeed(content, initialStyledText);
+-    return new CodeRenderable(this.ctx, {
++    const renderable = new CodeRenderable(this.ctx, {
+       id,
+       content,
+       filetype: "markdown",
+@@ -8342,6 +8474,10 @@ class MarkdownRenderable extends Renderable {
+       width: "100%",
+       marginBottom
+     });
++    // 只给实际拥有数学语义的渲染路径设置范围，普通渲染仍使用原缓存。
++    if (this.usesRichTokens() && token)
++      renderable.setMarkdownLiteralRanges(markdownLiteralRanges(token, content));
++    return renderable;
+   }
+   getBlockquoteContent(token) {
+     return "text" in token && typeof token.text === "string" && token.text ? token.text : " ";
+@@ -8359,9 +8495,36 @@ class MarkdownRenderable extends Renderable {
+       flexShrink: 0,
+       marginBottom
+     });
+-    renderable.add(this.createMarkdownCodeRenderable(this.getBlockquoteContent(token), `${id}-content`, 0, this._linkifyMarkdownChunks, "markup.quote", this.createInitialStyledText(token)));
++    renderable.add(this.createBlockquoteContent(token, id));
+     return renderable;
+   }
++  usesRichTokens() {
++    return this._richLexer !== undefined || this._parsedBlockquoteTokens !== undefined;
++  }
++  setParsedBlockquoteTokens(tokens) {
++    // 引用正文沿用父级已经解析的 token；扩宽和主题刷新都不能回到子级 lexer。
++    this._parsedBlockquoteTokens = tokens;
++    this.updateBlocks();
++  }
++  shouldNestBlockquote(token) {
++    if (!this._renderNode?.handlesCode) return false;
++    // 只有含封闭富文本代码块的引用需要嵌套，普通引用保留其基色与原生样式。
++    return token.type === "code" ? this._renderNode?.handlesCode?.(token) === true :
++      markdownNodeTokens(token).some((child) => this.shouldNestBlockquote(child));
++  }
++  createBlockquoteContent(token, id) {
++    if (!this.shouldNestBlockquote(token))
++      return this.createMarkdownCodeRenderable(this.getBlockquoteContent(token), `${id}-content`, 0, this._linkifyMarkdownChunks, "markup.quote", this.createInitialStyledText(token), token);
++    const child = new MarkdownRenderable(this.ctx, {
++      id: `${id}-content`,
++      syntaxStyle: this._syntaxStyle, fg: this._fg, bg: this._bg,
++      conceal: this._conceal, concealCode: this._concealCode,
++      treeSitterClient: this._treeSitterClient, tableOptions: this._tableOptions,
++      streaming: this._streaming, internalBlockMode: "top-level", renderNode: this._renderNode, width: "100%"
++    });
++    child.setParsedBlockquoteTokens(token.tokens);
++    return child;
++  }
+   createListRenderable(token, id, marginBottom = 0) {
+     const list = new BoxRenderable(this.ctx, {
+       id,
+@@ -8433,7 +8596,7 @@ class MarkdownRenderable extends Renderable {
+       const child = input.item.tokens[index];
+       if (!child)
+         continue;
+-      if (child.type === "checkbox")
++      if (child.type === "checkbox" || child.type === "opencode_reference_trivia")
+         continue;
+       if (child.type === "space") {
+         pendingMarginTop = Math.max(pendingMarginTop, 1);
+@@ -8453,7 +8616,8 @@ class MarkdownRenderable extends Renderable {
+     const content = row.getChildren()[1];
+     if (!(content instanceof BoxRenderable))
+       return false;
+-    if (previousItem && previousItem.raw === input.item.raw) {
++    // 引用可在列表项外定义，列表项 raw 恒等仍须转发语义失效。
++    if (previousItem && previousItem.raw === input.item.raw && !dirtyMarkdownReferences.has(input.item)) {
+       return true;
+     }
+     return this.applyListItemChildren(content, input.item, previousItem, input.id);
+@@ -8467,7 +8631,7 @@ class MarkdownRenderable extends Renderable {
+       const token = item.tokens[tokenIndex];
+       if (!token)
+         continue;
+-      if (token.type === "checkbox")
++      if (token.type === "checkbox" || token.type === "opencode_reference_trivia")
+         continue;
+       if (token.type === "space") {
+         pendingMarginTop = Math.max(pendingMarginTop, 1);
+@@ -8486,7 +8650,35 @@ class MarkdownRenderable extends Renderable {
+         childIndex += 1;
+         continue;
+       }
+-      if (!this.applyListChildRenderable(existing, token, previousTokens[childIndex], childId)) {
++      // 上个有效渲染 token 与当前子节点联动，不能让不可见 trivia 参与计数。
++      const previous = previousTokens[childIndex];
++      if (token.type === "code" && previous?.type === "code" && previous.raw !== token.raw && this._renderNode?.handlesCode?.(token)) {
++        const custom = this.renderCustomNode(token, () => ({ renderable: this.createCodeRenderable(token, childId) }));
++        if (custom.renderable && custom.renderable !== custom.defaultResult?.renderable) {
++          // 只替换实际由源码进入富文本的子块，列表行和其他 CodeRenderable 继续原位。
++          existing.destroyRecursively();
++          custom.renderable.marginTop = marginTop;
++          content.add(custom.renderable, childIndex++);
++          continue;
++        }
++        this.destroyUnusedDefaultRenderable(custom.renderable);
++        if (!(existing instanceof CodeRenderable)) {
++          const source = this.createCodeRenderable(token, childId);
++          existing.destroyRecursively();
++          source.marginTop = marginTop;
++          content.add(source, childIndex++);
++          continue;
++        }
++      }
++      // 若现有富块更正回未闭合或普通代码，重新交回原生源文节点。
++      if (token.type === "code" && previous?.type === "code" && !(existing instanceof CodeRenderable) && !this._renderNode?.handlesCode?.(token)) {
++        const source = this.createCodeRenderable(token, childId);
++        existing.destroyRecursively();
++        source.marginTop = marginTop;
++        content.add(source, childIndex++);
++        continue;
++      }
++      if (!this.applyListChildRenderable(existing, token, previous, childId)) {
+         return false;
+       }
+       existing.marginTop = marginTop;
+@@ -8498,7 +8690,7 @@ class MarkdownRenderable extends Renderable {
+   getRenderableListItemTokens(item) {
+     const tokens = [];
+     for (const token of item.tokens) {
+-      if (token.type === "checkbox" || token.type === "space")
++      if (token.type === "checkbox" || token.type === "space" || token.type === "opencode_reference_trivia")
+         continue;
+       tokens.push(token);
+     }
+@@ -8506,7 +8698,7 @@ class MarkdownRenderable extends Renderable {
+   }
+   applyListChildRenderable(renderable, token, previousToken, id) {
+     if ((token.type === "text" || token.type === "paragraph") && renderable instanceof CodeRenderable) {
+-      this.applyMarkdownCodeRenderable(renderable, this.normalizeScrollbackMarkdownBlockRaw(token.raw), 0, undefined, this.createInitialStyledText(token));
++      this.applyMarkdownCodeRenderable(renderable, this.normalizeScrollbackMarkdownBlockRaw(token.raw), 0, undefined, this.createInitialStyledText(token), token);
+       return true;
+     }
+     if (token.type === "list" && renderable instanceof BoxRenderable) {
+@@ -8541,19 +8733,19 @@ class MarkdownRenderable extends Renderable {
+   }
+   createListChildRenderable(token, id) {
+     if (token.type === "text" || token.type === "paragraph") {
+-      return this.createMarkdownCodeRenderable(this.normalizeScrollbackMarkdownBlockRaw(token.raw), id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token));
++      return this.createMarkdownCodeRenderable(this.normalizeScrollbackMarkdownBlockRaw(token.raw), id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token), token);
+     }
+     if (token.type === "list")
+       return this.createListRenderable(token, id);
+     if (token.type === "code")
+-      return this.createCodeRenderable(token, id);
++      return this.renderCustomNode(token, () => ({ renderable: this.createCodeRenderable(token, id) })).renderable ?? this.createCodeRenderable(token, id);
+     if (token.type === "blockquote")
+       return this.createBlockquoteRenderable(token, id);
+     if (token.type === "hr")
+       return this.createHorizontalRuleRenderable(id);
+     if (token.type === "table")
+       return this.createTableBlock(token, id).renderable;
+-    return token.raw ? this.createMarkdownCodeRenderable(token.raw, id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token)) : null;
++    return token.raw ? this.createMarkdownCodeRenderable(token.raw, id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token), token) : null;
+   }
+   createHorizontalRuleRenderable(id, marginBottom = 0) {
+     return new BoxRenderable(this.ctx, {
+@@ -8584,7 +8776,7 @@ class MarkdownRenderable extends Renderable {
+       marginBottom
+     });
+   }
+-  applyMarkdownCodeRenderable(renderable, content, marginBottom, baseHighlight, initialStyledText) {
++  applyMarkdownCodeRenderable(renderable, content, marginBottom, baseHighlight, initialStyledText, token) {
+     renderable.streaming = true;
+     const currentSeed = this.getCurrentMarkdownSeed(content, initialStyledText);
+     renderable.initialStyledText = currentSeed;
+@@ -8595,6 +8787,9 @@ class MarkdownRenderable extends Renderable {
+     renderable.conceal = this._conceal;
+     renderable.drawUnstyledText = false;
+     renderable.baseHighlight = baseHighlight;
++    // 新范围在文本 setter 发起高亮前写入，因此异步结果不会混用上一帧公式。
++    if (this.usesRichTokens() && token)
++      renderable.setMarkdownLiteralRanges(markdownLiteralRanges(token, content));
+     renderable.content = content;
+     renderable.marginBottom = marginBottom;
+   }
+@@ -8604,14 +8799,28 @@ class MarkdownRenderable extends Renderable {
+     renderable.borderColor = this.getBlockquoteBorderColor();
+     renderable.marginBottom = marginBottom;
+     const child = renderable.getChildren()[0];
+-    if (child instanceof CodeRenderable) {
+-      this.applyMarkdownCodeRenderable(child, this.getBlockquoteContent(token), 0, "markup.quote", this.createInitialStyledText(token));
++    // 若流式关闭或更正围栏，只切换引用盒内的类型，保留外框及所在列表。
++    if (this.shouldNestBlockquote(token) !== (child instanceof MarkdownRenderable)) {
++      child?.destroyRecursively();
++      renderable.add(this.createBlockquoteContent(token, renderable.id), 0);
+       return;
+     }
+-    for (const existing of renderable.getChildren()) {
+-      existing.destroyRecursively();
++    if (child instanceof MarkdownRenderable) {
++      child.syntaxStyle = this._syntaxStyle;
++      child.fg = this._fg;
++      child.bg = this._bg;
++      child.conceal = this._conceal;
++      child.concealCode = this._concealCode;
++      child.streaming = this._streaming;
++      child.renderNode = this._renderNode;
++      child.setParsedBlockquoteTokens(token.tokens);
++      return;
++    }
++    if (child instanceof CodeRenderable) {
++      this.applyMarkdownCodeRenderable(child, this.getBlockquoteContent(token), 0, "markup.quote", this.createInitialStyledText(token), token);
++      return;
+     }
+-    renderable.add(this.createMarkdownCodeRenderable(this.getBlockquoteContent(token), `${renderable.id}-content`, 0, this._linkifyMarkdownChunks, "markup.quote"));
++    renderable.add(this.createBlockquoteContent(token, renderable.id));
+   }
+   applyCodeBlockRenderable(renderable, token, marginBottom) {
+     if (!(renderable instanceof CodeRenderable))
+@@ -8941,7 +9150,7 @@ class MarkdownRenderable extends Renderable {
+     const { cache } = this.buildTableContentCache(table, previousCache, forceRegenerate);
+     if (!cache) {
+       return {
+-        renderable: this.createMarkdownCodeRenderable(table.raw, id, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(table))
++        renderable: this.createMarkdownCodeRenderable(table.raw, id, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(table), table)
+       };
+     }
+     return {
+@@ -9007,7 +9216,7 @@ class MarkdownRenderable extends Renderable {
+     if (!markdownRaw) {
+       return { renderable: undefined, canUpdateInPlace: true };
+     }
+-    const renderable = this.createMarkdownCodeRenderable(markdownRaw, id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token));
++    const renderable = this.createMarkdownCodeRenderable(markdownRaw, id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token), token);
+     renderable.marginTop = marginTop;
+     return { renderable, canUpdateInPlace: true };
+   }
+@@ -9050,7 +9259,7 @@ class MarkdownRenderable extends Renderable {
+     if (!token.raw) {
+       return null;
+     }
+-    return this.createMarkdownCodeRenderable(token.raw, id, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token));
++    return this.createMarkdownCodeRenderable(token.raw, id, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token), token);
+   }
+   createCustomRenderable(token, index, nextToken) {
+     const custom = this.renderCustomNode(token, () => {
+@@ -9130,12 +9339,12 @@ class MarkdownRenderable extends Renderable {
+       const { cache, changed } = this.buildTableContentCache(tableToken, state.tableContentCache);
+       if (!cache) {
+         if (state.renderable instanceof CodeRenderable) {
+-          this.applyMarkdownCodeRenderable(state.renderable, tableToken.raw, marginBottom, undefined, this.createInitialStyledText(tableToken));
++          this.applyMarkdownCodeRenderable(state.renderable, tableToken.raw, marginBottom, undefined, this.createInitialStyledText(tableToken), tableToken);
+           state.tableContentCache = undefined;
+           return;
+         }
+         state.renderable.destroyRecursively();
+-        const fallbackRenderable = this.createMarkdownCodeRenderable(tableToken.raw, `${this.id}-block-${index}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(tableToken));
++        const fallbackRenderable = this.createMarkdownCodeRenderable(tableToken.raw, `${this.id}-block-${index}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(tableToken), tableToken);
+         this.add(fallbackRenderable, index);
+         state.renderable = fallbackRenderable;
+         state.tableContentCache = undefined;
+@@ -9158,22 +9367,29 @@ class MarkdownRenderable extends Renderable {
+       return;
+     }
+     if (state.renderable instanceof CodeRenderable) {
+-      this.applyMarkdownCodeRenderable(state.renderable, this.getTopLevelBlockRaw(token) ?? token.raw, marginBottom, undefined, this.createInitialStyledText(token));
++      this.applyMarkdownCodeRenderable(state.renderable, this.getTopLevelBlockRaw(token) ?? token.raw, marginBottom, undefined, this.createInitialStyledText(token), token);
+       return;
+     }
+     state.renderable.destroyRecursively();
+-    const markdownRenderable = this.createMarkdownCodeRenderable(this.getTopLevelBlockRaw(token) ?? token.raw, `${this.id}-block-${index}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token));
++    const markdownRenderable = this.createMarkdownCodeRenderable(this.getTopLevelBlockRaw(token) ?? token.raw, `${this.id}-block-${index}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token), token);
+     this.add(markdownRenderable, index);
+     state.renderable = markdownRenderable;
+   }
+-  updateTopLevelBlocks(tokens, forceTableRefresh) {
++  updateTopLevelBlocks(tokens, forceTableRefresh, finalizeStream) {
+     const blocks = this.buildTopLevelRenderBlocks(tokens);
+-    this._stableBlockCount = this.getStableBlockCount(blocks, this._parseState?.stableTokenCount ?? 0);
++    const stable = this._parseState?.stableTokenCount ?? 0;
++    // 稳定块索引基于可见 token；消耗原文但不绘制的重复定义不能增加滚动边界。
++    const visibleStable = this._richLexer && this._parseState
++      ? this._parseState.tokens.slice(0, stable).filter((token) => token.type !== "opencode_reference_trivia").length
++      : stable;
++    this._stableBlockCount = this.getStableBlockCount(blocks, visibleStable);
+     let blockIndex = 0;
+     for (let i = 0;i < blocks.length; i += 1) {
+       const block = blocks[i];
+       const existing = this._blockStates[blockIndex];
+-      if (existing && existing.token === block.token && !forceTableRefresh) {
++      // 原生可更新节点仍响应样式刷新，已布局富块不为表格或完成态重新跑引擎。
++      const refresh = forceTableRefresh && (!this.usesRichTokens() || existing?.canUpdateInPlace);
++      if (existing && existing.token === block.token && !refresh) {
+         if (existing.marginTop !== block.marginTop) {
+           this.applyMargins(existing.renderable, block.marginTop, 0);
+         }
+@@ -9181,7 +9397,8 @@ class MarkdownRenderable extends Renderable {
+         blockIndex++;
+         continue;
+       }
+-      if (existing && existing.tokenRaw === block.token.raw && existing.token.type === block.token.type && !forceTableRefresh) {
++      // raw 一样的引用段落可因晚到定义改变链接，不能走旧节点同步捷径。
++      if (existing && existing.tokenRaw === block.token.raw && existing.token.type === block.token.type && !dirtyMarkdownReferences.has(block.token) && !refresh) {
+         if (existing.marginTop !== block.marginTop) {
+           this.applyMargins(existing.renderable, block.marginTop, 0);
+         }
+@@ -9189,8 +9406,8 @@ class MarkdownRenderable extends Renderable {
+         blockIndex++;
+         continue;
+       }
+-      if (existing && !forceTableRefresh && existing.canUpdateInPlace && existing.token.type === block.token.type && this.canUpdateBlockRenderable(existing.renderable, block.token)) {
+-        if (this._renderNode) {
++      if (existing && (!forceTableRefresh || finalizeStream) && existing.canUpdateInPlace && existing.token.type === block.token.type && this.canUpdateBlockRenderable(existing.renderable, block.token)) {
++        if (this._renderNode && (!this.usesRichTokens() || existing.tokenRaw !== block.token.raw)) {
+           const custom = this.createTopLevelCustomRenderable(block, blockIndex);
+           if (custom.renderable && !custom.canUpdateInPlace) {
+             const marginTop = typeof custom.renderable.marginTop === "number" ? Math.max(custom.renderable.marginTop, block.marginTop) : block.marginTop;
+@@ -9212,7 +9429,8 @@ class MarkdownRenderable extends Renderable {
+           }
+           this.destroyUnusedDefaultRenderable(custom.renderable);
+         }
+-        this.updateBlockRenderable(existing, block.token, blockIndex, blocks[i + 1]?.token);
++        this.updateBlockRenderable(existing, block.token, blockIndex, blocks[i + 1]?.token,
++          forceTableRefresh || dirtyMarkdownReferences.has(block.token));
+         existing.renderable.marginBottom = 0;
+         if (existing.marginTop !== block.marginTop) {
+           this.applyMargins(existing.renderable, block.marginTop, 0);
+@@ -9256,9 +9474,13 @@ class MarkdownRenderable extends Renderable {
+       return renderable instanceof BoxRenderable;
+     return renderable instanceof CodeRenderable;
+   }
+-  updateBlocks(forceTableRefresh = false) {
++  updateBlocks(forceTableRefresh = false, finalizeStream = false) {
+     if (this.isDestroyed)
+       return;
++    if (this._parsedBlockquoteTokens) {
++      this.updateTopLevelBlocks(this._parsedBlockquoteTokens, forceTableRefresh, finalizeStream);
++      return;
++    }
+     if (!this._content) {
+       this.clearBlockStates();
+       this._parseState = null;
+@@ -9266,8 +9488,11 @@ class MarkdownRenderable extends Renderable {
+       return;
+     }
+     const trailingUnstable = this._streaming ? 2 : 0;
+-    this._parseState = parseMarkdownIncremental(this._content, this._parseState, trailingUnstable);
+-    const tokens = this._parseState.tokens;
++    // 分词会规范 CR；比较前缀也使用同一份规范文本，避免每片重析 CRLF 正文。
++    const source = this._richLexer && this._content.includes("\r") ? this._content.replace(/\r\n?/g, "\n") : this._content;
++    this._parseState = parseMarkdownIncremental(source, this._parseState, trailingUnstable, this._richLexer);
++    // 重复定义继续占用原文的正确长度，但和以前一样不进入可见块。
++    const tokens = this._richLexer ? this._parseState.tokens.filter((token) => token.type !== "opencode_reference_trivia") : this._parseState.tokens;
+     if (tokens.length === 0 && this._content.length > 0) {
+       this.clearBlockStates();
+       this._stableBlockCount = 0;
+@@ -9286,7 +9511,7 @@ class MarkdownRenderable extends Renderable {
+       return;
+     }
+     if (this._internalBlockMode === "top-level") {
+-      this.updateTopLevelBlocks(tokens, forceTableRefresh);
++      this.updateTopLevelBlocks(tokens, forceTableRefresh, finalizeStream);
+       return;
+     }
+     this._stableBlockCount = 0;
+@@ -9307,7 +9532,7 @@ class MarkdownRenderable extends Renderable {
+         blockIndex++;
+         continue;
+       }
+-      if (existing && existing.tokenRaw === token.raw && existing.token.type === token.type) {
++      if (existing && existing.tokenRaw === token.raw && existing.token.type === token.type && !dirtyMarkdownReferences.has(token)) {
+         existing.token = token;
+         if (shouldForceRefresh) {
+           this.updateBlockRenderable(existing, token, blockIndex, nextToken);
+@@ -9423,10 +9648,10 @@ class MarkdownRenderable extends Renderable {
+         const { cache } = this.buildTableContentCache(tableToken, state.tableContentCache, true);
+         if (!cache) {
+           if (state.renderable instanceof CodeRenderable) {
+-            this.applyMarkdownCodeRenderable(state.renderable, tableToken.raw, marginBottom, undefined, this.createInitialStyledText(tableToken));
++            this.applyMarkdownCodeRenderable(state.renderable, tableToken.raw, marginBottom, undefined, this.createInitialStyledText(tableToken), tableToken);
+           } else {
+             state.renderable.destroyRecursively();
+-            const fallbackRenderable = this.createMarkdownCodeRenderable(tableToken.raw, `${this.id}-block-${i}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(tableToken));
++            const fallbackRenderable = this.createMarkdownCodeRenderable(tableToken.raw, `${this.id}-block-${i}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(tableToken), tableToken);
+             this.add(fallbackRenderable, i);
+             state.renderable = fallbackRenderable;
+           }
+@@ -9448,11 +9673,11 @@ class MarkdownRenderable extends Renderable {
+         continue;
+       }
+       if (state.renderable instanceof CodeRenderable) {
+-        this.applyMarkdownCodeRenderable(state.renderable, this.getTopLevelBlockRaw(state.token) ?? state.token.raw, marginBottom, undefined, this.createInitialStyledText(state.token));
++        this.applyMarkdownCodeRenderable(state.renderable, this.getTopLevelBlockRaw(state.token) ?? state.token.raw, marginBottom, undefined, this.createInitialStyledText(state.token), state.token);
+         continue;
+       }
+       state.renderable.destroyRecursively();
+-      const markdownRenderable = this.createMarkdownCodeRenderable(this.getTopLevelBlockRaw(state.token) ?? state.token.raw, `${this.id}-block-${i}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(state.token));
++      const markdownRenderable = this.createMarkdownCodeRenderable(this.getTopLevelBlockRaw(state.token) ?? state.token.raw, `${this.id}-block-${i}`, marginBottom, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(state.token), state.token);
+       this.add(markdownRenderable, i);
+       state.renderable = markdownRenderable;
+     }
+diff --git a/renderables/Markdown.d.ts b/renderables/Markdown.d.ts
+index 002b4a2..2380562 100644
+--- a/renderables/Markdown.d.ts
++++ b/renderables/Markdown.d.ts
+@@ -3,7 +3,7 @@ import { type RenderContext } from "../types.js";
+ import { SyntaxStyle } from "../syntax-style.js";
+ import type { BorderStyle } from "../lib/border.js";
+ import { RGBA, type ColorInput } from "../lib/RGBA.js";
+-import { type MarkedToken, type Token, type Tokens } from "marked";
++import { type MarkedToken, type Token, type Tokens, type TokenizerExtension } from "marked";
+ import { type TextTableColumnFitter, type TextTableColumnWidthMode, type TextTableContent } from "./TextTable.js";
+ import type { TreeSitterClient } from "../lib/tree-sitter/index.js";
+ import { type ParseState } from "./markdown-parser.js";
+@@ -65,6 +65,10 @@ export interface MarkdownTableOptions {
+      */
+     selectable?: boolean;
+ }
++export type MarkdownTokenizerExtension = TokenizerExtension;
++export type MarkdownRenderNode = ((token: Token, context: RenderNodeContext) => Renderable | undefined | null) & {
++    handlesCode?: (token: Tokens.Code) => boolean;
++};
+ export interface MarkdownOptions extends RenderableOptions<MarkdownRenderable> {
+     content?: string;
+     syntaxStyle: SyntaxStyle;
+@@ -97,7 +101,8 @@ export interface MarkdownOptions extends RenderableOptions<MarkdownRenderable> {
+      * Custom node renderer. Return a Renderable to override default rendering,
+      * or undefined/null to use default rendering.
+      */
+-    renderNode?: (token: Token, context: RenderNodeContext) => Renderable | undefined | null;
++    renderNode?: MarkdownRenderNode;
++    markdownExtensions?: MarkdownTokenizerExtension[];
+     /**
+      * Internal only.
+      * - "coalesced": combine ordinary markdown into larger render blocks.
+@@ -172,6 +177,8 @@ export declare class MarkdownRenderable extends Renderable {
+     set streaming(value: boolean);
+     get tableOptions(): MarkdownTableOptions | undefined;
+     set tableOptions(value: MarkdownTableOptions | undefined);
++    get markdownExtensions(): MarkdownTokenizerExtension[] | undefined;
++    set markdownExtensions(value: MarkdownTokenizerExtension[] | undefined);
+     get renderNode(): MarkdownOptions["renderNode"] | undefined;
+     set renderNode(value: MarkdownOptions["renderNode"] | undefined);
+     get internalBlockMode(): "coalesced" | "top-level";
