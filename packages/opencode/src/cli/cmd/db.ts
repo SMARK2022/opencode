@@ -1,5 +1,6 @@
 import type { Argv } from "yargs"
 import { spawn } from "child_process"
+import fs from "fs/promises"
 import { EOL } from "os"
 import { Database } from "@opencode-ai/core/database/database"
 import { Effect } from "effect"
@@ -372,12 +373,11 @@ function renderCompression(task: ColdMaintain.MaintenanceTask, elapsed: number) 
 }
 
 // #535：首次 Y/n 只决定执行域；回答 N 不会被后续 reclaim prompt 重新解释为关闭许可。
-async function confirm(question: string) {
+async function confirm(question: string, defaultYes = true) {
   const prompt = createInterface({ input: process.stdin, output: process.stderr })
   const answer = (await new Promise<string>((resolve) => prompt.question(question, resolve))).toLowerCase()
   prompt.close()
-  // 空回车与其它非否定输入都是同意；只有显式 n/no 才拒绝，与 CLI 交互惯例一致。
-  return answer !== "n" && answer !== "no"
+  return defaultYes ? answer !== "n" && answer !== "no" : answer === "y" || answer === "yes"
 }
 
 async function confirmDaemonStop(lock: ServerLock.ServerLock) {
@@ -385,6 +385,13 @@ async function confirmDaemonStop(lock: ServerLock.ServerLock) {
   UI.println("  Stopping it first is recommended for faster maintenance and reliable reclaim.")
   // readline 的 output 必须与 DB CLI 的 stderr 一致；跨 stdout 重绘会在真实 PTY 中抹掉先写出的 prompt。
   return confirm(`${UI.Style.TEXT_WARNING_BOLD}? Stop daemon and continue? [Y/n] ${UI.Style.TEXT_NORMAL}`)
+}
+
+function confirmReclaim(reusable: number, lowSpace: boolean) {
+  const question = lowSpace
+    ? "Continue VACUUM anyway? [y/N]"
+    : `Reclaim ${size(reusable)} of physical database space now? [Y/n]`
+  return confirm(`${UI.Style.TEXT_WARNING_BOLD}? ${question} ${UI.Style.TEXT_NORMAL}`, !lowSpace)
 }
 
 // #535：与 TUI reconnect 共用选主锁；从 expected-owner stop 到 offline 序列结束都禁止 replacement daemon 发布。
@@ -472,6 +479,24 @@ function vacuumResult(value: unknown) {
   return value as { type: "vacuum"; pagesBefore: number; pagesAfter: number }
 }
 
+async function warnVacuumSpace(report: ColdStorage.StatusReport) {
+  const dbPath = Database.path()
+  if (dbPath === ":memory:") return false
+  const disk = await fs.statfs(dbPath)
+  const available = disk.bavail * disk.bsize
+  const estimate = 2 * report.activeBytes
+  if (available >= estimate) return false
+
+  const { total, reusable } = freelistMetrics(report)
+  UI.println(`${UI.Style.TEXT_WARNING_BOLD}! Estimated VACUUM working space exceeds available space.${UI.Style.TEXT_NORMAL}`)
+  UI.println(`  Database allocation ${size(total)}`)
+  UI.println(`  Potential reclaim ${size(reusable)}`)
+  UI.println(`  Estimated VACUUM working space ${size(estimate)}`)
+  UI.println(`  Available space ${size(available)}`)
+  UI.println("  Free up disk space before reclaiming SQLite pages.")
+  return true
+}
+
 // #535：standalone 可保留 daemon 域；combined 路径显式传 null，确保停机后只走 offline lease。
 async function runVacuum(db: Database.Interface, pageSize: number, human: boolean, lock: ServerLock.ServerLock | null = null) {
   const started = performance.now()
@@ -523,7 +548,7 @@ async function executeMaintenance(
   if (lock && human && request.operation === "compress") {
     // 冲突检查先于 prompt：已有 nonterminal task 时不能让用户先看到停机询问再失败。
     const existing = await ServerLock.findNonterminalMaintenanceTask()
-    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
+    if (existing) throw MaintenanceExecutor.busyError(existing)
     if (await confirmDaemonStop(lock)) {
       UI.println(`${UI.Style.TEXT_HIGHLIGHT}●${UI.Style.TEXT_NORMAL} Stopping daemon safely...`)
       // 停机前才获取 election；N 分支不需要任何选主锁。
@@ -653,7 +678,8 @@ async function executeCompression(
     UI.println(`${UI.Style.TEXT_WARNING_BOLD}! Logical compression is complete.${UI.Style.TEXT_NORMAL}`)
     UI.println(`  SQLite still contains ${size(reusable)} of reusable pages.`)
     // reclaim prompt 是独立物理授权，不能继承普通 compression 的默认许可。
-    if (!input.yes && !(await confirm(`${UI.Style.TEXT_WARNING_BOLD}? Reclaim ${size(reusable)} of physical database space now? [Y/n] ${UI.Style.TEXT_NORMAL}`))) {
+    const lowSpace = await warnVacuumSpace(report)
+    if (!input.yes && !(await confirmReclaim(reusable, lowSpace))) {
       UI.println(`${UI.Style.TEXT_DIM}  Physical reclaim skipped. Run: opencode db vacuum --yes${UI.Style.TEXT_NORMAL}`)
       return
     }
@@ -873,6 +899,7 @@ const VacuumCommand = effectCmd({
         return
       }
       // standalone vacuum 复用当前所选执行域；仅 human renderer 改变，daemon/storage ownership 不迁移。
+      await warnVacuumSpace(report)
       await runVacuum(db, report.pageSize, true, lock ?? null)
     })
   }),

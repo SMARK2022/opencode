@@ -30,6 +30,18 @@ function maintain(
   })
 }
 
+export function busyError(task: ColdMaintain.MaintenanceTask) {
+  const action = task.status === "interrupted"
+    ? `Resume with: opencode db resume ${task.taskID}`
+    : "Wait for the existing task to finish before starting another maintenance task."
+  return new ServerLock.MaintenanceBusyError([
+    `Maintenance task already exists: ${task.taskID}`,
+    `Status: ${task.status}`,
+    `Inspect with: opencode db status --task ${task.taskID}`,
+    action,
+  ].join("\n"))
+}
+
 export async function runOffline(
   db: Database.Interface,
   prepared: ColdMaintain.PreparedMaintenance,
@@ -39,7 +51,7 @@ export async function runOffline(
   if (prepared.type === "immediate") {
     if (prepared.request.operation !== "vacuum") return maintain(db, prepared, { checkpoint: async () => {}, signal: options.signal }, options)
     const existing = await ServerLock.findNonterminalMaintenanceTask() // vacuum 也必须尊重待恢复任务，不能并行重排数据库页面。
-    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
+    if (existing) throw busyError(existing)
     const lease = await ServerLock.acquireMaintenanceLease({ taskID: `vacuum_${randomUUID()}`, dbPath: Database.path() })
     try {
       options.onLease?.(lease) // 上报发生在任何 SQL 之前，父侧始终知道潜在残留 token。
@@ -51,7 +63,7 @@ export async function runOffline(
 
   if (!options.task) { // resume 使用已 reconciled 身份，新任务才执行 nonterminal 冲突检查。
     const existing = await ServerLock.findNonterminalMaintenanceTask()
-    if (existing) throw new ServerLock.MaintenanceBusyError(`Maintenance task already exists: ${existing.taskID}`)
+    if (existing) throw busyError(existing)
   }
   const task = options.task ?? prepared.task // resume 保留原 taskID、cursor 和累计计数，不采用新随机任务身份。
   const lease = await ServerLock.acquireMaintenanceLease(task)

@@ -4,7 +4,7 @@ import { RunCommand } from "../../src/cli/cmd/run"
 import { mkdir, readdir, rename } from "fs/promises"
 import { existsSync } from "fs"
 import path from "path"
-import { fileURLToPath } from "url"
+import { fileURLToPath, pathToFileURL } from "url"
 import stripAnsi from "strip-ansi"
 import { spawn, type Proc } from "@opencode-ai/core/pty/pty.bun" // Bun 宿主沿 source 的 #pty 使用原生后端。
 import { Database as SQLite } from "bun:sqlite"
@@ -14,7 +14,7 @@ import { Flock } from "@opencode-ai/core/util/flock"
 import { Hash } from "@opencode-ai/core/util/hash"
 // #549：status --task / hung-control 用例消费 reconcile 与 control 协议常量（目标 owner 在 cli/tui）。
 import { ServerLock } from "../../src/cli/tui/server-lock"
-import type { MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
+import { ColdMaintain, type MaintenanceTask } from "@opencode-ai/core/storage/cold-maintain"
 import { tmpdir } from "../fixture/fixture"
 // 维护断言只走公开 CLI/PTY；播种复用公开迁移，不导入 renderer 或调用维护私有函数。
 const INDEX_TS = fileURLToPath(new URL("../../src/index.ts", import.meta.url))
@@ -51,9 +51,9 @@ async function prepareDatabase(root: string) {
   )
 }
 // PTY helper 保留真实 stdin/stderr 关系，prompt、ANSI 和光标行为都由产品入口产生。
-function runPty(args: string[], env: Record<string, string | undefined>) {
+function runPty(args: string[], env: Record<string, string | undefined>, entry = [INDEX_TS]) {
   // env 过滤 undefined：PTY 构造器要求值类型完整，不依赖平台对 undefined 的容错。
-  const proc = spawn(process.execPath, [INDEX_TS, ...args], {
+  const proc = spawn(process.execPath, [...entry, ...args], {
     ...PTY_OPTIONS,
     cwd: path.dirname(INDEX_TS),
     env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
@@ -65,6 +65,15 @@ function runPty(args: string[], env: Record<string, string | undefined>) {
   // raw 保留 \r 帧边界供百分比序列断言；output 只用于最终文本关系。
   return { proc, exited, raw: () => output, output: () => stripAnsi(output).replaceAll("\r", "") }
 }
+
+function lowSpacePty(root: string, args: string[]) {
+  const entry = `import { spyOn } from "bun:test"; import fs from "fs/promises";
+    spyOn(fs, "statfs").mockImplementation(async p => ({ bsize: 4096, bavail: p === process.env.OPENCODE_DB ? 2 : 1e9 }));
+    process.argv = [process.execPath, "opencode", ...${JSON.stringify(args)}];
+    await import(${JSON.stringify(pathToFileURL(INDEX_TS).href)})`
+  return runPty([], isolatedEnv(root), ["-e", entry])
+}
+
 // 大文本 reasoning 只用于制造真实可压缩页；压缩 eligibility 和 payload 仍由 ColdStorage 判定。
 // #549：通过插入再删除大行制造 freelist，使 PROMPT 门槛（16MB 或占比）在小 fixture 上也可达。
 function inflateFreelist(root: string, targetBytes = 20_000_000) {
@@ -155,7 +164,7 @@ async function runCli(root: string, args: string[]) {
   ])
   return { exitCode, stdout, stderr }
 }
-function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
+function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n" | "") {
   let answered = false
   // 只应答首个匹配 prompt；后续 reclaim 等待由各自用例单独控制，避免双写 stdin。
   let output = ""
@@ -173,6 +182,74 @@ function answerPrompt(proc: Proc, prompt: string, answer: "y" | "n") {
 // 依赖回写 stdin 的交互用例只在 POSIX 执行；机器域与纯渲染用例全平台运行。
 const ptyInteractive = process.platform === "win32" ? test.skip : test
 describe("database maintenance CLI", () => {
+  test("explains a blocking maintenance task and the next action", async () => {
+    await using tmp = await tmpdir({ init: prepareDatabase })
+    const env = isolatedEnv(tmp.path)
+    const prepared = ColdMaintain.prepareMaintenance({ operation: "compress", olderThanMs: 0, batchSize: 1 })
+    if (prepared.type !== "task") throw new Error("Expected a compression task")
+    const task = { ...prepared.task, dbPath: env.OPENCODE_DB }
+    const inspect = `Inspect with: opencode db status --task ${task.taskID}`
+    const resume = `Resume with: opencode db resume ${task.taskID}`
+    await ServerLock.writeMaintenanceTask({ ...task, status: "interrupted" })
+    for (const args of [["compress"], ["vacuum", "--yes"]]) {
+      const result = await runCli(tmp.path, ["db", ...args])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.replaceAll("\r", "")).toContain(`Status: interrupted\n${inspect}\n${resume}`)
+    }
+
+    const lease = await ServerLock.acquireMaintenanceLease(task)
+    try {
+      await Bun.write(env.OPENCODE_LOCK_PATH, JSON.stringify({
+        pid: process.pid, token: "busy", dbPath: task.dbPath, port: 1, controlPort: 1,
+        channel: "test", startedAt: new Date().toISOString(),
+      }))
+      for (const status of ["queued", "running"] as const) {
+        await ServerLock.writeMaintenanceTask({ ...task, status })
+        const cli = runPty(["db", "compress"], env)
+        expect(await waitForExit(cli.proc, cli.exited)).toBe(1)
+        expect(cli.output()).toContain(`Status: ${status}\n${inspect}\nWait for the existing task to finish`)
+      }
+    } finally {
+      await lease.release()
+    }
+  }, 90_000)
+
+  test("warns about available space on the database disk before standalone VACUUM", async () => {
+    await using tmp = await tmpdir({ init: prepareDatabase })
+    inflateFreelist(tmp.path)
+    const db = new SQLite(isolatedEnv(tmp.path).OPENCODE_DB)
+    const [{ page, count, free }] = db.query<{ page: number; count: number; free: number }, []>(
+      "SELECT page_size AS page, page_count AS count, freelist_count AS free FROM pragma_page_size, pragma_page_count, pragma_freelist_count",
+    ).all()
+    db.close()
+    const cli = lowSpacePty(tmp.path, ["db", "vacuum", "--yes"])
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    const output = cli.output().replace(/[^\S\n]+/g, " ")
+    expect(output).toContain(`Database allocation ${(page * count / 1e6).toFixed(1)} MB`)
+    expect(output).toContain(`Potential reclaim ${(page * free / 1e6).toFixed(1)} MB`)
+    expect(output).toContain(`Estimated VACUUM working space ${(2 * page * (count - free) / 1e3).toFixed(1)} KB`)
+    expect(output).toContain("Available space 8.2 KB")
+    expect(output).toContain("Physical reclaim completed")
+  }, 30_000)
+
+  test("lets the user skip or approve reclaim after a low-space warning", async () => {
+    await using tmp = await tmpdir({ init: (root) => seedColdParts(root, 4) })
+    inflateFreelist(tmp.path)
+    const args = ["db", "compress", "--older-than", "0ms"]
+    for (const answer of ["", "y"] as const) {
+      const cli = lowSpacePty(tmp.path, args)
+      answerPrompt(cli.proc, "? ", answer)
+      expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+      const output = cli.output()
+      expect(output).toMatch(/Compression completed[\s\S]*Free up disk space[\s\S]*Continue VACUUM anyway\? \[y\/N\]/)
+      expect(output).toContain(answer === "" ? "Physical reclaim skipped" : "Physical reclaim completed")
+    }
+    inflateFreelist(tmp.path)
+    const cli = lowSpacePty(tmp.path, [...args, "--vacuum", "--yes"])
+    expect(await waitForExit(cli.proc, cli.exited)).toBe(0)
+    expect(cli.output()).toMatch(/Free up disk space[\s\S]*Physical reclaim completed/)
+  }, 90_000)
+
   test("renders compact database status in an interactive terminal", async () => {
     await using tmp = await tmpdir({ init: markMigrated })
     const cli = runPty(["db", "status"], isolatedEnv(tmp.path))
