@@ -1,6 +1,16 @@
 /** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
 import { MouseButton, Renderable, ScrollBoxRenderable, engine } from "@opentui/core"
+import {
+  MarkdownRenderable,
+  SyntaxStyle,
+  TextTableRenderable,
+} from "@opentui/core"
+import {
+  createTestRenderer,
+  MockTreeSitterClient,
+} from "@opentui/core/testing"
+import { richMarkdown } from "../../../../src/util/rich-markdown"
 import { testRender, useRenderer } from "@opentui/solid"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { onCleanup, onMount } from "solid-js"
@@ -309,6 +319,157 @@ test("execute renders its child summary without a duplicate child tool row", asy
     expect(frame).toContain("execute")
     expect(frame).not.toContain("child-audit-only.ts")
   })
+})
+
+test.each(["inline", "reference"].flatMap((kind) => [
+  { kind, rich: false }, { kind, rich: true },
+]))("rich markdown keeps late table content: %j", async ({ kind, rich }) => {
+  const setup = await createTestRenderer({
+    width: 100, height: 12, useThread: false,
+    consoleMode: "disabled",
+  })
+  const style = SyntaxStyle.create()
+  const client = new MockTreeSitterClient()
+  const url = "https://example.org/fix"
+  const prefix = kind === "reference" ? `[fix]: ${url}\n\n` : ""
+  const link = kind === "reference" ? "[Fix][fix]" : `[Fix](${url})`
+  const options = rich
+    ? richMarkdown(setup.renderer, () => "#ffffff")
+    : undefined
+  const md = new MarkdownRenderable(setup.renderer, {
+    content: prefix + "| Version | Verdict |\n|---|---|\n| A | " + link,
+    markdown: options?.syntax,
+    renderNode: options?.renderNode,
+    streaming: true,
+    internalBlockMode: "top-level",
+    syntaxStyle: style,
+    treeSitterClient: client,
+  })
+  try {
+    md.streaming = false
+    md.content += " still pending. |"
+    const table = md.getChildren().find((node) =>
+      node instanceof TextTableRenderable,
+    )
+    const cell = table?.content.at(-1)?.[1]
+    expect(cell?.find((chunk) => chunk.text === "Fix")?.link?.url)
+      .toBe(url)
+    expect(cell?.at(-1)?.text).toBe(" still pending.")
+    expect(md.getChildren().at(-1)).toBe(table)
+  } finally {
+    md.destroyRecursively()
+    setup.renderer.destroy()
+    style.destroy()
+    await client.destroy()
+  }
+})
+
+test("session shares inline math with table cells and completes display math", async () => {
+  const info = {
+    ...assistant("msg_math", 1),
+    time: { created: 1 },
+  }
+  const prefix = [
+    "Formula \\(x^2\\)",
+    "",
+    "| \\(y^2\\) | Keep |",
+    "|---|---|",
+    "| \\(z^2\\) | $20 $(pwd)/$(whoami) |",
+    "",
+    "\\[\\frac{1}{2}",
+  ].join("\n")
+  const part = (text: string) =>
+    textPart("part_math", info.id, text)
+  await withRenderedSession([info], {
+    [info.id]: [part(prefix)],
+  }, async (app, emit) => {
+    const frame = await waitForFrame(app, (value) =>
+      value.includes("Formula x²") && value.includes("z²"),
+    )
+    expect(frame).toContain("y²")
+    expect(frame).toContain("$20 $(pwd)/$(whoami)")
+    expect(frame).toContain("\\frac{1}{2}")
+    let text = prefix + "\\]"
+    for (const [index, opening] of
+      ["`example", "`C:\\` `example", "\\``example"].entries()) {
+      text += `\n\nOPEN_${index}\n\n` + opening + "\n\\[q^2\\]\nC:\\"
+      emit(partUpdatedEvent(`evt_code_open_${index}`, part(text)))
+      await waitForFrame(app, (value) => value.includes(`OPEN_${index}`))
+      text += "`\n\n" + `CODE_END_${index}`
+      emit(partUpdatedEvent(
+        `evt_code_close_${index}`, part(text),
+      ))
+      const literal = await waitForFrame(app, (value) =>
+        value.includes(`CODE_END_${index}`),
+      )
+      expect(literal).toContain("q^2")
+      expect(literal).not.toContain("q²")
+    }
+    text += "\n\n\\[2^3"
+    emit(partUpdatedEvent("evt_math_pending", part(text)))
+    await waitForFrame(app, (value) => value.includes("2^3"))
+    emit(partUpdatedEvent(
+      "evt_math_final", part(text + "\\]\n\nMATH_END"),
+    ))
+    emit({
+      directory, project: "proj_test",
+      payload: {
+        id: "evt_math_complete", type: "message.updated",
+        properties: {
+          sessionID: info.sessionID,
+          info: { ...info, time: { created: 1, completed: 2 } },
+        },
+      },
+    })
+    const complete = await waitForFrame(app, (value) =>
+      value.includes("MATH_END") && !value.includes("\\frac"),
+    )
+    expect(complete).toContain("Formula x²")
+    expect(complete).toContain("z²")
+    expect(complete).toContain("2³")
+    expect(complete).toContain("─")
+  }, { width: 100, height: 64 })
+})
+
+test("session renders a growing Mermaid block and its final update", async () => {
+  const info = {
+    ...assistant("msg_rich", 1),
+    time: { created: 1 },
+  }
+  const part = (text: string) =>
+    textPart("part_rich", info.id, text)
+  await withRenderedSession([info], {
+    [info.id]: [part("Before")],
+  }, async (app, emit) => {
+    const prefix = "Before\n\n```mermaid\nflowchart LR\n"
+    emit(partUpdatedEvent(
+      "evt_rich_open", part(prefix + "A[Start] --> B[Middle]"),
+    ))
+    const growing = await waitForFrame(app, (frame) =>
+      frame.includes("Middle") && frame.includes("▶"),
+    )
+    expect(growing).toContain("Start")
+    expect(growing).not.toContain("A[Start]")
+    emit(partUpdatedEvent(
+      "evt_rich_final", part(prefix +
+        "A[Start] --> B[Middle]\nB --> C[End]\n```"),
+    ))
+    emit({
+      directory, project: "proj_test",
+      payload: {
+        id: "evt_rich_complete", type: "message.updated",
+        properties: {
+          sessionID: info.sessionID,
+          info: { ...info, time: { created: 1, completed: 2 } },
+        },
+      },
+    })
+    const complete = await waitForFrame(app, (frame) =>
+      frame.includes("End") && frame.includes("▶"),
+    )
+    expect(complete).toContain("Middle")
+    expect(complete).not.toContain("C[End]")
+  }, { width: 100, height: 30 })
 })
 
 test("legacy message rail continues through internal gaps and breaks between messages", async () => {

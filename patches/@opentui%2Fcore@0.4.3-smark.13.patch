@@ -247,3 +247,564 @@ diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
          return;
        }
        if (this.isDestroyed)
+diff --git a/index-b5dpwnes.js b/index-b5dpwnes.js
+index 06e5929d705b7bbbaf20bb4d43e97a89e6df6d1b..bcdde39f89d02f24a5e06b58b25029e07fd934f0 100644
+--- a/index-b5dpwnes.js
++++ b/index-b5dpwnes.js
+@@ -3481,12 +3481,53 @@ class CodeRenderable extends TextBufferRenderable {
+       resolve?.();
+     }
+   }
++  setLiteralRanges(ranges) {
++    const prev =
++      this._literalRanges ?? [];
++    let i = 0;
++    for (; i < prev.length &&
++      i < ranges.length; i++) {
++      const a = prev[i];
++      const b = ranges[i];
++      if (a.start !== b.start ||
++        a.end !== b.end ||
++        a.text !== b.text ||
++        a.link?.url !== b.link?.url)
++        break;
++    }
++    if (i === prev.length &&
++      i === ranges.length) return;
++    this._literalRanges = ranges;
++    const end =
++      this._prefixCache?.end ?? 0;
++    const first = Math.min(
++      prev[i]?.start ?? Infinity,
++      ranges[i]?.start ?? Infinity
++    );
++    if (first < end) {
++      this._prefixCache = undefined;
++      this._cachedHighlights = [];
++    }
++    this._cacheGeneration++;
++    this._highlightsDirty = true;
++    this.requestRender();
++  }
+   async commitStreamingResult(content, result, snapshot, cacheGeneration) {
+     const filetype = this._filetype;
+     if (!filetype)
+       return;
+     const cacheEnd = this._onHighlight ? 0 : this._prefixCache?.end ?? 0;
+-    const clipStart = Math.min(result.changedStart, result.tailStart, cacheEnd);
++    const inside = this._literalRanges
++      ?.find((range) =>
++        range.start <
++          result.tailStart &&
++        result.tailStart < range.end);
++    const tail = inside?.start ??
++      result.tailStart;
++    const clipStart = Math.min(
++      result.changedStart,
++      tail, cacheEnd
++    );
+     this._cachedHighlights = [
+       ...this._cachedHighlights.filter((highlight) => highlight[1] <= clipStart),
+       ...result.highlights
+@@ -3513,12 +3554,28 @@ class CodeRenderable extends TextBufferRenderable {
+     if (!this._onHighlight && cache && cache.end <= clipStart) {
+       chunks = [...cache.chunks, ...this.convertHighlightRegion(content, highlights, cache.end, content.length)];
+       this._prefixCache = {
+-        end: result.tailStart,
+-        chunks: [...cache.chunks, ...this.convertHighlightRegion(content, highlights, cache.end, result.tailStart)]
++        end: tail,
++        chunks: [
++          ...cache.chunks,
++          ...this
++          .convertHighlightRegion(
++            content, highlights,
++            cache.end, tail
++          )
++        ]
+       };
+     } else {
+       chunks = this.convertHighlightRegion(content, highlights, 0, content.length);
+-      this._prefixCache = this._onHighlight ? undefined : { end: result.tailStart, chunks: this.convertHighlightRegion(content, highlights, 0, result.tailStart) };
++      this._prefixCache =
++        this._onHighlight
++        ? undefined : {
++          end: tail,
++          chunks: this
++          .convertHighlightRegion(
++            content, highlights,
++            0, tail
++          )
++        };
+     }
+     const renderedLineSources = this._onChunks ? undefined : this.getConcealLinesSourceMap(content, highlights);
+     if (highlights.length > 0 || this._onChunks || this._baseHighlight) {
+@@ -3538,6 +3595,48 @@ class CodeRenderable extends TextBufferRenderable {
+     this.commitStreamingVisible();
+   }
+   convertHighlightRegion(content, highlights, start, end) {
++    const ranges =
++      this._literalRanges ?? [];
++    const chunks = [];
++    let cursor = start;
++    for (const range of ranges) {
++      if (range.end <= start ||
++        range.start >= end)
++        continue;
++      if (cursor < range.start) {
++        chunks.push(...this
++          .convertSourceRegion(
++            content, highlights,
++            cursor, range.start
++          ));
++      }
++      if (start <= range.start) {
++        const [style] = this
++          .convertSourceRegion(
++            content, highlights,
++            range.start, range.end
++          );
++        chunks.push({
++          ...style, __isChunk: true,
++          text: range.text,
++          link: range.link ??
++            style?.link
++        });
++      }
++      cursor = range.end;
++    }
++    if (cursor < end) {
++      chunks.push(...this
++        .convertSourceRegion(
++          content, highlights,
++          cursor, end
++        ));
++    }
++    return chunks;
++  }
++  convertSourceRegion(
++    content, highlights, start, end
++  ) {
+     if (start === 0 && end === content.length) {
+       return treeSitterToTextChunks(content, highlights, this._syntaxStyle, {
+         enabled: this._conceal,
+diff --git a/index.js b/index.js
+index 6bc2672cd0f2fb81958c452d6cc48a7db1c7315e..ecde2315d61601847f1994ae32c223e022ed351f 100644
+--- a/index.js
++++ b/index.js
+@@ -5590,7 +5590,16 @@ var me = (() => {
+ var m = { codeRemoveIndent: /^(?: {1,4}| {0,3}\t)/gm, outputLinkReplace: /\\([\[\]])/g, indentCodeCompensation: /^(\s+)(?:```)/, beginningSpace: /^\s+/, endingHash: /#$/, startingSpaceChar: /^ /, endingSpaceChar: / $/, nonSpaceChar: /[^ ]/, newLineCharGlobal: /\n/g, tabCharGlobal: /\t/g, multipleSpaceGlobal: /\s+/g, blankLine: /^[ \t]*$/, doubleBlankLine: /\n[ \t]*\n[ \t]*$/, blockquoteStart: /^ {0,3}>/, blockquoteSetextReplace: /\n {0,3}((?:=+|-+) *)(?=\n|$)/g, blockquoteSetextReplace2: /^ {0,3}>[ \t]?/gm, listReplaceTabs: /^\t+/, listReplaceNesting: /^ {1,4}(?=( {4})*[^ ])/g, listIsTask: /^\[[ xX]\] +\S/, listReplaceTask: /^\[[ xX]\] +/, listTaskCheckbox: /\[[ xX]\]/, anyLine: /\n.*\n/, hrefBrackets: /^<(.*)>$/, tableDelimiter: /[:|]/, tableAlignChars: /^\||\| *$/g, tableRowBlankLine: /\n[ \t]*$/, tableAlignRight: /^ *-+: *$/, tableAlignCenter: /^ *:-+: *$/, tableAlignLeft: /^ *:-+ *$/, startATag: /^<a /i, endATag: /^<\/a>/i, startPreScriptTag: /^<(pre|code|kbd|script)(\s|>)/i, endPreScriptTag: /^<\/(pre|code|kbd|script)(\s|>)/i, startAngleBracket: /^</, endAngleBracket: />$/, pedanticHrefTitle: /^([^'"]*[^\s])\s+(['"])(.*)\2/, unicodeAlphaNumeric: /[\p{L}\p{N}]/u, escapeTest: /[&<>"']/, escapeReplace: /[&<>"']/g, escapeTestNoEncode: /[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/, escapeReplaceNoEncode: /[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g, unescapeTest: /&(#(?:\d+)|(?:#x[0-9A-Fa-f]+)|(?:\w+));?/ig, caret: /(^|[^\[])\^/g, percentDecode: /%25/g, findPipe: /\|/g, splitPipe: / \|/, slashPipe: /\\\|/g, carriageReturn: /\r\n|\r/g, spaceLine: /^ +$/gm, notSpaceStart: /^\S*/, endingNewline: /\n$/, listItemRegex: (u) => new RegExp(`^( {0,3}${u})((?:[	 ][^\\n]*)?(?:\\n|$))`), nextBulletRegex: (u) => new RegExp(`^ {0,${Math.min(3, u - 1)}}(?:[*+-]|\\d{1,9}[.)])((?:[ 	][^\\n]*)?(?:\\n|$))`), hrRegex: (u) => new RegExp(`^ {0,${Math.min(3, u - 1)}}((?:- *){3,}|(?:_ *){3,}|(?:\\* *){3,})(?:\\n+|$)`), fencesBeginRegex: (u) => new RegExp(`^ {0,${Math.min(3, u - 1)}}(?:\`\`\`|~~~)`), headingBeginRegex: (u) => new RegExp(`^ {0,${Math.min(3, u - 1)}}#`), htmlBeginRegex: (u) => new RegExp(`^ {0,${Math.min(3, u - 1)}}<(?:[a-z].*>|!--)`, "i") };
+ var xe = /^(?:[ \t]*(?:\n|$))+/;
+ var be = /^((?: {4}| {0,3}\t)[^\n]+(?:\n(?:[ \t]*(?:\n|$))*)?)+/;
+-var Re = /^ {0,3}(`{3,}(?=[^`\n]*(?:\n|$))|~{3,})([^\n]*)(?:\n|$)(?:|([\s\S]*?)(?:\n|$))(?: {0,3}\1[~`]* *(?=\n|$)|$)/;
++var Re = new RegExp([
++  String.raw`^ {0,3}(`,
++  String.raw`\x60{3,}`,
++  String.raw`(?=[^\x60\n]*(?:\n|$))`,
++  String.raw`|~{3,})([^\n]*)`,
++  String.raw`(?:\n|$)`,
++  String.raw`(?:|([\s\S]*?)(?:\n|$))`,
++  String.raw`(?:( {0,3}\1[~\x60]* *)`,
++  String.raw`(?=\n|$)|$)`,
++].join(""));
+ var I = /^ {0,3}((?:-[\t ]*){3,}|(?:_[ \t]*){3,}|(?:\*[ \t]*){3,})(?:\n+|$)/;
+ var Te = /^ {0,3}(#{1,6})(?=\s|$)(.*)(?:\n+|$)/;
+ var N = /(?:[*+-]|\d{1,9}[.)])/;
+@@ -5756,7 +5765,18 @@ var y = class {
+     let t2 = this.rules.block.fences.exec(e);
+     if (t2) {
+       let n = t2[0], r = Je(n, t2[3] || "", this.rules);
+-      return { type: "code", raw: n, lang: t2[2] ? t2[2].trim().replace(this.rules.inline.anyPunctuation, "$1") : t2[2], text: r };
++      return {
++        type: "code",
++        raw: n,
++        lang: t2[2]
++          ? t2[2].trim().replace(
++            this.rules.inline
++              .anyPunctuation,
++            "$1"
++          ) : t2[2],
++        text: r,
++        closed: t2[4] !== undefined
++      };
+     }
+   }
+   heading(e) {
+@@ -7903,12 +7923,28 @@ class TextTableRenderable extends Renderable {
+ // src/renderables/markdown-parser.ts
+-function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2) {
++function parseMarkdownIncremental(
++  newContent, prevState,
++  trailingUnstable = 2,
++  syntax, lex = (source) =>
++    x.lex(source, { gfm: true })
++) {
++  const stable = (tokens, count) =>
++    Math.min(count,
++      syntax?.stablePrefix?.(
++        tokens, newContent,
++        lex.codeSpan
++      ) ?? count);
+   if (!prevState || prevState.tokens.length === 0) {
+     try {
+-      const tokens = x.lex(newContent, { gfm: true });
++      const tokens = lex(newContent);
+       return {
+         content: newContent,
+         tokens,
+-        stableTokenCount: Math.max(0, tokens.length - trailingUnstable)
++        stableTokenCount: stable(
++          tokens, Math.max(
++            0, tokens.length -
++              trailingUnstable
++          )
++        )
+       };
+     } catch {
+       return { content: newContent, tokens: [], stableTokenCount: 0 };
+@@ -7932,6 +7968,10 @@ function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2) {
+     reuseCount = prevState.content.lastIndexOf("]:", tableStart - 2) >= 0 ? 0 : reuseCount - 1;
+   }
+   reuseCount = Math.max(0, reuseCount - trailingUnstable);
++  if (syntax) {
++    reuseCount = Math.min(reuseCount,
++      prevState.stableTokenCount ?? 0);
++  }
+   offset = 0;
+   for (let i = 0;i < reuseCount; i++) {
+     offset += prevState.tokens[i].raw.length;
+@@ -7946,15 +7986,27 @@ function parseMarkdownIncremental(newContent, prevState, trailingUnstable = 2) {
+     };
+   }
+   try {
+-    const newTokens = x.lex(remainingContent, { gfm: true });
++    const newTokens =
++      lex(remainingContent);
++    const tokens = [
++      ...stableTokens, ...newTokens
++    ];
+     return {
+       content: newContent,
+-      tokens: [...stableTokens, ...newTokens],
+-      stableTokenCount: trailingUnstable === 0 ? stableTokens.length + newTokens.length : stableTokens.length
++      tokens,
++      stableTokenCount: stable(tokens,
++        trailingUnstable === 0
++          ? tokens.length
++          : syntax
++            ? Math.max(0,
++              tokens.length -
++                trailingUnstable)
++            : stableTokens.length)
+     };
+   } catch {
+     try {
+-      const fullTokens = x.lex(newContent, { gfm: true });
++      const fullTokens =
++        lex(newContent);
+       return { content: newContent, tokens: fullTokens, stableTokenCount: 0 };
+     } catch {
+       return { content: newContent, tokens: [], stableTokenCount: 0 };
+@@ -8010,6 +8062,8 @@ class MarkdownRenderable extends Renderable {
+   _treeSitterClient;
+   _tableOptions;
+   _renderNode;
++  _markdown;
++  _lexer;
+   _internalBlockMode;
+   _parseState = null;
+   _streaming = false;
+@@ -8042,6 +8096,7 @@ class MarkdownRenderable extends Renderable {
+     this._treeSitterClient = options.treeSitterClient;
+     this._tableOptions = options.tableOptions;
+     this._renderNode = options.renderNode;
++    this.setMarkdown(options.markdown);
+     this._streaming = options.streaming ?? this._contentDefaultOptions.streaming;
+     this._internalBlockMode = options.internalBlockMode ?? this._contentDefaultOptions.internalBlockMode;
+     this.updateBlocks();
+@@ -8138,6 +8193,32 @@ class MarkdownRenderable extends Renderable {
+   get internalBlockMode() {
+     return this._internalBlockMode;
+   }
++  get markdown() {
++    return this._markdown;
++  }
++  set markdown(value) {
++    if (this._markdown === value)
++      return;
++    this.setMarkdown(value);
++    this.clearCache();
++  }
++  setMarkdown(value) {
++    this._markdown = value;
++    if (!value) {
++      this._lexer = undefined;
++      return;
++    }
++    const marked = new B({
++      gfm: true,
++      extensions: value.extensions
++    });
++    this._lexer = (source) =>
++      x.lex(source, marked.defaults);
++    const lexer =
++      new x(marked.defaults);
++    this._lexer.codeSpan = (source) =>
++      lexer.tokenizer.codespan(source);
++  }
+   set internalBlockMode(value) {
+     if (this._internalBlockMode === value)
+       return;
+@@ -8175,7 +8256,8 @@ class MarkdownRenderable extends Renderable {
+     return this.createChunk(text, "default");
+   }
+   createInitialStyledText(token) {
+-    if (!this._streaming)
++    if (!this._streaming &&
++      !this._markdown)
+       return;
+     const chunks = [];
+     if ("tokens" in token && Array.isArray(token.tokens)) {
+@@ -8202,6 +8284,14 @@ class MarkdownRenderable extends Renderable {
+     }
+   }
+   renderInlineToken(token, chunks) {
++    const text = this._markdown
++      ?.renderInline?.(token);
++    if (text !== undefined) {
++      chunks.push(
++        this.createDefaultChunk(text)
++      );
++      return;
++    }
+     switch (token.type) {
+       case "text":
+         chunks.push(this.createDefaultChunk(token.text));
+@@ -8298,6 +8388,14 @@ class MarkdownRenderable extends Renderable {
+     }
+   }
+   renderInlineTokenWithStyle(token, chunks, styleGroup, link2) {
++    const text = this._markdown
++      ?.renderInline?.(token);
++    if (text !== undefined) {
++      chunks.push(this.createChunk(
++        text, styleGroup, link2
++      ));
++      return;
++    }
+     switch (token.type) {
+       case "text":
+         chunks.push(this.createChunk(token.text, styleGroup, link2));
+@@ -8323,9 +8421,16 @@ class MarkdownRenderable extends Renderable {
+     renderable.marginTop = marginTop;
+     renderable.marginBottom = marginBottom;
+   }
+-  createMarkdownCodeRenderable(content, id, marginBottom = 0, onChunks = this._linkifyMarkdownChunks, baseHighlight, initialStyledText) {
++  createMarkdownCodeRenderable(
++    content, id, marginBottom = 0,
++    onChunks =
++      this._linkifyMarkdownChunks,
++    baseHighlight, initialStyledText,
++    token
++  ) {
+     const currentSeed = this.getCurrentMarkdownSeed(content, initialStyledText);
+-    return new CodeRenderable(this.ctx, {
++    const node = new CodeRenderable(
++      this.ctx, {
+       id,
+       content,
+       filetype: "markdown",
+@@ -8342,6 +8447,57 @@ class MarkdownRenderable extends Renderable {
+       width: "100%",
+       marginBottom
+     });
++    if (token && this._markdown) {
++      node.setLiteralRanges(
++        this.inlineRanges(
++          token, content
++        )
++      );
++    }
++    return node;
++  }
++  inlineRanges(token, content) {
++    const ranges = [];
++    let cursor = 0;
++    const visit = (
++      child, limit, link
++    ) => {
++      const raw = child.raw;
++      const start =
++        typeof raw === "string"
++          ? content.indexOf(
++            raw, cursor
++          )
++          : -1;
++      const found = start >= 0 &&
++        start + raw.length <= limit;
++      if (found) cursor = start;
++      const end = found
++        ? start + raw.length : limit;
++      const text = this._markdown
++        .renderInline?.(child);
++      if (found &&
++        text !== undefined) {
++        ranges.push({
++          start, end, text, link
++        });
++      } else {
++        const parts =
++          child.tokens ?? [];
++        for (const part of parts) {
++          visit(part, end,
++            child.type === "link"
++              ? { url: child.href }
++              : link);
++        }
++      }
++      if (found) cursor = end;
++    };
++    const parts = token.tokens ?? [];
++    for (const child of parts) {
++      visit(child, content.length);
++    }
++    return ranges;
+   }
+   getBlockquoteContent(token) {
+     return "text" in token && typeof token.text === "string" && token.text ? token.text : " ";
+@@ -9007,7 +9163,17 @@ class MarkdownRenderable extends Renderable {
+     if (!markdownRaw) {
+       return { renderable: undefined, canUpdateInPlace: true };
+     }
+-    const renderable = this.createMarkdownCodeRenderable(markdownRaw, id, 0, this._linkifyMarkdownChunks, undefined, this.createInitialStyledText(token));
++    const renderable =
++      this
++      .createMarkdownCodeRenderable(
++        markdownRaw, id, 0,
++        this._linkifyMarkdownChunks,
++        undefined,
++        this.createInitialStyledText(
++          token
++        ),
++        token
++      );
+     renderable.marginTop = marginTop;
+     return { renderable, canUpdateInPlace: true };
+   }
+@@ -9158,6 +9324,17 @@ class MarkdownRenderable extends Renderable {
+       return;
+     }
+     if (state.renderable instanceof CodeRenderable) {
++      if (this._markdown) {
++        const raw =
++          this.getTopLevelBlockRaw(
++            token
++          )
++          ?? token.raw;
++        state.renderable
++          .setLiteralRanges(
++          this.inlineRanges(token, raw)
++        );
++      }
+       this.applyMarkdownCodeRenderable(state.renderable, this.getTopLevelBlockRaw(token) ?? token.raw, marginBottom, undefined, this.createInitialStyledText(token));
+       return;
+     }
+@@ -9173,6 +9350,35 @@ class MarkdownRenderable extends Renderable {
+     for (let i = 0;i < blocks.length; i += 1) {
+       const block = blocks[i];
+       const existing = this._blockStates[blockIndex];
++      const prev = existing?.token;
++      const value = block.token;
++      const custom = this._markdown &&
++        existing &&
++        !existing.canUpdateInPlace;
++      const same =
++        prev?.raw === value.raw ||
++        (prev?.type === "code" &&
++          value.type === "code" &&
++          prev.lang === value.lang &&
++          prev.text === value.text &&
++          prev.closed ===
++            value.closed);
++      if (custom && same) {
++        existing.renderable.fg =
++          this._fg;
++        existing.renderable.bg =
++          this._bg;
++        this.applyMargins(
++          existing.renderable,
++          block.marginTop,
++          0
++        );
++        this.syncTopLevelBlockState(
++          existing, block
++        );
++        blockIndex++;
++        continue;
++      }
+       if (existing && existing.token === block.token && !forceTableRefresh) {
+         if (existing.marginTop !== block.marginTop) {
+           this.applyMargins(existing.renderable, block.marginTop, 0);
+@@ -9266,7 +9472,14 @@ class MarkdownRenderable extends Renderable {
+       return;
+     }
+     const trailingUnstable = this._streaming ? 2 : 0;
+-    this._parseState = parseMarkdownIncremental(this._content, this._parseState, trailingUnstable);
++    this._parseState =
++      parseMarkdownIncremental(
++        this._content,
++        this._parseState,
++        trailingUnstable,
++        this._markdown,
++        this._lexer
++      );
+     const tokens = this._parseState.tokens;
+     if (tokens.length === 0 && this._content.length > 0) {
+       this.clearBlockStates();
+diff --git a/renderables/Markdown.d.ts b/renderables/Markdown.d.ts
+index 002b4a2e555ec2800364784904f2b55ca54a8dd8..238c0b8c2fdd88ff30942e2c69a712d61a4dcb13 100644
+--- a/renderables/Markdown.d.ts
++++ b/renderables/Markdown.d.ts
+@@ -4,6 +4,23 @@ import { SyntaxStyle } from "../syntax-style.js";
+ import type { BorderStyle } from "../lib/border.js";
+ import { RGBA, type ColorInput } from "../lib/RGBA.js";
+ import { type MarkedToken, type Token, type Tokens } from "marked";
++import type {
++    TokenizerExtension,
++} from "marked";
++export type MarkdownCodeSpan = (
++    source: string
++) => { raw: string } | undefined;
++export interface MarkdownSyntax {
++    extensions: TokenizerExtension[];
++    renderInline?: (
++        token: Token
++    ) => string | undefined;
++    stablePrefix?: (
++        tokens: Token[],
++        source: string,
++        codeSpan: MarkdownCodeSpan
++    ) => number;
++}
+ import { type TextTableColumnFitter, type TextTableColumnWidthMode, type TextTableContent } from "./TextTable.js";
+ import type { TreeSitterClient } from "../lib/tree-sitter/index.js";
+ import { type ParseState } from "./markdown-parser.js";
+@@ -67,6 +84,7 @@ export interface MarkdownTableOptions {
+ }
+ export interface MarkdownOptions extends RenderableOptions<MarkdownRenderable> {
+     content?: string;
++    markdown?: MarkdownSyntax;
+     syntaxStyle: SyntaxStyle;
+     fg?: ColorInput;
+     bg?: ColorInput;
+@@ -158,6 +176,11 @@ export declare class MarkdownRenderable extends Renderable {
+     constructor(ctx: RenderContext, options: MarkdownOptions);
+     get content(): string;
+     set content(value: string);
++    get markdown():
++        MarkdownSyntax | undefined;
++    set markdown(
++        value: MarkdownSyntax | undefined
++    );
+     get syntaxStyle(): SyntaxStyle;
+     set syntaxStyle(value: SyntaxStyle);
+     get fg(): RGBA | undefined;

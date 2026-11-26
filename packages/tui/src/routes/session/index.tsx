@@ -99,6 +99,9 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
+import {
+  richMarkdown,
+} from "../../util/rich-markdown"
 import { withinMarkdownBudget } from "../../util/text-budget"
 import { toolDisplayMetadata, webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
@@ -2594,6 +2597,10 @@ function ReasoningHeader(props: {
 function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage; topMargin?: boolean }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
+  const rich = richMarkdown(
+    useRenderer(),
+    () => theme.markdownText,
+  )
   // #135：assistant 未完成则流式渲染
   const streaming = createMemo(() => !props.message.time?.completed)
   // [local-smark] 渲染熔断：超预算内容在构造 parser-backed Markdown 前降级纯文本；
@@ -2610,9 +2617,11 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
           fallback={
             <markdown
               syntaxStyle={syntax()}
+              markdown={rich.syntax}
+              renderNode={rich.renderNode}
+              content={content()}
               streaming={streaming()}
               internalBlockMode="top-level"
-              content={content()}
               tableOptions={{ style: "grid" }}
               conceal={ctx.conceal()}
               fg={theme.markdownText}
