@@ -1,6 +1,8 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
+import { ColdStorage } from "@opencode-ai/core/storage/cold-storage"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
@@ -927,7 +929,7 @@ it.instance("session context: completed compaction rebuilds dates without recapt
   yield* seedGitContext(chat.id, "Current branch: before")
   yield* contextTurn(chat.id, "first")
   yield* rewindContextDate(chat.id)
-  yield* llm.text("context compacted summary")
+  yield* llm.tool("context_compact", { operation: "propose", summary: "context compacted summary" })
   yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref, auto: false })
   yield* contextTurn(chat.id, "after compact")
   const body = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
@@ -1888,18 +1890,20 @@ it.instance("manual compaction stops after summarizing retained tool tail", () =
     }))
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
-    // #137：显式 auto:false 走手动压缩终态分支
-    const compact = yield* SessionCompaction.Service
     const chat = yield* sessions.create({
       title: "Manual compact",
       permission: [{ permission: "*", pattern: "*", action: "allow" }],
     })
 
-    yield* seed(chat.id, { finish: "stop" })
+    yield* textTurn(chat.id, "Investigate the cause", "Investigation complete")
+    yield* llm.reset
     const keep = yield* seed(chat.id, { finish: "stop" })
     yield* addCompletedTool(chat.id, keep.assistant.id)
-    // #137：仅排队一次摘要响应，用于断言 hits===1
-    yield* llm.text("summary")
+    yield* llm.tool("context_compact", {
+      operation: "propose",
+      tailStartID: keep.user.id,
+      summary: "manual checkpoint",
+    })
 
     // #242：loop 的 compaction task 分支已移除——手动压缩经 compact 直调生产者，
     // 持久化 marker 只作为已完成边界，不再成为 loop 可拾取的排队命令
@@ -1913,6 +1917,10 @@ it.instance("manual compaction stops after summarizing retained tool tail", () =
 
     // #137：核心断言——手动压缩后 provider 只调用一次
     expect(yield* llm.hits).toHaveLength(1)
+    expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toContain("manual checkpoint")
+    const checkpointTools = (yield* lastProviderInput())?.tools
+    if (!Array.isArray(checkpointTools)) throw new Error("Missing checkpoint tool declarations")
+    expect(checkpointTools.filter((tool) => tool.function.name === "context_compact")).toHaveLength(1)
     expect(result.info.role).toBe("assistant")
     // #137：返回摘要 assistant，而非新 build 回合
     if (result.info.role === "assistant") expect(result.info.summary).toBe(true)
@@ -1921,6 +1929,142 @@ it.instance("manual compaction stops after summarizing retained tool tail", () =
     expect(filtered.map((msg) => msg.info.id)).toContain(keep.assistant.id)
   }),
 )
+
+it.instance("reads a changed file from archived patch evidence using the ref returned to the model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const sessions = yield* Session.Service
+    const prompt = yield* SessionPrompt.Service
+    const chat = yield* sessions.create({
+      permission: [{ permission: "context_history", pattern: "*", action: "allow" }],
+    })
+    const other = yield* sessions.create({ parentID: chat.id, title: "Separate session" })
+    const database = yield* Database.Service
+    const coldID = SessionMessage.ID.create()
+    yield* Database.withSync(database, (db) => {
+      db.transaction((tx) => {
+        for (let seq = 1; seq <= 503; seq++) {
+          const message = SessionMessage.User.make({
+            id: seq === 1 ? coldID : SessionMessage.ID.create(),
+            type: "user",
+            text: seq === 1 ? "Old native ARCHIVE_T4_927 \u{1f600}" : "Unrelated",
+            time: { created: DateTime.makeUnsafe(seq) },
+          })
+          tx.insert(SessionMessageTable)
+            .values({
+              id: message.id,
+              session_id: other.id,
+              type: "user",
+              seq,
+              time_created: seq,
+              data: Schema.encodeSync(SessionMessage.User)(message),
+            })
+            .run()
+        }
+      })
+      expect(ColdStorage.freezeOwner(db, { type: "session_message", id: coldID }).type).toBe("frozen")
+    })
+    yield* user(other.id, "ARCHIVE_T4_927: private detail from the other session")
+    const { result } = yield* textTurn(chat.id, "Apply the change", "Applied")
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      sessionID: chat.id,
+      messageID: result.info.id,
+      type: "patch",
+      hash: "patch-t4",
+      files: ["ARCHIVE_T4_927.ts", "directory/".repeat(45) + "retained-file.ts"],
+    })
+    yield* completedCompaction(chat.id, "Change applied; look up the file list when needed.")
+
+    const call = Effect.fnUntraced(function* (question: string, input: Record<string, string | number>) {
+      yield* user(chat.id, question)
+      yield* llm.tool("context_history", input)
+      yield* llm.text("Done")
+      yield* prompt.loop({ sessionID: chat.id })
+      const messages = (yield* lastProviderInput())?.messages
+      if (!Array.isArray(messages)) throw new Error("Missing provider messages")
+      return JSON.stringify(messages.findLast((message) => message.role === "tool")?.content)
+    })
+    const hits = yield* call("Find the earlier patch", { operation: "search", query: "ARCHIVE_T4_927" })
+    expect(hits).toContain("partType=patch")
+    expect(hits).not.toContain("private detail")
+    const patch = hits
+      .replaceAll("\\n", "\n")
+      .split("\n")
+      .find((line) => line.includes("ARCHIVE_T4_927.ts"))
+    const ref = /ref=([^\s"]+)/.exec(patch ?? "")?.[1]
+    if (!ref) throw new Error("Missing ref in the search result sent to the model")
+    const text = yield* call("Read that hit", { operation: "read", ref })
+    expect(text).toContain("ARCHIVE_T4_927.ts")
+    expect(text).toContain("retained-file.ts")
+    expect(text).not.toContain("private detail")
+    const search = { operation: "search", query: "ARCHIVE_T4_927", scope: "global", maxResults: 20 }
+    const limited = yield* call("Look across sessions", { ...search, timeout: 0 })
+    expect(limited).toContain("timedOut=true")
+    expect(limited).toMatch(/scannedMessages=[1-9]/)
+    const more = yield* call("Continue the same search", search)
+    expect(more).toContain("remainingMessages=0")
+    expect(more).toContain("sessionTitle=Separate session")
+    const found = more
+      .replaceAll("\\n", "\n")
+      .split("\n")
+      .find((line) => line.includes("Old native ARCHIVE_T4_927"))
+    const cold = /ref=([^\s"]+)/.exec(found ?? "")?.[1]
+    if (!cold) throw new Error("Missing frozen global hit")
+    const original = JSON.parse(yield* call("Read the frozen hit", { operation: "read", ref: cold })) as string
+    expect(original).toContain("Old native ARCHIVE_T4_927")
+    const offset = original.slice(original.indexOf("\n") + 1).indexOf("\u{1f600}") + 1
+    expect(
+      yield* call("Read the character at that offset", { operation: "read", ref: cold, offset, chars: 1 }),
+    ).toContain("\u{1f600}")
+    const frozen = yield* database.db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, coldID)).get()
+    expect(frozen?.cold_ref).toBeTruthy()
+    expect(frozen?.data).toMatchObject({ text: "" })
+  }),
+)
+
+for (const tool of ["context_compact", "execute"] as const) {
+  it.instance(`continues from a checkpoint proposed via ${tool}`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const sessions = yield* Session.Service
+      const prompt = yield* SessionPrompt.Service
+      const chat = yield* sessions.create({ permission: [{ permission: "*", pattern: "*", action: "allow" }] })
+      yield* textTurn(chat.id, "Investigate", "Earlier assistant evidence")
+      const { result: keep } = yield* textTurn(chat.id, "Which step remains?", "Retained assistant reply")
+      yield* user(chat.id, "Finish the pending fix")
+      const proposal = {
+        operation: "propose",
+        tailStartID: keep.info.id,
+        summary: "Checkpoint from this step",
+      }
+      yield* llm.tool(
+        tool,
+        tool === "execute"
+          ? { code: `return await tools.$opencode.context_compact(${JSON.stringify(proposal)})` }
+          : proposal,
+      )
+      yield* llm.text("Continued")
+      yield* prompt.loop({ sessionID: chat.id })
+
+      const next = JSON.stringify((yield* llm.inputs).at(-1)?.messages)
+      expect(next).toContain(proposal.summary)
+      expect(next).toContain("Finish the pending fix")
+      expect(next).toContain("Retained assistant reply")
+      expect(next).not.toContain("Earlier assistant evidence")
+      if (tool === "context_compact") expect(next.split(proposal.summary)).toHaveLength(2)
+      const stored = (yield* sessions.messages({ sessionID: chat.id })).flatMap((message) => message.parts)
+      expect(stored).toContainEqual(expect.objectContaining({ type: "compaction", tail_start_id: keep.info.id }))
+      expect(stored).toContainEqual(
+        expect.objectContaining({
+          type: "tool",
+          tool: "context_compact",
+          state: expect.objectContaining({ status: "completed", input: proposal }),
+        }),
+      )
+    }),
+  )
+}
 
 noLLMServer.instance.skip(
   "prompt emits v2 prompted and synthetic events (v2 projector disabled)",
@@ -1995,7 +2139,7 @@ it.instance("auto compaction resumes without compacting retained old tail usage 
     yield* addCompletedTool(chat.id, old.assistant.id)
     yield* addStepFinish(chat.id, old.assistant.id, 12_000, 3_000)
     // #242: run consumes the summary immediately; markers are not replayable work.
-    yield* llm.text("summary")
+    yield* llm.tool("context_compact", { operation: "propose", tailStartID: old.user.id, summary: "summary" })
     yield* llm.text("resumed")
     const compacted = yield* compact.run({
       sessionID: chat.id,
@@ -5241,7 +5385,9 @@ it.instance(
       })
 
       // summary 保持流式未完成，确保后续 prompt 确实在 manual compact 持有 Run state 时提交
-      yield* llm.hold("summary", deferredAsPromise(gate))
+      yield* llm.push(
+        reply().wait(deferredAsPromise(gate)).tool("context_compact", { operation: "propose", summary: "summary" }),
+      )
       yield* llm.text("queued reply")
       const compact = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref }).pipe(Effect.forkChild)
       yield* llm.wait(1)
@@ -5632,7 +5778,7 @@ it.instance(
       const chat = yield* sessions.create({ title: "Pinned" })
       yield* user(chat.id, "history only")
       // 只准备一条 summary 响应；若实现无条件续跑，测试服务器会暴露额外 Provider 调用
-      yield* llm.text("summary only")
+      yield* llm.tool("context_compact", { operation: "propose", summary: "summary only" })
 
       const result = yield* prompt.compact({ sessionID: chat.id, agent: "build", model: ref })
 
@@ -6475,7 +6621,7 @@ it.instance(
       const revert = yield* SessionRevert.Service
       const chat = yield* sessions.create({ title: "Compaction cache" })
       yield* textTurn(chat.id, "history before compaction", "first response")
-      yield* llm.text("canonical compacted summary")
+      yield* llm.tool("context_compact", { operation: "propose", summary: "canonical compacted summary" })
       // compaction.run 写入真实 marker/summary/tail boundary，不直接操纵 cache entry。
       expect(yield* compaction.run({ sessionID: chat.id, agent: "build", model: ref, auto: true })).toBe("continue")
       // tools:false 与新 user 一起落盘，但不改变 summary boundary 的 admission 结果。
@@ -6493,7 +6639,7 @@ it.instance(
       // 同次 warm 请求的 Tool 开关证明 Tool surface 未进入 Message cache。
       expect(JSON.stringify((yield* llm.inputs).at(-1)?.tools)).not.toContain('"bash"')
 
-      yield* llm.text("second compacted summary")
+      yield* llm.tool("context_compact", { operation: "propose", summary: "second compacted summary" })
       expect(yield* compaction.run({ sessionID: chat.id, agent: "build", model: ref, auto: true })).toBe("continue")
       const second = (yield* sessions.messages({ sessionID: chat.id })).findLast(
         (message) => message.info.role === "assistant" && message.info.summary,

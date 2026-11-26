@@ -59,7 +59,7 @@ function locationData(validate: (value: any) => void) {
   }
 }
 
-const scenarios: Scenario[] = [
+const createScenarios = (llm: TestLLMServer["Service"]): Scenario[] => [
   http.protected
     .get("/global/health", "global.health")
     .global()
@@ -1643,7 +1643,10 @@ const scenarios: Scenario[] = [
           "## Next Move",
           "1. (none)",
         ].join("\n")
-        yield* ctx.llmText(summary)
+        yield* llm.tool("context_compact", {
+          operation: "propose",
+          summary,
+        })
         yield* ctx.llmText(summary)
         return session
       }),
@@ -2005,6 +2008,8 @@ const llmScenarios = new Set([
 
 const main = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Effect.promise(() => disposeApps()).pipe(Effect.andThen(cleanupExercisePaths)))
+  const llm = yield* TestLLMServer
+  const scenarios = createScenarios(llm)
   const options = parseOptions(Bun.argv.slice(2))
   const modules = yield* Effect.promise(() => runtime())
   const effectRoutes = routeKeys(OpenApi.fromApi(modules.PublicApi))

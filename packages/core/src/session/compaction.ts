@@ -1,7 +1,7 @@
 export * as SessionCompaction from "./compaction"
 
 import { InvalidProviderOutputReason, LLM, LLMError, LLMEvent, Message, type LLMRequest, type Model } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, Exit, Stream } from "effect"
+import { Cause, DateTime, Effect, Exit, Schema, Stream } from "effect"
 import { and, eq, inArray } from "drizzle-orm"
 import type { Config } from "../config"
 import { EventV2 } from "../event"
@@ -30,7 +30,6 @@ const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 // 保留输出尾部错误信息；中部恢复引用由下方序列化器单独保留。
 const TOOL_OUTPUT_TAIL_CHARS = 2_000
-const SUMMARY_OUTPUT_TOKENS = 4_096
 // 保留上游工作状态结构；文件定位与错误修复单列，避免恢复时重读文件或重复失败尝试。
 // 原生 Core 摘要不经过 V1 agent，语言约束须放在共享模板；路径、符号和错误等字面值仍保持原样。
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
@@ -40,6 +39,7 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 
 ## Important Details
 - [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+- [when an omitted log, report, experiment, or analysis is likely to be needed again: one short breadcrumb describing the omitted detail and one or two exact literal search tokens; otherwise omit this bullet]
 
 ## Work State
 ### Completed
@@ -83,6 +83,41 @@ When combining:
 - If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
 - Update "Objective" and "Next Move" to reflect the current work state.`
 
+export const CONTEXT_COMPACT_DESCRIPTION = `Inspect the current conversation for candidate boundaries (status), or submit a rolling checkpoint (propose).
+
+Call status after the existing context-pressure reminder, or after finishing a substantial phase when most earlier work will not matter for the next few steps. Finish the current debugging or closing step first. Do not poll status repeatedly.
+
+Each candidate has the ID and opening excerpt of a real user message. tailStartID is the first message to KEEP, not the last message to summarize. Choose the ID, not a position inferred from the excerpt.
+
+To propose a checkpoint, call context_compact with operation="propose", tailStartID, and a nonblank summary. Summarize only what precedes that message. Merge any earlier checkpoint into one self-contained replacement. Preserve objectives, constraints, verified facts, decisions, unresolved errors, and the next action. Keep exact paths, commands and error strings when they will matter again. Use the language of the conversation. A prior status call is not required.
+
+For a host checkpoint, call context_compact(propose) now as your only action, with the summary of everything above in summary and the ID of the first message to keep in tailStartID; do not reply with text, do not call status, and do not call any other tool.
+
+${SUMMARY_UPDATE_INSTRUCTIONS.split("\n\n")[1]}
+
+${SUMMARY_TEMPLATE}`
+
+export const CONTEXT_COMPACT_INPUT = Schema.Struct({
+  operation: Schema.Literals(["status", "propose"]).annotate({
+    description: "Inspect candidates with status or submit one rolling checkpoint with propose.",
+  }),
+  tailStartID: Schema.optional(Schema.String).annotate({
+    description: "Propose only: ID of the first message to retain.",
+  }),
+  summary: Schema.optionalKey(Schema.String).annotate({
+    description: "Propose only: summary of the preceding history.",
+  }),
+})
+
+export function buildReplayInstructions(status: string) {
+  return `Call context_compact(propose) now as your only action, with the summary of everything above in summary and the ID of the first message to keep in tailStartID; do not reply with text, do not call status, and do not call any other tool.\n${status}`
+}
+
+export function boundarySamples<T>(eligible: readonly T[], preferred: T | undefined) {
+  const middle = Math.floor((eligible.length - 1) / 2)
+  return eligible.filter((item, index) => index === 0 || index === middle || item === preferred)
+}
+
 type Entry = {
   readonly seq: number
   readonly message: SessionMessage.Message
@@ -118,9 +153,8 @@ type Input = {
   readonly pricing: ModelV2.Info["cost"]
   readonly variant?: ModelV2.Ref["variant"]
   readonly request: LLMRequest
+  readonly blocks?: ReadonlyArray<{ readonly message: SessionMessage.Message; readonly output: readonly Message[] }>
 }
-
-const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
 // 保留原2000字符头部并加尾部预算，用户原话与memento不经过此工具文本截断。
 const truncate = (value: string) => truncateForCompaction(value, TOOL_OUTPUT_MAX_CHARS, TOOL_OUTPUT_TAIL_CHARS)
@@ -142,7 +176,15 @@ export const serialize = (message: SessionMessage.Message) => {
       .flatMap((part) => {
         if (part.type === "text") return [`[Assistant]: ${part.text}`]
         if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
-        const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
+        const args = part.state.input
+        const input =
+          typeof args === "string"
+            ? args
+            : JSON.stringify(
+                part.name === "context_compact" && args.operation === "propose"
+                  ? { ...args, summary: "[checkpoint]" }
+                  : args,
+              )
         if (part.state.status === "completed")
           return [
             `[Assistant tool call]: ${part.name}(${input})`,
@@ -176,30 +218,73 @@ const settings = (documents: readonly Config.Entry[]) => {
   )
 }
 
-const select = (
-  entries: readonly Entry[],
-  tokens: number,
-  manual = false,
-): { readonly head: string; readonly recent: string } | undefined => {
-  const conversation = entries
-    .filter((entry) => entry.message.type !== "compaction")
-    .map((entry) => serialize(entry.message))
-    .filter(Boolean)
+const select = (messages: readonly SessionMessage.Message[], tokens: number, manual = false) => {
+  const conversation = messages.flatMap((message) => {
+    const text = serialize(message)
+    return text ? [{ message, text }] : []
+  })
   if (conversation.length === 0) return
   let total = 0
   let split = conversation.length
   for (let index = conversation.length - 1; index >= 0; index--) {
-    const next = total + Token.estimate(conversation[index])
+    const next = total + Token.estimate(conversation[index].text)
     // 短会话也能手动摘要，但仍保留其余完整近期消息，而不是丢掉工具 tail。
     if (manual && index === 0) break
     if (next > tokens) break
     total = next
     split = index
   }
-  return {
-    head: conversation.slice(0, split).join("\n\n"),
-    recent: conversation.slice(split).join("\n\n"),
+  const users = conversation.flatMap(({ message }) => (message.type === "user" ? [message] : []))
+  const tail = conversation[split]?.message
+  const candidates = boundarySamples(users, tail?.type === "user" ? tail : undefined).map((user) => ({
+    tailStartID: user.id,
+    excerpt: (user.text || user.files?.[0]?.name || "").slice(0, 360),
+  }))
+  return { conversation, split, candidates }
+}
+
+function checkpointRequest(
+  input: Input,
+  selected: NonNullable<ReturnType<typeof select>>,
+  manual: boolean,
+  samples: ReturnType<typeof Token.inputHistory>,
+) {
+  const { conversation, split, candidates } = selected
+  const parent = input.request
+  const tools = [...parent.tools]
+  if (!tools.some((tool) => tool.name === "context_compact"))
+    tools.push({
+      name: "context_compact",
+      description: CONTEXT_COMPACT_DESCRIPTION,
+      inputSchema: Schema.toJsonSchemaDocument(CONTEXT_COMPACT_INPUT).schema,
+    })
+  const limits = input.model.route.defaults.limits
+  const limit = limits?.input || limits?.context || Infinity
+  const instruction = Message.user(buildReplayInstructions(JSON.stringify({ candidates })))
+  const request = (history: readonly Message[]) =>
+    LLM.updateRequest(parent, { messages: [...history, instruction], tools })
+  if (manual) return { request: request(parent.messages), tailStartID: conversation[split]?.message.id }
+  const starts = new Map<string | undefined, number>()
+  let end = 0
+  for (const { message, output } of input.blocks ??
+    parent.messages.map((message) => ({ message, output: [message] }))) {
+    starts.set(message.id, end)
+    end += output.length
   }
+  const history = parent.messages.slice(0, end)
+  const positions = candidates.map((cut) => conversation.findIndex(({ message }) => message.id === cut.tailStartID))
+  return new Set([split, ...positions])
+    .values()
+    .map((position) => {
+      const tail = conversation[position]?.message
+      const cut = tail ? starts.get(tail.id) : end
+      if (cut === undefined) return
+      const summary = request(history.slice(0, cut))
+      if (Token.estimateRequest({ messages: summary.messages }, samples).input > limit) return
+      if (position !== split && Token.estimateRequest({ messages: history.slice(cut) }, samples).input > limit) return
+      return { request: summary, tailStartID: tail?.id }
+    })
+    .find((candidate) => candidate !== undefined)
 }
 
 // V1 与 V2 共用此入口，首次快照和前次摘要合并都使用同一模板，避免维护第二套 builder。
@@ -232,15 +317,30 @@ export const make = (dependencies: Dependencies) => {
       : usable
     return Math.min(usable, inputUsable)
   }
-  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input, reason: "auto" | "manual" = "auto") {
+  const keepTokens = (input: Parameters<typeof inputBudget>[0]) =>
+    config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
+  const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (
+    input: Input,
+    reason: "auto" | "manual" = "auto",
+    proposal?: { tailStartID: string; summary: string },
+  ) {
     const context = input.model.route.defaults.limits?.context
-    if (reason === "auto" && (context === undefined || context <= 0)) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
     // 保留Native既有8K基线并承接source的16K长窗口收益；显式零仍关闭tail保留。
-    const keep = config.tokens ?? Math.max(DEFAULT_KEEP_TOKENS, Math.min(16_000, Math.floor(Math.max(0, inputBudget(input)) / 4)))
-    const selected = select(input.entries, keep, reason === "manual")
-    const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
-    if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
+    const conversation = input.entries.map((entry) => entry.message)
+    const samples = proposal ? [] : Token.inputHistory(conversation, input.model)
+    let checkpoint
+    if (proposal) {
+      const start = conversation.findIndex((m) => m.id === proposal.tailStartID)
+      if (start < 0) return false
+      checkpoint = { summary: proposal.summary, start }
+    } else {
+      if (reason === "auto" && !(context && context > 0)) return false
+      const selected = select(conversation, keepTokens(input), reason === "manual")
+      if (!selected || (selected.split === 0 && !conversation.some((m) => m.type === "compaction"))) return false
+      checkpoint = checkpointRequest(input, selected, reason === "manual", samples)
+      if (!checkpoint) return false
+    }
     // 原话是额外交接通道：无input限制时按context-output，不能误扣自动压缩缓冲。
     const inputLimit = input.model.route.defaults.limits?.input
     const usable = inputLimit
@@ -252,15 +352,6 @@ export const make = (dependencies: Dependencies) => {
     const evidence = yield* SessionHistory.evidence(dependencies.db, input.sessionID, throughSeq)
     const recentUserMessages = SessionMemento.collect(
       rawUsers, Math.min(20_000, Math.max(0, Math.floor(usable * 0.2))))
-    const summaryPrompt = buildPrompt({
-      previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
-      context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
-    })
-    const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    const samples = Token.inputHistory(input.entries.map((entry) => entry.message), input.model)
-    // 摘要上传也用同模型确认密度；tail选择仍保留原来的粗略大小启发式。
-    if (context !== undefined && context > 0 && Token.estimateRequest({ messages: [Message.user(summaryPrompt)] }, samples).input >
-      Math.min(input.model.route.defaults.limits?.input || context, context - summaryOutput)) return false
     const messageID = SessionMessage.ID.create()
     const startedEventID = EventV2.ID.create()
     const terminalEventID = EventV2.ID.create()
@@ -296,19 +387,12 @@ export const make = (dependencies: Dependencies) => {
     const incomplete = new LLMError({ module: "SessionCompaction", method: "summary",
       reason: new InvalidProviderOutputReason({ message: "Provider returned incomplete completion (finish_reason: unknown)" }) })
     const summary = yield* Effect.suspend(() => {
-      // 摘要文字属于本次尝试，失败后局部变量自然释放，不复用或显式清空旧前缀。
-      const chunks: string[] = []
+      if ("summary" in checkpoint) return Effect.succeed(checkpoint)
+      const retainedID = checkpoint.tailStartID
+      let proposed: { summary: string; start: number } | undefined
       return dependencies.llm
         .stream(
-          LLM.request({
-            model: input.model,
-            http: input.request.http,
-            // 摘要继承本次真实请求的可信指令；conversation仍留在user正文。
-            providerOptions: input.request.providerOptions,
-            messages: [Message.user(summaryPrompt)],
-            tools: [],
-            generation: { maxTokens: summaryOutput },
-          }),
+          checkpoint.request,
           // 与普通上传复用真实compile回调，估算归压缩独立身份而不是当前用户输入。
           (body) => Effect.gen(function* () {
             yield* dependencies.events.publish(SessionEvent.RequestEstimated, {
@@ -319,18 +403,32 @@ export const make = (dependencies: Dependencies) => {
           }),
         )
         .pipe(
-          Stream.runForEach((event) => Effect.gen(function* () {
-            // 明确的 provider 语义立即交给共享策略，不能被随后断连覆盖。
-            if (LLMEvent.is.providerError(event)) return yield* Effect.fail(event)
-            if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
-            if (LLMEvent.is.stepFinish(event)) {
-              // unknown 沿既有不完整完成重试；正常 stop 的空摘要仍走原不可用结果。
-              if (event.reason === "unknown") return yield* incomplete
-              const counted = tokens(event.usage)
-              usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
-            }
-          })),
-          Effect.map(() => chunks.join("")),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              // 明确的 provider 语义立即交给共享策略，不能被随后断连覆盖。
+              if (LLMEvent.is.providerError(event)) return yield* Effect.fail(event)
+              if (event.type === "tool-call") {
+                const args = event.input
+                if (
+                  event.name !== "context_compact" ||
+                  !Schema.is(CONTEXT_COMPACT_INPUT)(args) ||
+                  args.operation !== "propose" ||
+                  !args.summary?.trim()
+                )
+                  return
+                const id = conversation.some((m) => m.id === args.tailStartID) ? args.tailStartID : retainedID
+                const start = id === undefined ? conversation.length : conversation.findIndex((m) => m.id === id)
+                proposed = { summary: args.summary, start }
+              }
+              if (LLMEvent.is.stepFinish(event)) {
+                // unknown 沿既有不完整完成重试；正常 stop 的空摘要仍走原不可用结果。
+                if (event.reason === "unknown") return yield* incomplete
+                const counted = tokens(event.usage)
+                usage = { tokens: counted, cost: SessionRunnerModel.cost(input.pricing, counted), stepCount: 1 }
+              }
+            }),
+          ),
+          Effect.map(() => proposed),
         )
     }).pipe(
       SessionRetry.retry({
@@ -344,11 +442,12 @@ export const make = (dependencies: Dependencies) => {
         // 压缩没有独立重试 UI 状态；资格与等待仍完全来自共享策略。
         set: () => Effect.void,
       }),
+      Effect.repeat({ times: 8, while: (result) => !result }),
       // 最终非重试事件保留原 false 合同；真实 LLMError 仍按 manual/auto 原规则传播。
       Effect.catchIf(LLMEvent.is.providerError, () => Effect.void),
       Effect.catchTag("LLM.Error", (error) => reason === "manual" ? Effect.fail(error) : Effect.void),
     )
-    if (!summary || !summary.trim()) {
+    if (!summary) {
       yield* fail(false, "Compaction did not produce a usable summary")
       return false
     }
@@ -361,8 +460,8 @@ export const make = (dependencies: Dependencies) => {
       messageID,
       timestamp: yield* DateTime.now,
       reason,
-      text: summary,
-      recent: selected.recent,
+      text: summary.summary,
+      recent: conversation.slice(summary.start).map(serialize).filter(Boolean).join("\n\n"),
       // 只有成功Ended携带本次快照，失败与取消继续保留旧压缩边界。
       recent_user_messages: recentUserMessages.length ? recentUserMessages : undefined,
       file_evidence: fileEvidence,
@@ -385,6 +484,8 @@ export const make = (dependencies: Dependencies) => {
     return yield* compactAfterOverflow(input)
   })
   return {
+    status: (messages: readonly SessionMessage.Message[], model: Model) =>
+      JSON.stringify({ candidates: select(messages, keepTokens({ model }))?.candidates ?? [] }),
     compactIfNeeded,
     compact: (input: Input) => compactAfterOverflow(input, "manual"),
     compactAfterOverflow,

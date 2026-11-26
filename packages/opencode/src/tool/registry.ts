@@ -32,6 +32,7 @@ import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
 // #364：goal tool 注册进 V2 registry——受 tools 配置开关与 selection 过滤约束
 import { GoalTool } from "./goal"
+import { ContextCompact, ContextHistory } from "./context"
 import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
@@ -124,6 +125,8 @@ const layer = Layer.effect(
     const skilltool = yield* SkillTool
     // [local-smark] goal 工具：始终注册（0367 起无 experimental 开关）
     const goaltool = yield* GoalTool
+    const contextCompact = yield* ContextCompact
+    const contextHistory = yield* ContextHistory
     const agent = yield* Agent.Service
     // execute 基础定义与 MCP 连接独立，SessionTools 再注入当轮目录和执行宿主。
     const codeMode = yield* Effect.promise(() => import("./code-mode"))
@@ -245,6 +248,8 @@ const layer = Layer.effect(
           question: Tool.init(question),
           // #364：goal 工具：模型通过此工具标记 goal complete/blocked
           goal: Tool.init(goaltool),
+          compact: Tool.init(contextCompact),
+          history: Tool.init(contextHistory),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           permission_review_decision: Tool.init(permissionReviewDecision),
@@ -273,6 +278,8 @@ const layer = Layer.effect(
             ...(tool.execute ? [tool.execute] : []),
             // [local-smark] goal 工具：始终暴露给模型，不再需要 experimental 开关
             tool.goal,
+            tool.compact,
+            tool.history,
             // LSP 固定不可用，实验开关也不再广告此工具；formatter 与 Notebook 独立保留。
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],

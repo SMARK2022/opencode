@@ -218,6 +218,29 @@ function formatMcpResourceBytes(value: number) {
   return `${Math.ceil(value / (1024 * 1024))} MB`
 }
 
+function stepProposal(message: SessionV1.WithParts | undefined, requestID: MessageID | undefined) {
+  if (!message || message.info.role !== "assistant" || message.info.parentID !== requestID || message.info.error) return
+  const part = message.parts.findLast(
+    (p): p is SessionV1.ToolPart =>
+      p.type === "tool" &&
+      !p.metadata?.providerExecuted &&
+      !isOrphanedInterruptedTool(p) &&
+      p.tool === "context_compact" &&
+      p.state.status === "completed" &&
+      p.state.input.operation === "propose",
+  )
+  return part && { tailStartID: part.state.input.tailStartID, summary: part.state.input.summary }
+}
+
+function normalCompletion(assistant: SessionV1.Assistant, userID: MessageID, hasToolCalls: boolean) {
+  return (
+    assistant.finish !== undefined &&
+    !["tool-calls", "unknown"].includes(assistant.finish) &&
+    !hasToolCalls &&
+    assistant.parentID === userID
+  )
+}
+
 function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
@@ -1816,14 +1839,22 @@ const layer = Layer.effect(
               (part) => part.type === "tool" && !part.metadata?.providerExecuted && !isOrphanedInterruptedTool(part),
             ) ?? false
 
+          const proposal = stepProposal(lastAssistantMsg, requestID)
+          if (proposal) {
+            const result = yield* compaction.run({
+              sessionID,
+              agent: lastUser.agent,
+              model: lastUser.model,
+              auto: true,
+              proposal,
+            })
+            if (result === "stop") break
+            nearOverflowNotified = false
+            continue
+          }
           // 消费本轮错误身份；新用户消息不能继承前一个请求的续跑资格。
           const terminalError = pendingTerminalError
           pendingTerminalError = undefined
-          const normalCompletion =
-            lastAssistant?.finish !== undefined &&
-            !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
-            !hasToolCalls &&
-            lastAssistant.parentID === lastUser.id
           // 相同精确allowlist复核marker指向的助手，其他终止路径仍保持退出。
           const errorCompletion =
             terminalError !== undefined &&
@@ -1833,7 +1864,7 @@ const layer = Layer.effect(
             (SessionV1.APIError.isInstance(lastAssistant.error) ||
               NamedError.Unknown.isInstance(lastAssistant.error))
 
-          if (normalCompletion || errorCompletion) {
+          if ((lastAssistant && normalCompletion(lastAssistant, lastUser.id, hasToolCalls)) || errorCompletion) {
             // 仅本轮获准错误跳过旧错误退出，不能把一般错误重新送入模型。
             if (lastAssistant.error && !errorCompletion) break
             const orphan = lastAssistantMsg?.parts.find(
@@ -2243,9 +2274,12 @@ const layer = Layer.effect(
                   ]
                 })
             // 按完整转换块插入，不能拆开tool-call/result；稳定块继续复用原缓存。
-            const modelMsgs = requestMsgs.flatMap((message, index) => [
-              ...(before.get(message.info.id) ?? []), ...(blocks[index] ?? []), ...(after.get(message.info.id) ?? []),
-            ])
+            const blockMessages = (message: SessionV1.WithParts, index: number) => [
+              ...(before.get(message.info.id) ?? []),
+              ...(blocks[index] ?? []),
+              ...(after.get(message.info.id) ?? []),
+            ]
+            const modelMsgs = requestMsgs.flatMap(blockMessages)
             modelMsgs.push(...end)
             // 复用上一轮真实 prepared 快照作轻量预警；本轮硬溢出仍由 processor 的唯一准备入口判断。
             if (!isLastStep) {
@@ -2269,6 +2303,7 @@ const layer = Layer.effect(
               preDispatchGoal._tag === "Some" && preDispatchGoal.value.status === "active"
                 ? { goalID: preDispatchGoal.value.id, generation: preDispatchGoal.value.generation }
                 : undefined
+            const toolChoice = !decide && format.type === "json_schema" ? "required" : undefined
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -2290,7 +2325,7 @@ const layer = Layer.effect(
               ],
               tools,
               model,
-              toolChoice: !decide && format.type === "json_schema" ? "required" : undefined,
+              toolChoice,
             })
 
             // 在structured/stop/error/compact分支之前归账，保留已确认的最终消耗。
@@ -2364,6 +2399,18 @@ const layer = Layer.effect(
                 model: lastUser.model,
                 auto: true,
                 overflow: !handle.message.finish,
+                parent: {
+                  history: requestMsgs,
+                  user: lastUser,
+                  model,
+                  system,
+                  tools,
+                  toolChoice,
+                  messages: (before?: MessageID) => {
+                    const end = requestMsgs.findIndex((message) => message.info.id === before)
+                    return end < 0 ? modelMsgs : requestMsgs.slice(0, end).flatMap(blockMessages)
+                  },
+                },
               })
               if (compacted === "stop") return "break" as const
             }

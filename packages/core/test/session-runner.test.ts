@@ -114,6 +114,18 @@ let toolExecutionsStarted: Deferred.Deferred<void> | undefined
 let toolExecutionsReady = 5
 let activeToolExecutions = 0
 let maxActiveToolExecutions = 0
+function checkpointReply(summary: string, tailStartID?: string): LLMEvent[] {
+  return [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.toolCall({
+      name: "context_compact",
+      id: "checkpoint",
+      input: { operation: "propose", summary, ...(tailStartID && { tailStartID }) },
+    }),
+    LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+    LLMEvent.finish({ reason: "tool-calls" }),
+  ]
+}
 const client = Layer.succeed(
   LLMClient.Service,
   LLMClient.Service.of({
@@ -1568,7 +1580,7 @@ describe("SessionRunnerLLM", () => {
       expect(requests).toHaveLength(1)
       expect(requests[0]?.model).toBe(model)
       // Goal默认注册也必须出现在模型工具清单中，不能只验证测试工具。
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect"])
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect", "context_compact"])
       expect(requests[0]?.messages.map((message) => ({ role: message.role, content: message.content }))).toEqual([
         { role: "user", content: [{ type: "text", text: "First" }] },
         { role: "user", content: [{ type: "text", text: "Second" }] },
@@ -1864,7 +1876,7 @@ describe("SessionRunnerLLM", () => {
     expect(PermissionV2.evaluate("external_directory", "/other/file", inherited).effect).toBe("deny")
     expect(PermissionV2.evaluate("external_directory", "/approved/file", inherited).effect).toBe("allow")
     const actual = requests.at(-1)
-    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
+    expect(actual?.tools.map(tool => tool.name).toSorted()).toEqual(["context_compact", "defect", "echo", "goal"])
     expect(userTexts(actual!).join("\n")).toContain("Inspect the requested module")
     expect(userTexts(actual!).join("\n")).toContain("<parent_context>\n### Parent Session Inspected Files")
     expect(userTexts(actual!).join("\n")).toContain("| src/module.ts | 4-12 |")
@@ -2193,7 +2205,7 @@ describe("SessionRunnerLLM", () => {
           `You are powered by the model named ${id}. The exact model ID is ${provider}/${id}${id === "claude-opus-4-6" ? "\nKnowledge cutoff: May 2025" : id === "claude-sonnet-4" ? "\nKnowledge cutoff: January 2025" : ""}`])
         // 完整正文保留工作流文字，实际能力广告与执行表仍只属于本轮materialization。
         expect(parts[0]).not.toMatch(/webfetch|todowrite|task tool|multi_tool_use\.parallel/)
-        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["defect", "echo", "goal"])
+        expect(requests.at(-1)?.tools.map(tool => tool.name).toSorted()).toEqual(["context_compact", "defect", "echo", "goal"])
       }))
       const db = (yield* Database.Service).db
       // 在同一持久Session切换工具，核对真实请求与调用结果而不是只测selector。
@@ -2210,7 +2222,9 @@ describe("SessionRunnerLLM", () => {
           LLMEvent.finish({ reason: "tool-calls" }),
         ], []]
         yield* session.resume(sessionID)
-        expect(requests[0]?.tools.map(tool => tool.name).toSorted()).toEqual(action === "deny" ? ["defect", "goal"] : ["defect", "echo", "goal"])
+        expect(requests[0]?.tools.map((tool) => tool.name).toSorted()).toEqual(
+          action === "deny" ? ["context_compact", "defect", "goal"] : ["context_compact", "defect", "echo", "goal"],
+        )
         expect(executions).toEqual(action === "deny" ? [] : ["allow"])
         const parts = requests[0]?.system.map(part => part.text) ?? []
         expect(parts.filter(part => part === "Initial context")).toHaveLength(1)
@@ -2686,13 +2700,23 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       response = fragmentFixture("text", "compact-before", ["Earlier answer"]).completeEvents
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
+      const first = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Earlier question" }),
+        resume: false,
+      })
       yield* session.resume(sessionID)
-      const failedSummary = [LLMEvent.stepStart({ index: 0 }), LLMEvent.textStart({ id: "summary" }),
+      const failedSummary = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "summary" }),
         LLMEvent.textDelta({ id: "summary", text: "failed-summary" }),
-        LLMEvent.providerError({ message: "provider request failed" })]
-      responses = [...Array.from({ length: 7 }, () => failedSummary),
-        fragmentFixture("text", "compact-recovered", ["Recovered summary"]).completeEvents]
+        LLMEvent.providerError({ message: "provider request failed" }),
+      ]
+      const completed = [
+        ...Array.from({ length: 8 }, () => fragmentFixture("text", "missed-tool", ["A draft is not a checkpoint"]).completeEvents),
+        checkpointReply("Recovered summary", first.id),
+      ]
+      responses = [...Array.from({ length: 7 }, () => failedSummary), ...completed]
       requests.length = 0
       const run = yield* session.compact({ sessionID }).pipe(Effect.forkChild)
       // 每次请求到达后再推进虚拟退避，验证超过旧五次截止仍恢复且不使用真实等待。
@@ -2701,7 +2725,8 @@ describe("SessionRunnerLLM", () => {
         yield* TestClock.adjust("30 seconds")
       }
       yield* Fiber.join(run)
-      expect(requests).toHaveLength(8)
+      expect(requests).toHaveLength(16)
+      for (const retry of requests.slice(8)) expect(retry.messages).toEqual(requests[7]?.messages)
       const context = yield* session.context(sessionID)
       expect(context.filter(message => message.type === "compaction")).toMatchObject([{ summary: "Recovered summary" }])
       expect(JSON.stringify(context)).not.toContain("failed-summary")
@@ -2715,6 +2740,57 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.live("active checkpoint keeps settled sibling results after a prior summary", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      currentModel = Model.make({
+        id: model.id,
+        provider: "openai",
+        route: OpenAIChat.route.with({ limits: { context: 100000, output: 4096 } }),
+      })
+      response = fragmentFixture("text", "settled", ["earlier evidence"]).completeEvents
+      const first = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "earlier" }), resume: false })
+      yield* session.resume(sessionID)
+      response = checkpointReply("Initial checkpoint", first.id)
+      yield* session.compact({ sessionID })
+      const tail = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "current" }), resume: false })
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.toolCall({
+            id: "propose",
+            name: "context_compact",
+            input: { operation: "propose", tailStartID: tail.id, summary: "Current checkpoint" },
+          }),
+          LLMEvent.toolCall({ id: "sibling", name: "echo", input: { text: "SIBLING_927" } }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        ],
+        fragmentFixture("text", "done", ["Finished"]).completeEvents,
+      ]
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(2)
+      const next = userTexts(requests[1]).join("\n")
+      expect(next).toContain("<summary>\nCurrent checkpoint\n</summary>")
+      expect(next).toContain("[User]: current")
+      expect(next).toContain("[Tool result]: SIBLING_927")
+      expect(next.match(/Current checkpoint/g)).toHaveLength(1)
+      expect(next).not.toContain("earlier evidence")
+      const description = requests[0].tools.find((tool) => tool.name === "context_compact")?.description
+      for (const heading of [
+        "Objective",
+        "Important Details",
+        "Work State",
+        "Next Move",
+        "Files & Code",
+        "Errors & Fixes",
+      ])
+        expect(description).toContain(`## ${heading}`)
+      expect(description).toContain("exact literal search tokens")
+      expect(description).toContain("When combining:")
+    }),
+  )
+
   it.live("manual compaction stops after summarizing retained tool tail", () =>
     Effect.gen(function* () {
       yield* setup
@@ -2723,7 +2799,7 @@ describe("SessionRunnerLLM", () => {
       yield* Effect.addFinalizer(() => Effect.sync(() => { currentModel = model }))
       const session = yield* SessionV2.Service
       response = fragmentFixture("text", "manual-earlier", ["Earlier answer"]).completeEvents
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
+      const first = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
       yield* session.resume(sessionID)
       responses = [
         [
@@ -2734,13 +2810,17 @@ describe("SessionRunnerLLM", () => {
         ],
         fragmentFixture("text", "manual-tail-done", ["Done"]).completeEvents,
       ]
-      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Keep recent tool turn" }), resume: false })
+      const retainedTurn = yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Keep recent tool turn" }),
+        resume: false,
+      })
       yield* session.resume(sessionID)
       requests.length = 0
       executions.length = 0
       const pending = yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Later queued request" }), delivery: "queue", resume: false })
       responses = undefined
-      response = fragmentFixture("text", "manual-summary", ["Summary"]).completeEvents
+      response = checkpointReply("Summary", retainedTurn.id)
       // 持久任务不来自transcript；真实Native压缩必须将四态原序写入公开交接。
       yield* Database.Service.use(({ db }) => db.insert(TodoTable).values([
         { session_id: sessionID, position: 0, content: "Read forensic report", status: "completed", priority: "high" },
@@ -2750,7 +2830,14 @@ describe("SessionRunnerLLM", () => {
       ]).run().pipe(Effect.orDie))
       yield* session.compact({ sessionID })
       expect(requests).toHaveLength(1)
-      expect(requests[0].tools).toEqual([])
+      expect(requests[0].tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect", "context_compact"])
+      expect(requests[0].toolChoice).toBeUndefined()
+      expect(userTexts(requests[0])).toContain("Earlier question")
+      const [instruction, status] = (userTexts(requests[0]).at(-1) ?? "").split("\n")
+      expect(instruction).toContain("context_compact(propose)")
+      expect(status && JSON.parse(status)).toEqual({
+        candidates: [{ tailStartID: first.id, excerpt: "Earlier question" }],
+      })
       expect(requests[0].http?.headers?.["session-id"]).toBe(sessionID)
       expect(requests[0].http?.headers?.session_id).toBeUndefined()
       const context = yield* session.context(sessionID)
@@ -2761,7 +2848,7 @@ describe("SessionRunnerLLM", () => {
       for (const [status, content] of [["completed", "Read forensic report"], ["in_progress", "Design P0 evidence handoff"], ["pending", "Add compaction tests"], ["cancelled", "Discard obsolete sketch"]]) {
         expect(context[0].file_evidence).toContain(`| ${status} | high | ${content} |`)
       }
-      expect(context[0].recent).toContain("[User]: Keep recent tool turn")
+      expect(context[0].recent).toStartWith("[User]: Keep recent tool turn")
       // 原话通过真实Ended与SQL投影保存；排队但尚未promote的用户输入不进入交接。
       expect(context[0].recent_user_messages?.map(message => message.text)).toEqual(["Earlier question", "Keep recent tool turn"])
       expect(context[0].recent).toContain("[Tool result]: tail output")
@@ -2782,9 +2869,10 @@ describe("SessionRunnerLLM", () => {
         sessionID, timestamp: yield* DateTime.now, messageIDs: [SessionMessage.ID.make(pending.id)],
         hidden: { time: Date.now(), reason: "permission-reviewer-protocol-retry" },
       })
-      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: SessionMessage.ID.create(), timestamp: yield* DateTime.now, text: "Synthetic context must not enter memento" })
+      const syntheticID = SessionMessage.ID.create()
+      yield* events.publish(SessionEvent.Synthetic, { sessionID, messageID: syntheticID, timestamp: yield* DateTime.now, text: "Synthetic context must not enter memento" })
       requests.length = 0
-      response = fragmentFixture("text", "manual-summary-2", ["Second summary"]).completeEvents
+      response = checkpointReply("Second summary", syntheticID)
       yield* session.compact({ sessionID })
       const second = yield* session.context(sessionID)
       const checkpoint = second.find(message => message.type === "compaction")
@@ -2829,7 +2917,7 @@ describe("SessionRunnerLLM", () => {
       )
       requests.length = 0
       responses = [
-        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
+        checkpointReply("## Objective\n- Preserve the task"),
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
       ].map(events => events.map(event => LLMEvent.is.stepFinish(event)
         ? LLMEvent.stepFinish({ ...event, usage: { inputTokens: 13, nonCachedInputTokens: 8, cacheReadInputTokens: 2, cacheWriteInputTokens: 3, outputTokens: 3, reasoningTokens: 1 } }) : event))
@@ -2853,7 +2941,7 @@ describe("SessionRunnerLLM", () => {
           "X-Session-Id": sessionID,
         },
       ])
-      expect(userTexts(requests[0])[0]).toContain("## Objective")
+      expect(requests[0].tools.find((tool) => tool.name === "context_compact")?.description).toContain("## Objective")
       expect(userTexts(requests[1])).toHaveLength(1)
       expect(userTexts(requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
       expect(userTexts(requests[1])[0]).toContain(`[User]: ${"Recent exact request ".repeat(180)}`)
@@ -2877,7 +2965,7 @@ describe("SessionRunnerLLM", () => {
       requests.length = 0
       executions.length = 0
       responses = [
-        fragmentFixture("text", "text-summary-2", ["## Objective\n- Preserve the updated task"]).completeEvents,
+        checkpointReply("## Objective\n- Preserve the updated task"),
         fragmentFixture("text", "text-final-2", ["Continued again"]).completeEvents,
       ]
       yield* session.prompt({
@@ -2889,7 +2977,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(2)
       expect(userTexts(requests[0])[0]).toContain(
-        "<prior-summary>\n## Objective\n- Preserve the task\n</prior-summary>",
+        "<summary>\n## Objective\n- Preserve the task\n</summary>",
       )
       expect(userTexts(requests[0])[0]).toContain("Recent exact request")
       expect((yield* (yield* SessionStore.Service).context(sessionID))[0]).toMatchObject({
@@ -2994,7 +3082,7 @@ describe("SessionRunnerLLM", () => {
       currentModel = compactModel
       requests.length = 0
       responses = [
-        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
+        checkpointReply("## Objective\n- Preserve the task"),
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: recent }), resume: false })
@@ -3043,6 +3131,29 @@ describe("SessionRunnerLLM", () => {
       }
       const providerID = ProviderV2.ID.make("input-budget")
       const modelID = ModelV2.ID.make("input-budget")
+      const prepare = (
+        model: Model,
+        history: readonly { seq: number; message: SessionMessage.Message }[],
+        chars?: number,
+        maxTokens?: number,
+      ) => {
+        const cache = makeMessageCache()
+        const messages = toLLMMessages(
+          history.map((entry) => entry.message),
+          model,
+          cache,
+        )
+        if (chars !== undefined)
+          messages.push(Message.user("x".repeat(Math.max(1, chars - JSON.stringify(messages).length))))
+        return {
+          sessionID,
+          model,
+          entries: history,
+          blocks: cache.entries,
+          pricing: [],
+          request: LLM.request({ model, messages, generation: { maxTokens } }),
+        }
+      }
       // 68k 保留原 floor 余量；69k 越过 68700，可同时识别丢 input 与重复扣 output 两种回归。
       for (const [limit, output, buffer, size, expected] of [
         [73_700, undefined, undefined, 68_000, false],
@@ -3079,7 +3190,7 @@ describe("SessionRunnerLLM", () => {
           // 仅用本地完成事件测试实际 durable 压缩，绝不向解析出的 provider URL 发送请求。
           llm: { stream: (summaryRequest, onPrepared) => {
             streams++
-            expect(userTexts(summaryRequest)[0]).toContain(bounded.outputPaths.join(""))
+            expect(JSON.stringify(summaryRequest.messages).includes(JSON.stringify(bounded.outputPaths.join("")).slice(1, -1))).toBe(true)
             return Stream.unwrap(Effect.gen(function* () {
               yield* (onPrepared?.({ messages: summaryRequest.messages }) ?? Effect.void)
               const pending = yield* store.get(sessionID)
@@ -3087,15 +3198,19 @@ describe("SessionRunnerLLM", () => {
               compactRequestID = pending?.request?.messageID
               expect(estimated?.bodyChars).toBeGreaterThan(0)
               expect(estimated?.confirmed).toBe(false)
-              return Stream.fromIterable(fragmentFixture("text", "input-budget-summary", ["## Objective\n- Keep input budget"]).completeEvents)
+              return Stream.fromIterable(checkpointReply("## Objective\n- Keep input budget"))
             }))
           } },
           config: [new Config.Document({ type: "document", info: new Config.Info({
             compaction: new ConfigCompaction.Info({ buffer, keep: new ConfigCompaction.Keep({ tokens: 0 }) }),
           }) })],
         })
-        const request = LLM.request({ model: resolved, messages: [Message.user("x".repeat(size * 4))], generation: { maxTokens: output } })
-        expect(yield* compaction.compactIfNeeded({ sessionID, entries: [recoveryEntry, ...entries], model: resolved, pricing: selected.cost, request })).toBe(expected)
+        expect(
+          yield* compaction.compactIfNeeded({
+            ...prepare(resolved, [recoveryEntry, ...entries], size * 4, output),
+            pricing: selected.cost,
+          }),
+        ).toBe(expected)
         // 阈值触发只产生现有一次 summary turn；未触发和摘要预算拒绝都保持零 provider 调用。
         expect(streams).toBe(expected ? 1 : 0)
         if (limit === 73_700 && size === 68_000) {
@@ -3109,13 +3224,17 @@ describe("SessionRunnerLLM", () => {
             inputEstimate: { bodyChars: 827_111, input: 128_159, confirmed: true },
             tokens: { input: 128_159, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
           } })
-          const learnedRequest = LLM.request({ model: resolved, messages: [Message.user("x".repeat(400_000))] })
-          // 实际压缩owner应在读取provider前使用确认密度；缺样本对照则触发一次摘要。
-          expect(yield* compaction.compactIfNeeded({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(false)
+          const learnedInput = { ...prepare(resolved, learnedEntries, 400_000), pricing: selected.cost }
+          expect(yield* compaction.compactIfNeeded(learnedInput)).toBe(false)
           expect(streams).toBe(0)
-          expect(yield* compaction.compactIfNeeded({ sessionID, entries: [recoveryEntry, ...entries], model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
+          expect(
+            yield* compaction.compactIfNeeded({
+              ...prepare(resolved, [recoveryEntry, ...entries], 400_000),
+              pricing: selected.cost,
+            }),
+          ).toBe(true)
           expect(streams).toBe(1)
-          expect(yield* compaction.compact({ sessionID, entries: learnedEntries, model: resolved, pricing: selected.cost, request: learnedRequest })).toBe(true)
+          expect(yield* compaction.compact(learnedInput)).toBe(true)
           expect(estimated?.charsPerToken).toBeCloseTo(6.45, 1)
           expect((yield* store.get(sessionID))?.request?.messageID).not.toBe(compactRequestID)
         }
@@ -3131,15 +3250,15 @@ describe("SessionRunnerLLM", () => {
         const compaction = SessionCompaction.make({ db: database.db, events, fs: fileSystem, worktree: "/project", todos: () => Effect.succeed([]),
           config: keep === undefined ? [] : [new Config.Document({ type: "document", info: new Config.Info({ compaction: new ConfigCompaction.Info({ keep: new ConfigCompaction.Keep({ tokens: keep }) }) }) })],
           llm: { stream: request => {
-            upload = userTexts(request)[0] ?? ""
-            return Stream.fromIterable(fragmentFixture("text", "tail-budget", ["Budget summary"]).completeEvents)
+            upload = userTexts(request).join("\n")
+            return Stream.fromIterable(checkpointReply("Budget summary", keep === 0 ? undefined : history[keep === undefined ? 1 : 2].message.id))
           } },
         })
-        expect(yield* compaction.compact({ sessionID, entries: history, model: expanded, pricing: [], request: LLM.request({ model: expanded, prompt: "Summarize" }) })).toBe(true)
+        expect(yield* compaction.compact(prepare(expanded, history))).toBe(true)
         const latest = (yield* store.context(sessionID)).find(message => message.type === "compaction")
         if (!latest || latest.type !== "compaction") return yield* Effect.die("Missing real compaction projection")
         expect(upload).toContain("OLD_HEAD")
-        expect(upload.includes("RECENT_FULL")).toBe(keep !== undefined)
+        expect(upload).toContain("RECENT_FULL")
         expect(latest.recent.includes(retained)).toBe(keep === undefined)
         expect(latest.recent.includes("Newest exact request")).toBe(keep !== 0)
         if (keep === 0) expect(latest.recent).toBe("")
@@ -3159,14 +3278,14 @@ describe("SessionRunnerLLM", () => {
       currentModel = compactModel
       requests.length = 0
       responses = [
-        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
+        checkpointReply("## Objective\n- Preserve the task"),
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: oversized }), resume: false })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(2)
-      const summary = userTexts(requests[0])[0]
+      const summary = userTexts(requests[0]).slice(0, -1).join("\n")
       const continuation = userTexts(requests[1])[0]
       expect(summary.match(/OVERSIZED_BOUNDARY/g)).toHaveLength(1)
       expect(summary).toContain(oversized)
@@ -3194,14 +3313,15 @@ describe("SessionRunnerLLM", () => {
           LLMEvent.stepStart({ index: 0 }),
           LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" }),
         ],
-        fragmentFixture("text", "text-summary", ["## Objective\n- Recover overflow"]).completeEvents,
+        checkpointReply("## Objective\n- Recover overflow"),
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(3)
-      expect(userTexts(requests[1])[0]).toContain("## Objective")
+      expect(userTexts(requests[1]).at(-1)).toContain("context_compact(propose)")
+      expect(requests[1].tools.find((tool) => tool.name === "context_compact")?.description).toContain("## Objective")
       expect(userTexts(requests[2])[0]).toContain("<summary>\n## Objective\n- Recover overflow\n</summary>")
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "compaction", summary: "## Objective\n- Recover overflow" },
@@ -3230,7 +3350,7 @@ describe("SessionRunnerLLM", () => {
       ]
       responses = [
         overflow(),
-        fragmentFixture("text", "text-summary", ["## Objective\n- Recover once"]).completeEvents,
+        checkpointReply("## Objective\n- Recover once"),
         overflow(),
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
@@ -3258,7 +3378,7 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       responses = [
-        fragmentFixture("text", "text-summary", ["## Objective\n- Recover raw overflow"]).completeEvents,
+        checkpointReply("## Objective\n- Recover raw overflow"),
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
@@ -3277,12 +3397,10 @@ describe("SessionRunnerLLM", () => {
       const session = yield* setupOverflowRecovery
       responses = [
         [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
-        // 本用例只验证原 overflow 发布；摘要失败显式拒绝重试，避免共享退避改变焦点。
         [LLMEvent.providerError({ message: "summary unavailable", retryable: false })],
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
       yield* session.resume(sessionID)
-
       expect(requests).toHaveLength(2)
       const context = yield* session.context(sessionID)
       expect(context.some((message) => message.type === "compaction")).toBe(false)
@@ -3298,7 +3416,7 @@ describe("SessionRunnerLLM", () => {
       const session = yield* setupOverflowRecovery
       responses = [
         [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
-        fragmentFixture("text", "text-summary", ["## Objective\n- Interrupted"]).completeEvents,
+        checkpointReply("## Objective\n- Interrupted"),
       ]
       const firstGate = yield* Deferred.make<void>()
       const summaryGate = yield* Deferred.make<void>()
@@ -3457,7 +3575,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(1)
       // 默认Goal只改变广告集合，不改变本例的事件投影与工具执行边界。
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect"])
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["goal", "echo", "defect", "context_compact"])
       expect(yield* session.context(sessionID)).toMatchObject([
         { type: "user", text: "Use tools" },
         {

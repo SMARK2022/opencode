@@ -10,7 +10,7 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, Fiber, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { Cause, DateTime, Effect, Fiber, FiberSet, Layer, Option, Schema, Semaphore, Stream } from "effect"
 import { and, asc, desc, eq, isNotNull, lte, or } from "drizzle-orm"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
@@ -29,6 +29,7 @@ import { SessionReminders } from "../reminders"
 import { SkillGuidance } from "../../skill/guidance"
 import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
+import { Tool } from "../../tool/tool"
 import { ToolSelection } from "../../tool/selection"
 import { McpTools } from "../../mcp/tools"
 import { ToolOutputStore } from "../../tool-output-store"
@@ -157,6 +158,29 @@ const layer = Layer.effect(
     const getContext = Effect.fn("SessionRunner.getContext")(function* (sessionID: SessionSchema.ID) {
       return yield* store.context(sessionID)
     })
+    yield* tools
+      .register({
+        context_compact: Tool.make({
+          description: SessionCompaction.CONTEXT_COMPACT_DESCRIPTION,
+          input: SessionCompaction.CONTEXT_COMPACT_INPUT,
+          output: Schema.String,
+          execute: (args, ctx) =>
+            Effect.gen(function* () {
+              const messages = yield* getContext(ctx.sessionID).pipe(Effect.orDie)
+              if (args.operation === "status") {
+                const session = yield* getSession(ctx.sessionID)
+                const { model } = yield* models.resolve(session).pipe(Effect.orDie)
+                return compaction.status(messages, model)
+              }
+              if (!args.summary?.trim() || !messages.some((m) => m.id === args.tailStartID))
+                return yield* new Tool.Failure({
+                  message: "propose requires a current message ID and a nonblank summary",
+                })
+              return JSON.stringify({ status: "accepted" })
+            }),
+        }),
+      })
+      .pipe(Effect.orDie)
     const failInterruptedTools = Effect.fn("SessionRunner.failInterruptedTools")(function* (
       sessionID: SessionSchema.ID,
     ) {
@@ -380,7 +404,26 @@ const layer = Layer.effect(
       if (nearOverflow) nearOverflowNotified.add(session.id)
       const overflowReminder = nearOverflow ? [Message.user("Context is approaching the model's limit. To avoid context compaction degrading task quality, prefer targeted reads (small offset/limit) over full-file reads, and narrow grep patterns over broad searches. Do not reduce response quality. If work is still in progress, ignore this and continue per user instructions.")] : []
       // 正常请求和压缩共用准备后的消息；不把坏图交给provider，也不改写持久历史。
-      const messages = yield* normalizeImages([...(decide ? toDecideMessages(context, model, systemParts.map((part) => part.text).join("\n"), Config.latest(configuration, "compaction")?.buffer) : toLLMMessages(context, model, retained.messages)), ...reminders.map(text => Message.user(text)), ...overflowReminder, ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : [])], image)
+      const history = decide
+        ? {
+            messages: toDecideMessages(
+              context,
+              model,
+              systemParts.map((part) => part.text).join("\n"),
+              Config.latest(configuration, "compaction")?.buffer,
+            ),
+            blocks: undefined,
+          }
+        : { messages: toLLMMessages(context, model, retained.messages), blocks: retained.messages.entries }
+      const messages = yield* normalizeImages(
+        [
+          ...history.messages,
+          ...reminders.map((text) => Message.user(text)),
+          ...overflowReminder,
+          ...(isLastStep && !decide ? [Message.assistant(MAX_STEPS_PROMPT)] : []),
+        ],
+        image,
+      )
       const request = LLM.request({
         model,
         http: {
@@ -408,7 +451,16 @@ const layer = Layer.effect(
         toolChoice: isLastStep || decide ? "none" : undefined,
       })
       // 压缩复用本 turn 已采样的模型选择；不从稍后可能切换的 Session 重读 variant。
-      if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })) {
+      const compactionInput = {
+        sessionID: session.id,
+        entries,
+        model,
+        pricing: selection.pricing,
+        variant: session.model?.variant,
+        blocks: history.blocks,
+        request,
+      }
+      if (yield* compaction.compactIfNeeded(compactionInput)) {
         nearOverflowNotified.delete(session.id)
         return yield* Effect.die(continueAfterCompaction(currentStep))
       }
@@ -458,11 +510,29 @@ const layer = Layer.effect(
         startSnapshot = baseline
         snapshotAuthority = next
       }))
+      let proposal: { summary: string; tailStartID: string } | undefined
+      const captureProposal = (settled: Effect.Success<ReturnType<typeof publisher.publish>>) => {
+        if (settled?.name !== "context_compact") return
+        // 成功回执的 propose 参数已由工具入口验证。
+        const args = settled.input as { operation: string; tailStartID: string; summary: string }
+        if (args.operation === "propose") proposal = { tailStartID: args.tailStartID, summary: args.summary }
+      }
+      const commitProposal = Effect.fnUntraced(function* (
+        settlement: ReturnType<typeof publisher.stepSettlement>,
+        finalizer: boolean,
+      ) {
+        if (!proposal || !settlement || finalizer || publisher.hasProviderError()) return
+        const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq, retained.history)
+        yield* compaction.compactAfterOverflow({ ...compactionInput, entries }, "auto", proposal)
+      })
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(Effect.gen(function* () {
           // publisher只为已接受的终态返回凭证，重复/忽略事件不能虚增错误。
           const settled = yield* publisher.publish(event, outputPaths)
-          if (!settled?.failed) return
+          if (!settled?.failed) {
+            captureProposal(settled)
+            return
+          }
           // 沿已提交凭证定点重读当前助手，先前历史复用本turn的compaction/epoch可见快照。
           const current = yield* store.message(settled.assistantMessageID, session.id)
           if (!current || current.message.type !== "assistant")
@@ -616,7 +686,7 @@ const layer = Layer.effect(
             !publisher.hasAssistantStarted() &&
             isContextOverflowFailure(overflowFailure ?? failure) &&
             // 恢复摘要也属于这次失败 turn 的采样，不能再次 resolve 或采用新选择。
-            (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, pricing: selection.pricing, variant: session.model?.variant, request })))
+            (yield* restore(recoverOverflow(compactionInput)))
           )
           {
             nearOverflowNotified.delete(session.id)
@@ -737,6 +807,7 @@ const layer = Layer.effect(
             yield* withPublication(publisher.failAssistant("Provider stream ended before assistant step finish"))
             // 只补消息和账本终态；raw EOF 的成功返回及原 continuation 契约保持。
           }
+          yield* commitProposal(stepSettlement, finalizer)
           return {
             needsContinuation: !continueAfterError && !publisher.hasProviderError() && needsContinuation,
             canContinueGoal: continueAfterError || (!!stepSettlement && !publisher.hasProviderError() && !["tool-calls", "unknown", "error"].includes(stepSettlement.finish ?? "unknown")),
@@ -822,13 +893,21 @@ const layer = Layer.effect(
         const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
         if (entries.length === 0) return
         const selection = yield* models.resolve(session)
+        const messages = toLLMMessages(
+          entries.map((entry) => entry.message),
+          selection.model,
+        )
+        const systemParts = [
+          agent.info?.system ?? SessionPrompts.provider(String(selection.model.id), String(selection.model.provider)),
+          system.baseline,
+        ].filter((part): part is string => Boolean(part))
         const request = LLM.request({
           model: selection.model,
-          messages: [],
-          // 手动摘要没有普通turn request，仍从现有可信agent与epoch构造指令。
-          ...(selection.openaiOAuth ? { providerOptions: { openai: { instructions: [
-            agent.info?.system ?? SessionPrompts.provider(String(selection.model.id), String(selection.model.provider)), system.baseline,
-          ].filter(Boolean).join("\n") } } } : {}),
+          messages: yield* normalizeImages(messages, image),
+          tools: prepared.materialization?.definitions,
+          ...(selection.openaiOAuth
+            ? { providerOptions: { openai: { instructions: systemParts.join("\n") } } }
+            : { system: systemParts.map(SystemPart.make) }),
           http: { headers: {
             "x-session-affinity": session.id,
             // 手动摘要独立构造请求，也沿用所选OpenAI模型的完整会话亲和身份。

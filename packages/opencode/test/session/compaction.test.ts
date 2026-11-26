@@ -4,7 +4,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { APICallError } from "ai"
+import { APICallError, jsonSchema } from "ai"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
@@ -233,7 +233,15 @@ function fake(
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     runChild: () => Effect.die("Unexpected tool execution by compaction model"),
-    process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
+    process: Effect.fn("TestSessionProcessor.process")((_streamInput: LLM.StreamInput, onTail?: (id: unknown) => void) =>
+      Effect.sync(() => {
+        if (result === "continue") {
+          onTail?.(undefined)
+          msg.finish = "tool-calls"
+        }
+        return result
+      }),
+    ),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
@@ -359,20 +367,28 @@ function llm() {
 function reply(
   text: string,
   capture?: (input: LLM.StreamInput) => void,
+  pick = -1,
 ): (input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown> {
   return (input) => {
     capture?.(input)
+    const instruction = input.messages.at(-1)?.content
+    if (typeof instruction !== "string" || !instruction.includes("context_compact(propose)")) {
+      throw new Error("Expected a checkpoint request")
+    }
+    const tailStartID = JSON.parse(instruction.split("\n")[1]).candidates[pick]?.tailStartID
     return Stream.make(
-      LLMEvent.textStart({ id: "txt-0" }),
-      LLMEvent.textDelta({ id: "txt-0", text }),
-      LLMEvent.textEnd({ id: "txt-0" }),
+      LLMEvent.toolCall({
+        id: "checkpoint",
+        name: "context_compact",
+        input: { operation: "propose", tailStartID, summary: text },
+      }),
       LLMEvent.stepFinish({
         index: 0,
-        reason: "stop",
+        reason: "tool-calls",
         usage: basicUsage(),
       }),
       LLMEvent.finish({
-        reason: "stop",
+        reason: "tool-calls",
         usage: basicUsage(),
       }),
     )
@@ -1942,7 +1958,8 @@ describe("session.compaction.process", () => {
         expect(part?.type).toBe("compaction")
         expect(part?.tail_start_id).toBeUndefined()
         expect(captured).toContain("recent image turn")
-        expect(captured).toContain("Attached image/png: big.png")
+        expect(captured).toContain('"mediaType":"image/png"')
+        expect(captured).toContain('"filename":"big.png"')
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 100 }) }))
     },
     { git: true },
@@ -1987,7 +2004,7 @@ describe("session.compaction.process", () => {
         expect(part?.type).toBe("compaction")
         expect(part?.tail_start_id).toBe(keep.id)
         expect(captured).toContain("zzzz")
-        expect(captured).not.toContain("keep tail")
+        expect(captured).toContain('"text":"keep tail"')
 
         const filtered = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
         expect(filtered.map((msg) => msg.info.id).slice(0, 3)).toEqual([parent!, expect.any(String), keep.id])
@@ -2237,6 +2254,106 @@ describe("session.compaction.process", () => {
   )
 
 
+  for (const cancel of [false, true])
+    itCompaction.instance(
+      `keeps the old window until a missed checkpoint call ${cancel ? "is cancelled" : "succeeds on retry"}`,
+      () => {
+        const stub = llm()
+        return Effect.gen(function* () {
+          const sessions = yield* SessionNs.Service
+          const session = yield* sessions.create({})
+          const head = yield* createUserMessage(session.id, "Completed investigation")
+          const tail = yield* createUserMessage(session.id, "Remaining task")
+          yield* createUserMessage(session.id, "Resume the task")
+          const retry = yield* Deferred.make<void>()
+          const release = yield* Deferred.make<void>()
+          const requests: LLM.StreamInput[] = []
+          const missed = [
+            [
+              LLMEvent.textStart({ id: "text" }),
+              LLMEvent.textDelta({ id: "text", text: "Unsubmitted draft" }),
+              LLMEvent.textEnd({ id: "text" }),
+            ],
+            [LLMEvent.toolCall({ id: "wrong", name: "read", input: {} })],
+            [LLMEvent.toolCall({ id: "status", name: "context_compact", input: { operation: "status" } })],
+            [
+              LLMEvent.toolCall({
+                id: "blank",
+                name: "context_compact",
+                input: { operation: "propose", summary: " " },
+              }),
+            ],
+            [
+              LLMEvent.toolCall({
+                id: "number",
+                name: "context_compact",
+                input: { operation: "propose", summary: 42 },
+              }),
+            ],
+            [LLMEvent.toolCall({ id: "no-operation", name: "context_compact", input: { summary: "draft" } })],
+            [LLMEvent.toolCall({ id: "no-summary", name: "context_compact", input: { operation: "propose" } })],
+            [LLMEvent.toolInputStart({ id: "partial", name: "context_compact" })],
+          ]
+          for (const events of missed)
+            stub.push((input) => {
+              requests.push(input)
+              return Stream.make(
+                ...events,
+                LLMEvent.stepFinish({ index: 0, reason: "stop", usage: basicUsage() }),
+                LLMEvent.finish({ reason: "stop" }),
+              )
+            })
+          stub.push((input) => {
+            requests.push(input)
+            return Stream.unwrap(
+              Deferred.succeed(retry, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(reply("Saved checkpoint")(input)),
+              ),
+            )
+          })
+          const run = yield* SessionCompaction.use
+            .run({
+              sessionID: session.id,
+              agent: "build",
+              model: ref,
+              auto: true,
+              overflow: true,
+            })
+            .pipe(Effect.forkChild)
+          yield* Deferred.await(retry).pipe(Effect.timeout("5 seconds"))
+          const pending = yield* MessageV2.filterCompactedEffect(session.id)
+          expect(pending.map((message) => message.info.id)).toEqual(expect.arrayContaining([head.id, tail.id]))
+          expect(pending.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(false)
+          if (cancel) {
+            yield* Fiber.interrupt(run)
+            const window = yield* MessageV2.filterCompactedEffect(session.id)
+            expect(window.map((message) => message.info.id)).toEqual(expect.arrayContaining([head.id, tail.id]))
+            expect(window.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(false)
+            return
+          }
+          yield* Deferred.succeed(release, undefined)
+          expect(yield* Fiber.join(run)).toBe("continue")
+          expect(requests).toHaveLength(9)
+          for (const request of requests) {
+            expect(request.messages).toEqual(requests[0].messages)
+            expect(request.system).toEqual(requests[0].system)
+            expect(request.tools).toEqual(requests[0].tools)
+            expect(request.toolChoice).toEqual(requests[0].toolChoice)
+          }
+          const committed = yield* MessageV2.filterCompactedEffect(session.id)
+          expect(committed.map((message) => message.info.id)).not.toContain(head.id)
+          expect(committed.map((message) => message.info.id)).toContain(tail.id)
+          expect(
+            committed
+              .flatMap((message) => message.parts)
+              .filter((part) => part.type === "text")
+              .map((part) => part.text),
+          ).toContain("Saved checkpoint")
+        }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) }))
+      },
+    )
+
   // #242：run 直接把 compaction 执行为已完成边界——create 落 marker、process 收 continue
   // #242：latest.tasks 不再包含可重放 compact 任务（生产者直执，消费端只留边界）
   itCompaction.instance(
@@ -2317,9 +2434,11 @@ describe("session.compaction.process", () => {
       stub.push(
         Stream.make(
           LLMEvent.reasoningDelta({ id: "orphan-1", text: "stray reasoning" }),
-          LLMEvent.textStart({ id: "txt-0" }),
-          LLMEvent.textDelta({ id: "txt-0", text: "summary" }),
-          LLMEvent.textEnd({ id: "txt-0" }),
+          LLMEvent.toolCall({
+            id: "checkpoint",
+            name: "context_compact",
+            input: { operation: "propose", summary: "summary" },
+          }),
           LLMEvent.stepFinish({ index: 0, reason: "stop", usage: basicUsage() }),
           LLMEvent.finish({ reason: "stop", usage: basicUsage() }),
         ),
@@ -2383,6 +2502,64 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  itCompaction.instance("uses the earliest feasible cut when the recommended overflow head is too large", () => {
+    const stub = llm()
+    let uploaded = ""
+    let status: unknown
+    stub.push(
+      reply(
+        "Saved the completed investigation",
+        (input) => {
+          uploaded = JSON.stringify(input.messages.slice(0, -1))
+          const instruction = input.messages.at(-1)?.content
+          if (typeof instruction === "string") status = JSON.parse(instruction.split("\n")[1])
+        },
+        2,
+      ),
+    )
+    return Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+      const head = yield* createUserMessage(session.id, `COMPLETED_A ${"a".repeat(80_000)}`)
+      const first = yield* createUserMessage(session.id, `RETAIN_B ${"b".repeat(60_000)}`)
+      const latest = yield* createUserMessage(session.id, "Recommended turn D")
+      yield* createUserMessage(session.id, "Repeat after overflow")
+
+      expect(
+        yield* SessionCompaction.use.run({
+          sessionID: session.id,
+          agent: "build",
+          model: ref,
+          auto: true,
+          overflow: true,
+        }),
+      ).toBe("continue")
+      expect(uploaded.includes("COMPLETED_A")).toBe(true)
+      expect(uploaded.includes("RETAIN_B")).toBe(false)
+      expect(status).toEqual({
+        candidates: [
+          { tailStartID: head.id, excerpt: `COMPLETED_A ${"a".repeat(348)}` },
+          { tailStartID: first.id, excerpt: `RETAIN_B ${"b".repeat(351)}` },
+          { tailStartID: latest.id, excerpt: "Recommended turn D" },
+        ],
+      })
+      const parts = (yield* sessions.messages({ sessionID: session.id })).flatMap((message) => message.parts)
+      expect(parts.find((part) => part.type === "compaction")?.tail_start_id).toBe(latest.id)
+      const window = yield* MessageV2.filterCompactedEffect(session.id)
+      expect(window.map((message) => message.info.id)).toContain(latest.id)
+      expect(window.map((message) => message.info.id)).not.toContain(first.id)
+      expect(window.flatMap((message) => message.parts)).toContainEqual(
+        expect.objectContaining({ type: "text", text: "Saved the completed investigation" }),
+      )
+    }).pipe(
+      withCompaction({
+        llm: stub.llmLayer,
+        provider: ProviderTest.fake({ model: createModel({ context: 32_000, input: 32_000, output: 1_024 }) }),
+        config: cfg({ reserved: 0, tail_turns: 1, preserve_recent_tokens: 20_000 }),
+      }),
+    )
+  })
+
   itCompaction.instance(
     "summarizes only the head while keeping recent tail out of summary input",
     () => {
@@ -2411,18 +2588,14 @@ describe("session.compaction.process", () => {
           parentID: parent!,
           messages: msgs,
           sessionID: session.id,
-          auto: false,
+          auto: true,
         })
 
-        const captured = JSON.stringify(messages)
-        expect(messages).toHaveLength(1)
+        const captured = JSON.stringify(messages.slice(0, -1))
+        expect(messages).toHaveLength(2)
         expect(messages[0]?.role).toBe("user")
-        expect(captured).toContain("Here is the conversation so far:")
-        expect(captured).toContain("<conversation>")
-        expect(captured.indexOf("[User]: older context")).toBeLessThan(
-          captured.indexOf("Create a new anchored summary"),
-        )
-        expect(captured).toContain("[User]: older context")
+        expect(messages.at(-1)?.content).toContain("context_compact(propose)")
+        expect(captured).toContain("older context")
         expect(captured).not.toContain("keep this turn")
         expect(captured).not.toContain("and this one too")
         // #255：tail 轮数翻倍（config tail_turns:4）后第三/四轮也进入保留窗——压缩输入不得包含它们
@@ -2440,15 +2613,72 @@ describe("session.compaction.process", () => {
     { git: true },
   )
 
+  itCompaction.instance("keeps the parent tool declarations on an overflow checkpoint request", () => {
+    const stub = llm()
+    const parentModel = { ...createModel({ context: 100_000, output: 32_000 }), id: ModelV2.ID.make("parent-model") }
+    const declaration = {
+      description: "Submit a checkpoint for this workspace",
+      inputSchema: jsonSchema({ type: "object", description: "Parent declaration" }),
+      execute: () => {
+        throw new Error("Maintenance must not execute tools")
+      },
+    }
+    stub.push(
+      reply("saved checkpoint", (input) => {
+        expect(input.system).toEqual(["parent system"])
+        expect(input.model).toBe(parentModel)
+        expect(input.user.system).toBe("parent user system")
+        expect(input.toolChoice).toBe("auto")
+        expect(input.messages[0]).toEqual({ role: "user", content: "parent head" })
+        expect(input.tools.context_compact.description).toBe(declaration.description)
+        expect(input.tools.context_compact.inputSchema).toBe(declaration.inputSchema)
+        expect(input.tools.context_compact.execute).toBeUndefined()
+      }),
+    )
+    return Effect.gen(function* () {
+      const sessions = yield* SessionNs.Service
+      const chat = yield* sessions.create({})
+      const user = yield* createUserMessage(chat.id, "parent head")
+      const tail = yield* createUserMessage(chat.id, "retained tail")
+      const history = yield* sessions.messages({ sessionID: chat.id })
+      yield* createUserMessage(chat.id, "overflow turn")
+      const result = yield* SessionCompaction.use.run({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        auto: true,
+        overflow: true,
+        parent: {
+          history,
+          system: ["parent system"],
+          user: { ...user, system: "parent user system" },
+          model: parentModel,
+          toolChoice: "auto",
+          tools: { context_compact: declaration },
+          messages: (before) =>
+            before === tail.id
+              ? [{ role: "user", content: "parent head" }]
+              : [
+                  { role: "user", content: "parent head" },
+                  { role: "user", content: "retained tail" },
+                ],
+        },
+      })
+      expect(result).toBe("continue")
+    }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) }))
+  })
+
   itCompaction.instance(
     "anchors repeated compactions with the previous summary",
     () => {
       const stub = llm()
       let captured = ""
       stub.push(reply("summary one"))
+      let description: string | undefined
       stub.push(
         reply("summary two", (input) => {
           captured = JSON.stringify(input.messages)
+          description = input.tools.context_compact.description
         }),
       )
 
@@ -2474,13 +2704,11 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        expect(captured).toContain("<prior-summary>")
-        expect(captured).toContain("summary one")
+        expect(captured).toContain('"role":"assistant","content":[{"type":"text","text":"summary one"}')
         expect(captured.match(/summary one/g)?.length).toBe(1)
-        expect(captured.indexOf("latest turn")).toBeLessThan(captured.indexOf("<prior-summary>"))
-        expect(captured).toContain("summary of the conversation before the <conversation> above")
-        expect(captured).toContain("## Important Details")
-        expect(captured).toContain("## Work State")
+        expect(captured.indexOf("summary one")).toBeLessThan(captured.indexOf("latest turn"))
+        expect(description).toContain("## Important Details")
+        expect(description).toContain("## Work State")
       }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
     { git: true },
@@ -2491,9 +2719,11 @@ describe("session.compaction.process", () => {
     () => {
       const stub = llm()
       let captured = ""
+      let description: string | undefined
       stub.push(
         reply("summary", (input) => {
           captured = JSON.stringify(input.messages)
+          description = input.tools.context_compact.description
         }),
       )
 
@@ -2515,10 +2745,9 @@ describe("session.compaction.process", () => {
           auto: false,
         })
 
+        expect(description).not.toContain("Prioritize unresolved migration details")
         expect(captured).toContain("Prioritize unresolved migration details")
-        expect(captured.indexOf("</conversation>")).toBeLessThan(
-          captured.indexOf("Prioritize unresolved migration details"),
-        )
+        expect(captured.indexOf("candidates")).toBeLessThan(captured.indexOf("Prioritize unresolved migration details"))
       }).pipe(
         withCompaction({
           llm: stub.llmLayer,
@@ -2572,7 +2801,7 @@ describe("session.compaction.process", () => {
   }, { git: true })
 
   itCompaction.instance(
-    "serializes repeated compaction history as one user message",
+    "preserves structured tool calls and results in a repeated compaction request",
     () => {
       const stub = llm()
       let captured: LLM.StreamInput["messages"] = []
@@ -2630,11 +2859,32 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        expect(captured).toHaveLength(1)
-        expect(captured[0]?.role).toBe("user")
-        expect(JSON.stringify(captured)).toContain('[Assistant tool call]: read({\\"filePath\\":\\"src/index.ts\\"})')
-        expect(JSON.stringify(captured)).toContain("[Tool result]: file contents")
-        expect(JSON.stringify(captured)).not.toContain('\\"role\\":\\"assistant\\"')
+        expect(captured).toContainEqual(
+          expect.objectContaining({
+            role: "assistant",
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool-call",
+                toolName: "read",
+                toolCallId: "read-call",
+                input: { filePath: "src/index.ts" },
+              }),
+            ]),
+          }),
+        )
+        expect(captured).toContainEqual(
+          expect.objectContaining({
+            role: "tool",
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: "tool-result",
+                toolCallId: "read-call",
+                output: { type: "text", value: "file contents" },
+              }),
+            ]),
+          }),
+        )
+        expect(captured.at(-1)?.content).toContain("context_compact(propose)")
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 0 }) }))
     },
     { git: true },
@@ -2648,7 +2898,7 @@ describe("session.compaction.process", () => {
       stub.push(reply("PREVIOUS SUMMARY"))
       stub.push(
         reply("UPDATED SUMMARY", (input) => {
-          captured = JSON.stringify(input.messages)
+          captured = JSON.stringify(input.messages.slice(0, -1))
         }),
       )
 
@@ -2701,17 +2951,14 @@ describe("session.compaction.process", () => {
         msgs = yield* ssn.messages({ sessionID: session.id })
         parent = msgs.at(-1)?.info.id
         expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: true })
 
         // #251：双条目锁定 active window 语义——prior summary 与本轮 tail 都在，
         // 已总结 head 与未纳入 tail 的新消息都必须缺席
-        expect(captured).toContain("<prior-summary>")
-        expect(captured).toContain("PREVIOUS SUMMARY")
-        // 公开附录可回放，但不得进入下轮 prior-summary 再被模型重复总结。
-        expect(captured).not.toContain("## Evidence Handoff")
+        expect(captured).toContain('"type":"text","text":"PREVIOUS SUMMARY"}')
         expect(captured).toContain("ACTIVE_TAIL_SHOULD_REMAIN")
         expect(captured).toContain("ACTIVE_TAIL_REPLY_SHOULD_REMAIN")
-        expect(captured).not.toContain("OLD_HEAD_USER_SHOULD_NOT_REAPPEAR")
+        expect(captured).not.toContain('"text":"OLD_HEAD_USER_SHOULD_NOT_REAPPEAR"')
         expect(captured).not.toContain("OLD_HEAD_TOOL_OUTPUT_SHOULD_NOT_REAPPEAR")
         expect(captured).not.toContain("LATEST_TAIL_SHOULD_STAY_OUT_OF_SUMMARY")
       }).pipe(withCompaction({ llm: stub.llmLayer, config: cfg({ tail_turns: 1, preserve_recent_tokens: 10_000 }) }))
@@ -2721,8 +2968,8 @@ describe("session.compaction.process", () => {
 
   itCompaction.instance("keeps recent pre-compaction turns across repeated compactions", () => {
     const stub = llm()
-    stub.push(reply("summary one"))
-    stub.push(reply("summary two"))
+    stub.push(reply("summary one", undefined, 1))
+    stub.push(reply("summary two", undefined, 1))
 
     return Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
