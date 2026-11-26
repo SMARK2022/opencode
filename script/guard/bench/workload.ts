@@ -32,7 +32,16 @@ export function scripted(messages: Message[], dir: string, compact: boolean) {
   })
   const file = (i: number) => path.join(dir, relative(i))
   let calls
-  if (!compact && !results.length) {
+  if (compact && user.startsWith("Call context_compact(propose) now as your only action,")) {
+    const tailStartID = JSON.parse(user.split("\n")[1]).candidates[0]?.tailStartID
+    calls = [
+      invoke("context_compact", {
+        operation: "propose",
+        tailStartID,
+        summary: "Bench summary.",
+      }),
+    ]
+  } else if (!compact && !results.length) {
     calls = edit ? editFiles.map((entry, i) => invoke("write", { filePath: path.join(dir, entry), content: "edited" }, i))
       : [invoke("grep", { pattern: "bench_unique_match", path: path.join(dir, "src") })]
   } else if (!compact && !edit && !results.some((m) => m.tool_call_id === "bench_read_0")) {

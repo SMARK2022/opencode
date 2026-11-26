@@ -1181,7 +1181,7 @@ export function release(db: TxOrDb, hash: string) {
 // decode 是所有恢复路径的唯一 codec/integrity gate，调用方不能直接读取 payload 并自行 JSON.parse。
 // compressed size、zstd frame、raw size、SHA-256 和 envelope 结构会依次验证，失败不返回 projection。
 // owner kind 参与 digest 和 envelope，双重阻止 Message payload 被误用于 Part 或反向恢复。
-export function decode(db: TxOrDb, hash: string, owner: OwnerKind) {
+function readRaw(db: TxOrDb, hash: string, owner: StorageKind) {
   const payload = db.select().from(ColdStorageTable).where(eq(ColdStorageTable.hash, hash)).get()
   if (!payload) throw new CorruptionError({ message: "Cold reference points to a missing payload", hash })
   if (payload.kind !== owner || payload.codec !== "zstd") {
@@ -1191,11 +1191,27 @@ export function decode(db: TxOrDb, hash: string, owner: OwnerKind) {
     throw new CorruptionError({ message: "Cold payload compressed size does not match", hash })
   }
   const raw = decompress(payload.payload)
-  if (raw.byteLength !== payload.raw_bytes || digest(owner, raw) !== hash) {
+  const hex = digest(owner, raw)
+  const matches = hex === hash || (owner.endsWith("-pack") && Buffer.from(hex, "hex").toString("base64url") === hash)
+  if (raw.byteLength !== payload.raw_bytes || !matches) {
     throw new CorruptionError({ message: "Cold payload size or hash does not match", hash })
   }
-  // 成功 decode 尚未合并 owner；restore 和 owner UPDATE 完成后才能 release 引用。
-  return parseEnvelope(owner, raw, hash)
+  return raw
+}
+
+export function decode(db: TxOrDb, hash: string, owner: OwnerKind) {
+  return parseEnvelope(owner, readRaw(db, hash, owner), hash)
+}
+
+// 阴性可跳过解析；阳性仍须从可见消息中匹配，不能交付原始包内容。
+export function matchColdBytes(db: TxOrDb, hash: string, kind: StorageKind, needle: Buffer) {
+  const raw = readRaw(db, hash, kind)
+  if (needle.some((byte) => byte >= 97 && byte <= 122)) {
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] >= 65 && raw[i] <= 90) raw[i] += 32
+    }
+  }
+  return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).includes(needle)
 }
 
 // decodePack 是 v2 owner 的唯一 pack integrity gate；解压后同时验证 pack hash、entry key 和 key 顺序。

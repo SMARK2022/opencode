@@ -90,7 +90,7 @@ describe("ConfigProviderPlugin.Plugin", () => {
       const location = yield* Location.Service
       const agents = yield* AgentV2.Service
       let selected = "openai"
-      let reviewing = true
+      let reply: "review" | "normal" | "compact" = "review"
       const id = ModelV2.ID.make("review-model")
       const methodID = Integration.MethodID.make("review-oauth")
       const config = Config.Service.of({ entries: () => Effect.succeed([
@@ -151,19 +151,25 @@ describe("ConfigProviderPlugin.Plugin", () => {
         urls.push(web.url)
         accounts.push(web.headers.get("chatgpt-account-id"))
         // 第一轮缺少裁决触发真实一次修复；第二轮经Responses解析真实tool call。
-        const events = !reviewing ? [
+        const name = reply === "compact" ? "context_compact" : "permission_review_decision"
+        const args = JSON.stringify(
+          reply === "compact"
+            ? { operation: "propose", tailStartID: "msg_native_oauth_evidence", summary: "NORMAL_WIRE_RESPONSE" }
+            : accepted,
+        )
+        const events = reply === "normal" ? [
           { type: "response.created", response: { id: "resp_normal", created_at: 0, model: "gpt-5" } },
           { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "NORMAL_WIRE_RESPONSE" },
           { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
-        ] : bodies.length === 1 ? [
+        ] : reply === "review" && bodies.length === 1 ? [
           { type: "response.created", response: { id: "resp_first", created_at: 0, model: "gpt-5" } },
           { type: "response.output_text.delta", item_id: "text", output_index: 0, content_index: 0, delta: "Missing decision" },
           { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
         ] : [
           { type: "response.created", response: { id: "resp_second", created_at: 0, model: "gpt-5" } },
-          { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: "" } },
-          { type: "response.function_call_arguments.delta", item_id: "fc_review", output_index: 0, delta: JSON.stringify(accepted) },
-          { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name: "permission_review_decision", arguments: JSON.stringify(accepted), status: "completed" } },
+          { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name, arguments: "" } },
+          { type: "response.function_call_arguments.delta", item_id: "fc_review", output_index: 0, delta: args },
+          { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_review", call_id: "call_review", name, arguments: args, status: "completed" } },
           { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
         ]
         return HttpClientResponse.fromWeb(request, new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } }))
@@ -232,12 +238,12 @@ describe("ConfigProviderPlugin.Plugin", () => {
           }
         }
         // 同一真实resolver还服务普通turn和手动摘要，不能只认证审查器的专属请求。
-        reviewing = false
         selected = "openai"
         yield* save(selected, "oauth")
         yield* agents.transform(draft => draft.update(AgentV2.ID.make("build"), value => { value.system = "NORMAL_SYSTEM_POLICY" }))
         const runner = yield* SessionRunner.Service
         for (const maintenance of [undefined, "compact"] as const) {
+          reply = maintenance ?? "normal"
           bodies.length = prepared.length = texts.length = auth.length = urls.length = accounts.length = 0
           yield* runner.run({ sessionID, force: true, ...(maintenance ? { maintenance } : {}) })
           expect(bodies).toHaveLength(1)

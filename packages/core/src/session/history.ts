@@ -1,12 +1,15 @@
-import { and, asc, desc, eq, gt, gte, lte, ne, or, sql } from "drizzle-orm"
+import { and, asc, desc, eq, gt, gte, inArray, lte, ne, or, sql } from "drizzle-orm"
+import { MessageID } from "@opencode-ai/schema/v1/session"
 import { Effect, Schema } from "effect"
 import { Database } from "../database/database"
 import { ColdStorage } from "../storage/cold-storage"
+import { matchColdBytes } from "../storage/cold-store"
+import { ColdCodec } from "../storage/cold-codec"
 import type { FileEvidence } from "./file-evidence"
 import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
-import { SessionContextEpochTable, SessionMessageTable } from "./sql"
+import { MessageTable, PartTable, SessionContextEpochTable, SessionMessageTable } from "./sql"
 import { encodeProofKey } from "./history-proof"
 
 type DatabaseService = Database.Interface["db"]
@@ -234,4 +237,170 @@ export const goalTurnMessages = Effect.fn("SessionHistory.goalTurnMessages")(fun
   return yield* Effect.forEach(restored, decodeMessageRow)
 })
 
+type Position = { id: string; time: number; source: number }
+type Hit = Position & { ref: string; sessionID: SessionSchema.ID; role: string; partType: string; snippet: string }
+type Scope = "session" | "global"
+type ArchiveDB = ColdStorage.TxOrDb
+export type ArchiveScan = {
+  before?: Position
+  hits: Hit[]
+  total: number
+  scanned: number
+  errors: number
+  eof: boolean
+}
+
+const fold = (text: string) => text.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+
+function body(value: unknown): string {
+  if (typeof value === "string") return value
+  if (Array.isArray(value)) return value.map(body).join("\n")
+  if (ColdCodec.isRecord(value))
+    return Object.keys(value)
+      .sort()
+      .map((key) => `${key}\n${body(value[key])}`)
+      .join("\n")
+  return String(value)
+}
+
+function archivePage(db: ArchiveDB, positions: Position[], query: string) {
+  const matches = new Map<string, boolean>()
+  const legacy = positions.filter((p) => p.source === 1).map((p) => MessageID.make(p.id))
+  const native = positions.filter((p) => p.source === 2).map((p) => SessionMessage.ID.make(p.id))
+  const byID = <T extends { id: string }>(rows: T[]) => new Map(rows.map((row) => [row.id, row]))
+  const v1 = byID(db.select().from(MessageTable).where(inArray(MessageTable.id, legacy)).all())
+  const v2 = byID(db.select().from(SessionMessageTable).where(inArray(SessionMessageTable.id, native)).all())
+  const parts = Map.groupBy(
+    db.select().from(PartTable).where(inArray(PartTable.message_id, legacy)).orderBy(PartTable.id).all(),
+    (r) => r.message_id,
+  )
+  const needle = /^[\p{L}\p{N}_.:/-]+$/u.test(query) ? Buffer.from(query) : undefined
+  function project<Row extends { data: unknown; cold_ref: string | null; cold_key: Buffer | null }>(
+    rows: Row[],
+    owner: "part" | "session_message",
+    inspect: (db: ArchiveDB, rows: Row[]) => Row[],
+  ) {
+    const text = body(rows.map((row) => row.data))
+    if (!rows.some((row) => row.cold_ref)) return rows
+    if (needle && !fold(text).includes(query)) {
+      const possible = rows.some(({ cold_ref, cold_key }) => {
+        if (!cold_ref) return false
+        const match =
+          matches.get(cold_ref) ?? matchColdBytes(db, cold_ref, cold_key ? ColdCodec.packKind(owner) : owner, needle)
+        matches.set(cold_ref, match)
+        return match
+      })
+      if (!possible) return []
+    }
+    return inspect(db, rows)
+  }
+  function legacyDocument(id: string) {
+    const row = v1.get(id)
+    if (!row) return
+    return {
+      sessionID: row.session_id,
+      role: row.data.role,
+      segments: [
+        { type: row.data.role, text: body(row.data) },
+        ...project(parts.get(row.id) ?? [], "part", ColdStorage.inspectPartRows).map(({ data }) => ({
+          type: data.type,
+          text: body(data),
+        })),
+      ],
+    }
+  }
+  function nativeDocument(id: string) {
+    const row = v2.get(id)
+    if (!row) return
+    return {
+      sessionID: row.session_id,
+      role: row.type,
+      segments: project([row], "session_message", ColdStorage.inspectSessionMessageRows).map((r) => ({
+        type: r.type,
+        text: body(r.data),
+      })),
+    }
+  }
+  return (p: Position) => (p.source === 1 ? legacyDocument(p.id) : nativeDocument(p.id))
+}
+
+const locator = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.Number, Schema.Number])),
+)
+
+export function readArchive(db: ArchiveDB, ref: string) {
+  const [id, source, anchorOffset] = locator(Buffer.from(ref, "base64url").toString())
+  const position = { id, source, time: 0 }
+  const doc = archivePage(db, [position], "")(position)
+  if (!doc) throw new Error("Archived message not found")
+  return { text: doc.segments.map((part) => part.text).join("\n"), anchorOffset }
+}
+export function searchArchive(
+  db: ArchiveDB,
+  input: {
+    sessionID: SessionSchema.ID
+    scope?: Scope
+    query: string
+    maxResults?: number
+    deadline?: number
+    state?: ArchiveScan
+  },
+) {
+  const { sessionID, scope = "session", maxResults = 10, deadline = Date.now() + 4000 } = input
+  const query = fold(input.query.trim())
+  const local = scope === "session" ? sql`where session_id = ${sessionID}` : sql``
+  const history = sql`(select id, time_created as time, 1 as source from ${MessageTable} ${local}
+      union all select id, time_created as time, 2 as source from ${SessionMessageTable} ${local})`
+  const state: ArchiveScan = input.state ?? {
+    hits: [],
+    total: db.all<{ n: number }>(sql`select count(*) as n from ${history}`)[0].n,
+    scanned: 0,
+    errors: 0,
+    eof: false,
+  }
+  const before = state.before
+  const cursor = before ? sql`where (time, id, source) < (${before.time}, ${before.id}, ${before.source})` : sql``
+  const batch = db.all<Position>(sql`select * from ${history} ${cursor}
+      order by time desc, id desc, source desc limit 500`)
+  const load = archivePage(db, batch, query)
+  function hit(pos: Position): Hit[] {
+    try {
+      const doc = load(pos)
+      if (!doc) return []
+      const text = doc.segments.map((part) => part.text).join("\n")
+      const offset = fold(text).indexOf(query)
+      if (offset < 0) return []
+      const ref = Buffer.from(JSON.stringify([pos.id, pos.source, offset])).toString("base64url")
+      let end = -1
+      const part = doc.segments.find((part) => (end += part.text.length + 1) > offset)
+      return [
+        {
+          ...pos,
+          ref,
+          sessionID: doc.sessionID,
+          role: doc.role,
+          partType: part?.type ?? doc.role,
+          snippet: text.slice(Math.max(0, offset - 80), offset + 280),
+        },
+      ]
+    } catch {
+      state.errors++
+      return []
+    }
+  }
+  const expired = () => state.hits.length < maxResults && Date.now() >= deadline
+  const stopped = batch.some((pos, index) => {
+    if (state.hits.length >= maxResults || (index > 0 && expired())) return true
+    state.hits.push(...hit(pos))
+    state.before = pos
+    state.scanned++
+    return false
+  })
+  state.eof = !stopped && batch.length < 500
+  return {
+    state,
+    hits: state.hits.slice(0, maxResults),
+    timedOut: !state.eof && expired(),
+  }
+}
 export * as SessionHistory from "./history"

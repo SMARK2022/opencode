@@ -3,6 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { CONTEXT_COMPACT_INPUT } from "@opencode-ai/core/session/compaction"
 import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema, Semaphore } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
@@ -160,7 +161,7 @@ export interface Handle {
       attachments?: SessionV1.FilePart[]
     },
   ) => Effect.Effect<void>
-  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly process: (streamInput: LLM.StreamInput, onTail?: (id: unknown) => void) => Effect.Effect<Result>
 }
 
 type Input = {
@@ -206,6 +207,30 @@ interface ProcessorContext extends Input {
 }
 
 type StreamEvent = LLMEvent
+
+function summaryFinish(summary: boolean | undefined, hasText: boolean, reason: string) {
+  return summary && !hasText ? undefined : reason
+}
+
+function checkpointEvents(event: StreamEvent, onTail?: (id: unknown) => void): StreamEvent[] {
+  if (event.type === "tool-call") {
+    const args = event.input
+    if (
+      event.name !== "context_compact" ||
+      !Schema.is(CONTEXT_COMPACT_INPUT)(args) ||
+      args.operation !== "propose" ||
+      !args.summary?.trim()
+    )
+      return []
+    onTail?.(args.tailStartID)
+    return [
+      LLMEvent.textStart({ id: event.id }),
+      LLMEvent.textDelta({ id: event.id, text: args.summary }),
+      LLMEvent.textEnd({ id: event.id }),
+    ]
+  }
+  return /^(text|tool)-/.test(event.type) ? [] : [event]
+}
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionProcessor") {}
 
@@ -778,9 +803,6 @@ const layer = Layer.effect(
             return
 
           case "tool-input-start":
-            if (ctx.assistantMessage.summary) {
-              throw new Error(`Tool call not allowed while generating summary: ${value.name}`)
-            }
             yield* ensureToolCall(value)
             yield* logPartStart("tool", { callID: value.id, partID: ctx.toolcalls[value.id]?.partID })
             return
@@ -906,7 +928,7 @@ const layer = Layer.effect(
                 metadata: { finishReason: value.reason },
               }))
             }
-            ctx.assistantMessage.finish = value.reason
+            ctx.assistantMessage.finish = summaryFinish(ctx.assistantMessage.summary, ctx.hasText, value.reason)
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
             // 只有本 step 的实际确认能把请求体样本标记为可校准。
@@ -1155,7 +1177,10 @@ const layer = Layer.effect(
         yield* status.set(ctx.sessionID, { type: "idle" })
       })
 
-      const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+      const process = Effect.fn("SessionProcessor.process")(function* (
+        streamInput: LLM.StreamInput,
+        onTail?: (id: unknown) => void,
+      ) {
         timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
@@ -1256,7 +1281,10 @@ const layer = Layer.effect(
               yield* publishAssistant(ctx.assistantMessage, events)
             }) })
 
-            const exit = yield* stream.pipe(
+            const response = ctx.assistantMessage.summary
+              ? stream.pipe(Stream.flatMap((event) => Stream.fromIterable(checkpointEvents(event, onTail))))
+              : stream
+            const exit = yield* response.pipe(
               Stream.tap((event) =>
                 Effect.gen(function* () {
                   if (timing && !timing.firstStreamEvent) {

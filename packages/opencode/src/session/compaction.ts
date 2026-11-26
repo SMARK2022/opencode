@@ -14,7 +14,7 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
-import { Effect, Exit, Option, Layer, Context } from "effect"
+import { Effect, Exit, Option, Layer, Context, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -22,25 +22,25 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
-import { buildPrompt } from "@opencode-ai/core/session/compaction"
+import {
+  boundarySamples,
+  buildReplayInstructions,
+  CONTEXT_COMPACT_DESCRIPTION,
+  CONTEXT_COMPACT_INPUT,
+} from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
 import { SessionRequestUsage } from "@opencode-ai/core/session/request-usage"
 import { Database } from "@opencode-ai/core/database/database"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CompactionFileEvidence } from "./file-evidence"
 import { Todo } from "./todo"
+import type { LLM } from "./llm"
+import { jsonSchema, type ModelMessage } from "ai"
 
 export const Event = SessionCompactionEvent
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-// 压缩回放时旧 tool 输出的 head/tail 双向截断预算。
-// head=400 保 shell 头部的截断 notice（path 属性排在 guidance 前，长路径下
-// 即使切到 notice 中段也能保住 path 前缀）；tail=2000 保 tool 末尾的截断
-// notice 完整含 path，避免模型压缩后丢失恢复文件路径。
-// #328：400/2000 的不对称是刻意设计——头部只需容纳 notice 的 path 前缀，尾部要装完整恢复指引。
-const TOOL_OUTPUT_HEAD_CHARS = 400
-const TOOL_OUTPUT_TAIL_CHARS = 2_000
 // [local-smark] read 输出也受 prune 保护：compaction 后模型最常复用的是文件内容，
 // 丢 read 证据会迫使模型重新读盘；skill 此前已受保护。
 const PRUNE_PROTECTED_TOOLS = ["skill", "read"]
@@ -69,66 +69,6 @@ type Tail = {
 type CompletedCompaction = {
   userIndex: number
   assistantIndex: number
-  summary: string | undefined
-}
-
-const truncate = (value: string) =>
-  // #328：head/tail 双向截断——head=400 保 notice 的 path 前缀（path 属性排在 guidance 前），
-  // tail=2000 保 tool 末尾 notice 完整含 path，压缩回放不丢恢复文件路径。
-  value.length <= TOOL_OUTPUT_HEAD_CHARS + TOOL_OUTPUT_TAIL_CHARS
-    ? value
-    : `${value.slice(0, TOOL_OUTPUT_HEAD_CHARS)}\n[truncated]\n...\n${value.slice(-TOOL_OUTPUT_TAIL_CHARS)}`
-
-const serialize = (message: SessionV1.WithParts) => {
-  if (message.info.role === "user") {
-    const text = message.parts
-      .filter((part): part is SessionV1.TextPart => part.type === "text" && !part.ignored)
-      .map((part) => part.text)
-      .filter(Boolean)
-      .join("\n")
-    const files = message.parts.flatMap((part) =>
-      part.type === "file" ? [`[Attached ${part.mime}: ${part.filename ?? "file"}]`] : [],
-    )
-    return [...(text ? [`[User]: ${text}`] : []), ...files].join("\n")
-  }
-  return message.parts
-    .flatMap((part) => {
-      if (part.type === "text") return part.text ? [`[Assistant]: ${part.text}`] : []
-      if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
-      if (part.type !== "tool") return []
-      // 压缩消费父聚合回执；子正文仍保存在会话中供文件归因和审计使用。
-      if (typeof part.metadata?.executeParent === "string") return []
-      const call = `[Assistant tool call]: ${part.tool}(${JSON.stringify(part.state.input)})`
-      if (part.state.status === "completed") {
-        const attachments = (part.state.attachments ?? []).map(
-          (item) => `[Attached ${item.mime}: ${item.filename ?? "file"}]`,
-        )
-        const output = part.state.time.compacted
-          ? "[Old tool result content cleared]"
-          : truncate([part.state.output, ...attachments].join("\n"))
-        return [call, `[Tool result]: ${output}`]
-      }
-      if (part.state.status === "error") {
-        // Task 恢复身份与已完成清单属于错误回执，压缩后也须保留。
-        const partial = part.tool === "execute" && typeof part.state.metadata?.output === "string"
-          ? `\n${truncate(part.state.metadata.output)}` : ""
-        return [call, `[Tool error]: ${part.state.error}${partial}`]
-      }
-      return [call]
-    })
-    .join("\n")
-}
-
-function summaryText(message: SessionV1.WithParts) {
-  const text = message.parts
-    .filter((part): part is SessionV1.TextPart => part.type === "text")
-    // 确定性证据由本次磁盘重新生成，不把旧表格混入下一次模型摘要。
-    .filter((part) => part.metadata?.kind !== CompactionFileEvidence.kind)
-    .map((part) => part.text.trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim()
-  return text || undefined
 }
 
 function completedCompactions(messages: SessionV1.WithParts[]) {
@@ -145,7 +85,7 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
     if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
     const userIndex = users.get(msg.info.parentID)
     if (userIndex === undefined) return []
-    return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
+    return [{ userIndex, assistantIndex }]
   })
 }
 
@@ -280,20 +220,87 @@ function splitTurn(input: {
   })
 }
 
+const estimate = Effect.fn("SessionCompaction.estimate")(function* (input: {
+  messages: SessionV1.WithParts[]
+  model: Provider.Model
+}) {
+  const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
+  // #194：tail-retention 保持原始大小启发式
+  return TokenEstimate.estimateText(JSON.stringify(msgs))
+})
+
+export const select = Effect.fn("SessionCompaction.select")(function* (input: {
+  messages: SessionV1.WithParts[]
+  cfg: ConfigV1.Info
+  model: Provider.Model
+}) {
+  const limit = input.cfg.compaction?.tail_turns
+  if (limit !== undefined && limit <= 0) return
+  let remaining = preserveRecentBudget(input)
+  const recent = turns(input.messages).slice(limit === undefined ? 0 : -limit)
+
+  let keep: Tail | undefined
+  for (const turn of recent.reverse()) {
+    const size = yield* estimate({ messages: input.messages.slice(turn.start, turn.end), model: input.model })
+    if (size > remaining) {
+      keep = (yield* splitTurn({ ...input, turn, budget: remaining, estimate })) ?? keep
+      break
+    }
+    remaining -= size
+    keep = turn
+  }
+  return keep?.start ? keep.id : undefined
+})
+
+function excerpt(message: SessionV1.WithParts) {
+  if (message.info.role !== "user" || message.info.hidden) return ""
+  return message.parts
+    .flatMap((part) => {
+      if (part.hidden) return []
+      if (part.type === "text" && !part.ignored && !part.synthetic) return [part.text]
+      if (part.type === "file") return [part.filename ?? part.mime]
+      return []
+    })
+    .join("\n")
+    .trim()
+    .slice(0, 360)
+}
+
+export function statusResult(messages: SessionV1.WithParts[], preferred?: MessageID) {
+  const users = messages.flatMap((message) => {
+    const text = excerpt(message)
+    return text ? [{ tailStartID: message.info.id, excerpt: text }] : []
+  })
+  return {
+    candidates: boundarySamples(
+      users,
+      users.find((user) => user.tailStartID === preferred),
+    ),
+  }
+}
+
+type Source = {
+  parent?: Pick<LLM.StreamInput, "system" | "tools" | "user" | "model" | "toolChoice"> & {
+    history: SessionV1.WithParts[]
+    messages: (before?: MessageID) => ModelMessage[]
+  }
+  proposal?: { tailStartID: string; summary: string }
+}
+
 export interface Interface {
   readonly isOverflow: (input: {
     tokens: SessionV1.Assistant["tokens"]
     model: Provider.Model
   }) => Effect.Effect<boolean>
   readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
-  readonly run: (input: {
+  readonly run: (input: Source & {
     sessionID: SessionID
     agent: string
     model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
     auto: boolean
     overflow?: boolean
   }) => Effect.Effect<"continue" | "stop">
-  readonly process: (input: {
+  readonly process: (input: Source & {
     parentID: MessageID
     messages: SessionV1.WithParts[]
     sessionID: SessionID
@@ -327,7 +334,6 @@ const layer = Layer.effect(
     const db = (yield* Database.Service).db
     const fs = yield* FSUtil.Service
     const todo = yield* Todo.Service
-
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
       model: Provider.Model
@@ -338,63 +344,6 @@ const layer = Layer.effect(
         model: input.model,
         outputTokenMax: flags.outputTokenMax,
       })
-    })
-
-    const estimate = Effect.fn("SessionCompaction.estimate")(function* (input: {
-      messages: SessionV1.WithParts[]
-      model: Provider.Model
-    }) {
-      const msgs = yield* MessageV2.toModelMessagesEffect(input.messages, input.model)
-      // #194：tail-retention 保持原始大小启发式
-      return TokenEstimate.estimateText(JSON.stringify(msgs))
-    })
-
-    const select = Effect.fn("SessionCompaction.select")(function* (input: {
-      messages: SessionV1.WithParts[]
-      cfg: ConfigV1.Info
-      model: Provider.Model
-    }) {
-      const limit = input.cfg.compaction?.tail_turns
-      if (limit !== undefined && limit <= 0) return { head: input.messages, tail_start_id: undefined }
-      const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
-      const all = turns(input.messages)
-      if (!all.length) return { head: input.messages, tail_start_id: undefined }
-      const recent = limit === undefined ? all : all.slice(-limit)
-
-      let total = 0
-      let keep: Tail | undefined
-      for (let i = recent.length - 1; i >= 0; i--) {
-        const turn = recent[i]!
-        // estimate lazily so cost stays proportional to the retained tail, not the whole session
-        const size = yield* estimate({
-          messages: input.messages.slice(turn.start, turn.end),
-          model: input.model,
-        })
-        if (total + size <= budget) {
-          total += size
-          keep = { start: turn.start, id: turn.id }
-          continue
-        }
-        const remaining = budget - total
-        const split = yield* splitTurn({
-          messages: input.messages,
-          turn,
-          model: input.model,
-          budget: remaining,
-          estimate,
-        })
-        if (split) keep = split
-        else if (!keep) {
-          yield* Effect.logInfo("tail fallback", { budget, size, total })
-        }
-        break
-      }
-
-      if (!keep || keep.start === 0) return { head: input.messages, tail_start_id: undefined }
-      return {
-        head: input.messages.slice(0, keep.start),
-        tail_start_id: keep.id,
-      }
     })
 
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
@@ -460,6 +409,8 @@ const layer = Layer.effect(
       sessionID: SessionID
       auto: boolean
       overflow?: boolean
+      parent?: Source["parent"]
+      proposal?: Source["proposal"]
     }) {
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
@@ -494,9 +445,11 @@ const layer = Layer.effect(
       }
 
       const agent = yield* agents.get("compaction")
-      const model = agent.model
-        ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
-        : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
+      const model = input.parent?.tools.context_compact
+        ? input.parent.model
+        : agent.model
+          ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
+          : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
 
       const requestUsage = Option.getOrUndefined(yield* Effect.serviceOption(SessionRequestUsage.Service))
@@ -522,7 +475,6 @@ const layer = Layer.effect(
       const history = MessageV2.filterCompacted(rawHistory)
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
-      const previousSummary = prior.at(-1)?.summary
       // #256：visibleHistory 与 select 共用——memento 从可见窗口收集，避免把 hidden 的
       // 压缩标记/summary 对当作用户指令回放。
       const visibleHistory = history.filter((_, index) => !hidden.has(index))
@@ -533,34 +485,75 @@ const layer = Layer.effect(
         messages: rawHistory,
         maxTokens: preserveRecentUserBudget({ cfg, model, outputTokenMax: flags.outputTokenMax }),
       })
-      const selected = yield* select({
-        messages: visibleHistory,
-        cfg,
-        model,
-      })
-      // Allow plugins to inject context or replace compaction prompt.
-      const compacting = yield* plugin.trigger(
-        "experimental.session.compacting",
-        { sessionID: input.sessionID },
-        { context: [], prompt: undefined },
-      )
-      const msgs = structuredClone(selected.head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      // #553：Compaction plugin 与普通 prompt 共用 visible head，序列化 conversation 不能消费已隐藏的 transformed history。
-      // transformed clone 是唯一上传历史；raw history 仍仅服务审计和 bounded memento。
-      const visibleMsgs = MessageV2.visible(msgs)
-      const conversation = visibleMsgs.map(serialize).filter(Boolean).join("\n\n")
-      const nextPrompt =
-        compacting.prompt ??
-        [
-          buildPrompt({
-            previousSummary,
-            context: [conversation],
-          }),
-          ...compacting.context,
-        ]
+      let checkpoint: { tail_start_id?: MessageID } | undefined = input.proposal && {
+        tail_start_id: MessageID.make(input.proposal.tailStartID),
+      }
+      const selected = yield* Effect.gen(function* () {
+        if (input.proposal) return
+        const preferred = yield* select({ messages: visibleHistory, cfg, model })
+        const compacting = yield* plugin.trigger(
+          "experimental.session.compacting",
+          { sessionID: input.sessionID },
+          { context: [], prompt: undefined },
+        )
+        let visible = input.parent?.history ?? history
+        let prefix = input.parent?.messages
+        if (!prefix) {
+          const msgs = structuredClone(history)
+          yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+          visible = MessageV2.visible(msgs)
+          const blocks = yield* MessageV2.toModelMessageChunksEffect(visible, model)
+          prefix = (before) => {
+            const end = visible.findIndex((message) => message.info.id === before)
+            return (end < 0 ? blocks : blocks.slice(0, end)).flat()
+          }
+        }
+        const ids = new Set(history.map((message) => message.info.id))
+        const status = statusResult(
+          visible.filter((message) => ids.has(message.info.id)),
+          preferred,
+        )
+        const all = prefix()
+        const instruction = [buildReplayInstructions(JSON.stringify(status)), compacting.prompt, ...compacting.context]
           .filter(Boolean)
           .join("\n\n")
+        const limit = usable({ cfg, model })
+        const fits = (messages: ModelMessage[]) => TokenEstimate.estimateText(JSON.stringify(messages)) <= limit
+        const pick = () => {
+          for (const tail_start_id of new Set([preferred, ...status.candidates.map((c) => c.tailStartID)])) {
+            const head = input.auto ? prefix(tail_start_id ?? replay?.info.id) : all
+            const messages: ModelMessage[] = [...head, { role: "user", content: instruction }]
+            if (input.auto && model.limit.context) {
+              if (!fits(messages)) continue
+              if (tail_start_id !== preferred && !fits(all.slice(head.length))) continue
+            }
+            return { messages, tail_start_id }
+          }
+        }
+        const window = pick()
+        if (!window) return
+        const tools: LLM.StreamInput["tools"] = Object.fromEntries(
+          Object.entries(input.parent?.tools ?? {}).map(([name, tool]) => [name, { ...tool, execute: undefined }]),
+        )
+        tools.context_compact ??= {
+          description: CONTEXT_COMPACT_DESCRIPTION,
+          inputSchema: jsonSchema(Schema.toJsonSchemaDocument(CONTEXT_COMPACT_INPUT).schema),
+        }
+        const sessionInfo = yield* session.get(input.sessionID).pipe(Effect.orDie)
+        const request: LLM.StreamInput = {
+          user: input.parent?.user ?? userMessage,
+          agent: yield* agents.get(userMessage.agent),
+          model,
+          sessionID: input.sessionID,
+          parentSessionID: sessionInfo.parentID,
+          permission: sessionInfo.permission,
+          system: input.parent?.system ?? [],
+          tools,
+          toolChoice: input.parent?.toolChoice,
+          messages: window.messages,
+        }
+        return { request, tail_start_id: window.tail_start_id }
+      })
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -591,50 +584,52 @@ const layer = Layer.effect(
       own(msg)
       // 入口仅拥有来源标记，tokens/cost 仍由共用 processor 的结算快照拥有。
       yield* SessionProcessor.publishAssistant(msg, events)
-      const processor = yield* processors.create({
-        assistantMessage: msg,
-        sessionID: input.sessionID,
-        model,
-      })
-      const result = yield* processor.process({
-        user: userMessage,
-        agent,
-        sessionID: input.sessionID,
-        tools: {},
-        system: [],
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: [
-                  nextPrompt,
-                  ...(compacting.prompt ? ["The following is the conversation history:", conversation] : []),
-                ]
-                  .filter(Boolean)
-                  .join("\n\n"),
-              },
-            ],
-          },
-        ],
-        model,
+      const result = yield* Effect.gen(function* () {
+        if (input.proposal) {
+          yield* session.updatePart({
+            type: "text",
+            id: PartID.ascending(),
+            sessionID: msg.sessionID,
+            messageID: msg.id,
+            text: input.proposal.summary,
+          })
+          msg.finish = "stop"
+          msg.time.completed = Date.now()
+          yield* SessionProcessor.publishAssistant(msg, events)
+          return "continue" as const
+        }
+        if (!selected) return "compact" as const
+        const processor = yield* processors.create({ assistantMessage: msg, sessionID: input.sessionID, model })
+        for (let attempt = 0; attempt < 9; attempt++) {
+          const result = yield* processor.process(selected.request, (id) => {
+            const tail = history.find((m) => m.info.id === id)
+            checkpoint = { tail_start_id: tail?.info.id ?? selected.tail_start_id }
+          })
+          if (result !== "continue" || checkpoint) return result
+        }
+        if (input.auto && !input.overflow) return "stop" as const
+        msg.error = new SessionV1.APIError({
+          message: "Compaction did not produce a checkpoint proposal",
+          isRetryable: false,
+        }).toObject()
+        yield* SessionProcessor.publishAssistant(msg, events)
+        return "stop" as const
       })
 
       if (result === "compact") {
-        processor.message.error = new SessionV1.ContextOverflowError({
+        msg.error = new SessionV1.ContextOverflowError({
           message: replay
             ? "Conversation history too large to compact - exceeds model context limit"
             : "Session too large to compact - context exceeds model limit even after stripping media",
         }).toObject()
-        processor.message.finish = "error"
+        msg.finish = "error"
         // overflow 是 cleanup 之后的真实终验失败，原确认用量只覆盖快照，不退款。
-        processor.message.time.completed ??= Date.now()
-        yield* SessionProcessor.publishAssistant(processor.message, events)
+        msg.time.completed ??= Date.now()
+        yield* SessionProcessor.publishAssistant(msg, events)
         return "stop"
       }
 
-      if (result === "continue" && !processor.message.error) {
+      if (result === "continue" && !msg.error) {
         // 复用唯一附录追加点；Todo 由现有服务读取，不新建 evidence 状态或写入旁路。
         const todos = yield* todo.get(input.sessionID)
         const handoff = yield* CompactionFileEvidence.render(history, fs, ctx.worktree, completedCompactions(history).length + 1, ctx.directory, todos)
@@ -652,12 +647,12 @@ const layer = Layer.effect(
       const nextRecentUserMessages = recentUserMessages.length > 0 ? recentUserMessages : undefined
       if (
         compactionPart &&
-        (compactionPart.tail_start_id !== selected.tail_start_id ||
+        (compactionPart.tail_start_id !== checkpoint?.tail_start_id ||
           JSON.stringify(compactionPart.recent_user_messages ?? []) !== JSON.stringify(nextRecentUserMessages ?? []))
       ) {
         yield* session.updatePart({
           ...compactionPart,
-          tail_start_id: selected.tail_start_id,
+          tail_start_id: checkpoint?.tail_start_id,
           recent_user_messages: nextRecentUserMessages,
         })
       }
@@ -752,7 +747,7 @@ const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
+      if (msg.error) return "stop"
       if (result === "continue") {
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
@@ -858,6 +853,8 @@ const layer = Layer.effect(
       model: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
       auto: boolean
       overflow?: boolean
+      parent?: Source["parent"]
+      proposal?: Source["proposal"]
     }) {
       // #538：ID 必须先于 marker 的首次 durable write 归属 run；create 中任一 yield
       // 被中断时，finalizer 仍能精确定位本次 scratch，而不会扫描或猜测 latest。
@@ -870,6 +867,8 @@ const layer = Layer.effect(
           sessionID: input.sessionID,
           auto: input.auto,
           overflow: input.overflow,
+          parent: input.parent,
+          proposal: input.proposal,
         })
       }).pipe(
         Effect.onExit((exit) => {
