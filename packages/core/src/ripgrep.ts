@@ -18,7 +18,6 @@ import path from "path"
  */
 
 const ERROR_BYTES = 8 * 1024
-const MAX_RECORD_BYTES = 64 * 1024
 const MAX_SUBMATCHES = 100
 // #138：候选文件上限
 export const MAX_SEARCH_FILES = 5_000
@@ -363,14 +362,12 @@ const layer = Layer.effect(
             input.pattern,
             input.file ?? ".",
           ],
+          // 完整 JSON 行先解析；结果数量和展示裁剪在各自的原有步骤处理。
           parse: (line) =>
-            (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES
-              ? Effect.fail(failure(`Ripgrep JSON record exceeded ${MAX_RECORD_BYTES} bytes`))
-              : Effect.try({
-                  try: () => JSON.parse(line) as unknown,
-                  catch: (cause) => failure("Invalid ripgrep JSON output", cause),
-                })
-            ).pipe(
+            Effect.try({
+              try: () => JSON.parse(line) as unknown,
+              catch: (cause) => failure("Invalid ripgrep JSON output", cause),
+            }).pipe(
               Effect.flatMap((json) => {
                 if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
                   return Effect.succeed(undefined)

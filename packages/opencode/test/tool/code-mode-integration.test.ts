@@ -230,7 +230,7 @@ describe("code mode integration (real MCP server)", () => {
   test("the appended catalog inlines compact signatures with real MCP schemas", () => {
     expect(description).toContain("The catalog is complete.")
     expect(description).toContain("- fixtures (5 tools)")
-    expect(description).toContain("tools.fixtures.add(input: { a: number; b: number }): Promise<{ sum: number }>")
+    expect(description).toContain("tools.fixtures.add(input: { a: number; b: number }): Promise<{ sum: number } | string>")
     expect(description).toContain("tools.fixtures.get_text(input: { name: string }): Promise<unknown>")
     expect(description).toContain("// Add two numbers and return the structured sum")
     expect(description).not.toContain("$codemode")

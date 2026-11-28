@@ -109,6 +109,7 @@ export type CatalogEntry = {
   // 这是实际宿主 validator 的来源，不替换只负责展示的 JSON input。
   runtimeParameters?: Schema.Decoder<unknown>
   outputSchema?: JSONSchema7 | Schema.Decoder<unknown>
+  mcpStructured?: true
 }
 
 export interface CodeModeHost {
@@ -159,7 +160,7 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
   const tree: Record<string, Record<string, import("@opencode-ai/codemode").Tool.Definition>> = {}
   for (const entry of catalog) {
     const namespace = (tree[entry.path[0]] ??= {})
-    namespace[entry.path[1]] = sandbox.Tool.make({
+    const definition = sandbox.Tool.make({
       description: entry.description,
       // 沿用 V1 原 JSON Schema 签名适配：对象原样透传，真实输入校验仍由工具拥有。
       input: entry.inputSchema as import("@opencode-ai/codemode").Tool.JsonSchema,
@@ -176,6 +177,10 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
           }),
         ),
     })
+    // 内置工具的 Effect 输出合同约束结果形状；外部 JSON 声明仍可交付普通文本。
+    const advertised = { ...definition, inputContract: definition.input }
+    namespace[entry.path[1]] = Schema.isSchema(entry.outputSchema)
+      ? advertised : sandbox.CodeMode.withRepresentationTextOutput(advertised)
   }
   return tree
 })
@@ -197,7 +202,8 @@ export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (
         ).includes(entry.id),
     )
     .map((entry) => entry.path.join("."))
-  return CodeMode.make({ tools, discovery: { priority } }).instructions()
+  return CodeMode.make({ tools, discovery: { priority } }).instructions() +
+    "\nToo-deep structures and non-plain result objects are returned as ordinary tool text (complete JSON text for over-depth MCP objects)."
 })
 
 export const CodeModeTool = Tool.define(
@@ -246,6 +252,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
         // 规范化只做一次，预跑、整段权限检查和真实执行必须看到完全相同的源码。
         const code = fenced && !fenced[1].includes("```") ? fenced[1] : params.code
         const outputLimits = yield* truncate.limits()
+        const limits = { maxToolCalls: 1_024, maxLoopIterations: 100_000, maxLogBytes: outputLimits.maxBytes }
         const calls: CallEntry[] = []
         const attachments: Attachment[] = []
         // 相同规则在多个子调用出现时只返回最新内容，去重不依赖脚本最终选择的字段。
@@ -277,11 +284,13 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             for (const item of result.context ?? []) context.set(`${item.kind}:${item.key}`, item)
             // 附件与强制上下文由宿主收集，context 按 kind:key 去重，独立于脚本 return。
             // 只有协议标记的 rawText 进入 JSON 投影；其他程序值原样交付，包括 null、false 和 0。
-            return result.program?.rawText !== undefined
-              ? CodeMode.fromJsonText(result.program.rawText)
-              : result.program
-                ? result.program.value
-                : result.output
+            const program = result.program
+            if (!program) return result.output
+            if (program.rawText !== undefined) return CodeMode.fromJsonText(program.rawText)
+            const value = program.value
+            return CodeMode.hostRepresentationText(value, (reason) => reason === "depth" && entry.mcpStructured && isRecord(value)
+              ? JSON.stringify(value)
+              : result.output)
           }),
         )
         const execute = CodeMode.execute({
@@ -289,7 +298,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           tools,
           environment: lease.environment,
           // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
-          limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
+          limits: { ...limits, timeoutMs: params.timeout ?? 600000 },
           fetch: host.fetch,
           waitForTimeout: host.waitForTimeout,
           onToolCallStart: ({ index, name, input }) =>
@@ -349,7 +358,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             snapshotEnvironment: true,
             // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
             sleep: () => Effect.void,
-            limits: { timeoutMs: 500, maxToolCalls: 1024, maxLogBytes: outputLimits.maxBytes },
+            limits: { ...limits, timeoutMs: 500 },
             // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
             fetch: host.fetch
               ? (url, init) =>

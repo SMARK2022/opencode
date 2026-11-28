@@ -126,6 +126,8 @@ export function renderReadOutput(input: {
   raw: readonly string[]
   cut: boolean
   more: boolean
+  // 有截断事实时仍保留标记；只有宿主确认没有可继续的行号才省略 offset。
+  continuationOffset?: false
   outline?: typeof OutlineOutput.Type
   overlap?: string
 }) {
@@ -145,8 +147,10 @@ export function renderReadOutput(input: {
   // 短正文仍原样交付，仅附既有范围与避免重复读取的原话。
   if (input.overlap) output.push(`<note type="overlap" ranges="${escapeXmlAttr(input.overlap)}">Lines ${input.overlap} already in context (latest version, file unchanged); avoid re-reading this range unnecessarily.</note>`)
   output.push("<content>", renderContentLines(input.raw, input.start), "</content>")
-  if (input.cut) output.push(`<more offset="${input.end + 1}" reason="byte_limit" />`)
-  else if (input.more) output.push(`<more offset="${input.end + 1}" reason="line_limit" />`)
+  if (input.cut || input.more) {
+    const offset = input.continuationOffset === false ? "" : ` offset="${input.end + 1}"`
+    output.push(`<more${offset} reason="${input.cut ? "byte_limit" : "line_limit"}" />`)
+  }
   return output.join("\n")
 }
 

@@ -18,6 +18,8 @@ export type ExecutionLimits = {
   readonly timeoutMs?: number
   /** Maximum number of tool calls admitted by the runtime. No default: absent means unlimited. */
   readonly maxToolCalls?: number
+  /** 显式循环体总数；没有配置时由现有超时预算约束。 */
+  readonly maxLoopIterations?: number
   /** Maximum UTF-8 bytes of model-facing output. No default: absent means no truncation. */
   readonly maxOutputBytes?: number
   /** 日志按 UTF-8 字节限制留存；业务返回值仍受独立的 maxOutputBytes 控制。 */
@@ -39,6 +41,7 @@ type ToolTree<R = never> = {
 export type ResolvedExecutionLimits = {
   readonly timeoutMs: number | undefined
   readonly maxToolCalls: number | undefined
+  readonly maxLoopIterations: number | undefined
   readonly maxOutputBytes: number | undefined
   readonly maxLogBytes: number | undefined
 }
@@ -89,6 +92,7 @@ export const DiagnosticKind = Schema.Literals([
   "InvalidToolOutput",
   "InvalidDataValue",
   "ToolCallLimitExceeded",
+  "LoopIterationLimitExceeded",
   "TimeoutExceeded",
   "ToolFailure",
   "ExecutionFailure",
@@ -156,6 +160,8 @@ const resolveExecutionLimits = (limits?: ExecutionLimits): ResolvedExecutionLimi
   // Effect 的计时器只支持有符号32位毫秒；超界不能悄悄变成无期限执行。
   timeoutMs: validateLimit("timeoutMs", limits?.timeoutMs, 1, 2_147_483_647),
   maxToolCalls: validateLimit("maxToolCalls", limits?.maxToolCalls, 0),
+  // 零只阻止进入循环体；条件立即为假的循环仍可正常完成。
+  maxLoopIterations: validateLimit("maxLoopIterations", limits?.maxLoopIterations, 0),
   maxOutputBytes: validateLimit("maxOutputBytes", limits?.maxOutputBytes, 0),
   // 零预算表示只记录省略数；不能按真值把它当成无限额。
   maxLogBytes: validateLimit("maxLogBytes", limits?.maxLogBytes, 0),
@@ -186,6 +192,10 @@ export const make = <const Tools extends Record<string, unknown> = {}>(
     execute: (code) => executeWithLimits<Tools>({ ...options, code }, limits, prepared.searchIndex),
   }
 }
+
+// 宿主选择结构不能作为数据交付时使用的文本；原解码和复制仍先执行。
+export const hostRepresentationText = ToolRuntime.hostRepresentationText
+export const withRepresentationTextOutput = ToolRuntime.withRepresentationTextOutput
 
 // 仅供宿主显式选择的无类型文本；声明字符串和普通工具结果不会自动进入此路径。
 export const fromJsonText = (text: string): unknown => {

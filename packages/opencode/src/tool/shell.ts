@@ -810,7 +810,8 @@ export const ShellTool = Tool.define(
         output,
         // 超时来自实际竞争结果，完整输出地址沿原保留策略，程序字段遵从R15。
         // null退出码也可能来自取消；timedOut必须使用timeout分支的原事实。
-        program: { value: { content: output, exit: code, truncated: cut, timedOut: expired,
+        // 程序正文供脚本继续处理；退出通知和空正文占位符留在展示层。
+        program: { value: { content: end.text, exit: code, truncated: cut, timedOut: expired,
           ...(outputPath ? { path: outputPath } : {}),
         } },
       }

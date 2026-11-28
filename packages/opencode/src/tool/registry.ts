@@ -154,7 +154,7 @@ const layer = Layer.effect(
             jsonSchema,
             description: def.description,
             // 插件沿原Zod声明校验；目录复用已有JSON Schema转换，不另建编解码器。
-            output: def.output ? zodJsonSchema(def.output) : undefined,
+            output: def.output ? zodJsonSchema(def.output) : Schema.Unknown,
             execute: (args, toolCtx) =>
               Effect.gen(function* () {
                 yield* decode(args).pipe(
