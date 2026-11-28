@@ -297,11 +297,14 @@ export const toDecideMessages = (context: readonly SessionMessage.Message[], mod
   if (limit <= 0) return toLLMMessages(sanitized, model)
   const starts = sanitized.flatMap((message, index) => message.type === "user" ? [index] : []).toReversed()
   let fallback: ReturnType<typeof toLLMMessages> | undefined
+  const samples = Token.inputHistory(context, model)
   for (const [position, start] of starts.entries()) {
     const window = sanitized.slice(start)
     const candidate = toLLMMessages(window, model)
     // decide的工具/媒体投影与窗口历史一同估算，不能在最后发送时才学习密度。
-    const ratio = Token.estimateRequest({ system, messages: candidate }, Token.inputHistory(window, model)).input / limit
+    const ratio = Token.estimateRequest(
+      { system, messages: candidate }, samples,
+    ).input / limit
     // 超满时回到最近可容纳的完整用户轮，而不是截断工具输入或输出。
     if (ratio >= 1) return fallback ?? candidate
     fallback = candidate

@@ -67,7 +67,7 @@ test("calibrates input density with thresholds, cache-inclusive samples and a sh
 
 test("confirmed mixed densities estimate encrypted reasoning without inflating ordinary text", () => {
   const breakdown = (reasoning: number): SessionMessage.InputBreakdown => ({
-    system: 0, instructions: 0, skills: 0, tools: 0,
+    system: 0, instructions: 0, skills: 0, tools: 0, encrypted: reasoning,
     messages: { userText: 0, assistantText: 0, reasoning, toolInput: 0, toolOutput: 0, attachments: 0, total: reasoning },
   })
   // 两个确认点独立给定 /4 正文和 /16 推理，改变组成后仍应得到约50万输入。
@@ -89,6 +89,49 @@ test("confirmed mixed densities estimate encrypted reasoning without inflating o
   ], [])
   expect(plain.charsPerToken).toBe(8)
   expect(plain.input).toBeGreaterThanOrEqual(625_000)
+  // 字段增量的独立期望同时覆盖准备前 metadata、SDK options 和 Responses。
+  for (const metadata of ["providerMetadata", "providerOptions"])
+  for (const provider of ["openai", "copilot", "azure"]) {
+    const estimate = (text: string, cipher: string) => Token.estimateRequest({
+      messages: [{ role: "assistant", content: [{
+        type: "reasoning", text,
+        [metadata]: { [provider]: { reasoningEncryptedContent: cipher } },
+      }] }],
+    }, [], [])
+    const base = estimate("", "")
+    const cipher = estimate("", "x".repeat(16000))
+    expect(estimate("x".repeat(16000), "").input - base.input).toBe(4000)
+    expect(cipher.input - base.input).toBe(1000)
+    expect(cipher.inputBreakdown?.encrypted).toBe(16000)
+  }
+  const responses = { input: [{ type: "reasoning",
+    summary: [{ type: "summary_text", text: "a".repeat(16000) }],
+    encrypted_content: "b".repeat(16000) }] }
+  expect(Token.estimateRequest(responses, [], []).input).toBeGreaterThan(5000)
+  const tool = { messages: [{ role: "assistant", content: [{
+    type: "tool-call", input: { encrypted_content: "a".repeat(16000) },
+  }] }] }
+  expect(Token.estimateRequest(tool, [], []).inputBreakdown?.encrypted).toBe(0)
+  const assistant = (encrypted: number, input: number) =>
+    Schema.decodeUnknownSync(SessionMessage.Assistant)({
+      id: "msg_prior", sessionID: "ses_fixture", type: "assistant", agent: "build",
+      model: { providerID: "p", id: "gpt-6.1" }, time: { created: 1 }, content: [],
+      tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      inputEstimate: { input, bodyChars: 1000000, confirmed: true,
+        inputBreakdown: breakdown(encrypted) },
+    })
+  const prior = [assistant(800000, 130000), assistant(200000, 220000)]
+  const estimate = (messages: SessionMessage.Message[]) => Token.estimateRequest(
+    { input: [{ type: "reasoning", encrypted_content: "x".repeat(16000) }] },
+    Token.inputHistory(messages, { provider: "p", id: "gpt-6.2" }), [],
+  )
+  expect(estimate(prior).input).toBe(1614)
+  expect(estimate([]).charsPerToken).toBe(4.5)
+  const checkpoint = Schema.decodeUnknownSync(SessionMessage.Compaction)({
+    id: "msg_compact", sessionID: "ses_fixture", time: { created: 1 },
+    type: "compaction", reason: "auto", summary: "summary", recent: "",
+  })
+  expect(estimate([checkpoint]).charsPerToken).toBe(4)
 })
 
 test("one serializer accounts for lowered messages, tools, source sections and JSON escapes", () => {

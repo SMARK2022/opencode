@@ -1639,6 +1639,7 @@ const layer = Layer.effect(
         .toReversed()
 
       let fallback: SessionV1.WithParts[] | undefined
+      const samples = TokenEstimate.inputHistory(input.messages, input.model)
       for (const [position, start] of starts.entries()) {
         const candidate = sanitized.slice(start)
         const modelMessages = yield* MessageV2.toModelMessagesEffect(candidate, input.model)
@@ -1647,7 +1648,7 @@ const layer = Layer.effect(
         const ratio = Token.estimateRequest({
           system: [input.systemText, input.contextReminders].filter(Boolean).join("\n"),
           messages: modelMessages,
-        }, TokenEstimate.inputHistory(candidate, input.model)).input / limit
+        }, samples).input / limit
         // 超满：退回上一个可容纳窗口
         if (ratio >= DECIDE_MAX) return fallback ?? candidate
 
@@ -2270,6 +2271,7 @@ const layer = Layer.effect(
                 ? { goalID: preDispatchGoal.value.id, generation: preDispatchGoal.value.generation }
                 : undefined
             const result = yield* handle.process({
+              history: canonical,
               user: lastUser,
               agent,
               permission: session.permission,

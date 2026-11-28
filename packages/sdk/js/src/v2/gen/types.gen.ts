@@ -3506,6 +3506,7 @@ export type MoveSessionDestination = {
 }
 
 export type SessionMessageInputBreakdown = {
+  encrypted?: number
   system: number
   instructions: number
   skills: number

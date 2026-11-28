@@ -29463,6 +29463,10 @@
       "SessionMessageInputBreakdown": {
         "type": "object",
         "properties": {
+          "encrypted": {
+            "type": "integer",
+            "minimum": 0
+          },
           "system": {
             "type": "integer",
             "minimum": 0

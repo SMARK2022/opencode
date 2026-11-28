@@ -174,6 +174,7 @@ export type AssistantContent = AssistantText | AssistantReasoning | AssistantToo
 // 五类共享同一份 prepared JSON 字符基数；消息子项不包含已归系统的 system/developer 消息。
 export interface InputBreakdown extends Schema.Schema.Type<typeof InputBreakdown> {}
 export const InputBreakdown = Schema.Struct({
+  encrypted: optional(NonNegativeInt),
   system: NonNegativeInt,
   instructions: NonNegativeInt,
   skills: NonNegativeInt,

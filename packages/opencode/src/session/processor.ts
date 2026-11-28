@@ -160,7 +160,9 @@ export interface Handle {
       attachments?: SessionV1.FilePart[]
     },
   ) => Effect.Effect<void>
-  readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
+  readonly process: (
+    streamInput: LLM.StreamInput & { history?: readonly MessageV2.WithParts[] }
+  ) => Effect.Effect<Result>
 }
 
 type Input = {
@@ -1155,7 +1157,9 @@ const layer = Layer.effect(
         yield* status.set(ctx.sessionID, { type: "idle" })
       })
 
-      const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
+      const process: Handle["process"] = Effect.fn(
+        "SessionProcessor.process",
+      )(function* (streamInput) {
         timing = { startedAt: Date.now(), firstStreamEvent: false, firstDelta: new Set() }
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
@@ -1236,7 +1240,11 @@ const layer = Layer.effect(
               )
               // 样本来自同provider/model的已确认历史，body是本次实际准备发送的完整载荷。
               const samples = TokenEstimate.inputHistory(metadata.history, ctx.model)
-              const estimate = Token.estimateRequest(body, samples, streamInput.inputSections ?? [])
+              const estimate = Token.estimateRequest(body,
+                Token.learnInputRatios(samples) ? samples :
+                streamInput.history ?
+                  TokenEstimate.inputHistory(streamInput.history, ctx.model) : [],
+                streamInput.inputSections ?? [])
               // Core已分别折算正文、reasoning和媒体；这里的扩展只补充请求身份与水位。
               ctx.assistantMessage.inputEstimate = {
                 ...estimate,

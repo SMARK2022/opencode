@@ -790,10 +790,13 @@ it.live("session.processor publishes the shared text density without a V1 ratio 
       yield* llm.text("done", { usage: { input: 100, output: 1 } })
       const chat = yield* session.create({})
       const parent = yield* user(chat.id, "estimate")
-      // 两个确认点的正文密度均为4、推理密度均为16，V1总比率覆盖会破坏这个已知解。
-      for (const [reasoning, input] of [[800000, 100000], [200000, 212500]]) {
+      // 同族保持独立的 /5 正文、/10 密文密度。
+      for (const [reasoning, input] of [[800000, 120000], [200000, 180000]]) {
         const prior = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const inputBreakdown = { system: 0, instructions: 0, skills: 0, tools: 0,
+        prior.modelID = ModelV2.ID.make("test-sibling")
+        const inputBreakdown = {
+          encrypted: reasoning,
+          system: 0, instructions: 0, skills: 0, tools: 0,
           messages: { userText: 1000000 - reasoning, assistantText: 0, reasoning, toolInput: 0, toolOutput: 0, attachments: 0, total: 1000000 } }
         const tokens = { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
         yield* session.updatePart({ id: PartID.ascending(), sessionID: chat.id, messageID: prior.id,
@@ -802,15 +805,26 @@ it.live("session.processor publishes the shared text density without a V1 ratio 
         // 与真实finish生产者一样保存成对热确认，读取它不受旧cold恢复预算截断。
         yield* session.updateMessage({ ...prior, tokens, inputEstimate: { input, bodyChars: 1000000, confirmed: true, inputBreakdown } })
       }
+      const short = yield* assistant(
+        chat.id, parent.id, path.resolve(dir))
+      short.tokens.input = 40
+      short.inputEstimate = {
+        input: 40, bodyChars: 200, confirmed: true,
+      }
+      yield* session.updateMessage(short)
       const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
       const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const history = yield* session.messages({
+        sessionID: chat.id,
+      })
       const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
       yield* handle.process({ user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: ["plain text"],
+        history,
         messages: [{ role: "user", content: "estimate" }], tools: {} })
-      expect(handle.message.inputEstimate?.charsPerToken).toBe(4)
+      expect(handle.message.inputEstimate?.charsPerToken).toBe(5)
       // provider确认量负责账本，prepared估算及其密度保留自己的字段语义。
       expect(handle.message.tokens.input).toBe(100)
-      expect((yield* session.get(chat.id)).request?.inputEstimate?.charsPerToken).toBe(4)
+      expect((yield* session.get(chat.id)).request?.inputEstimate?.charsPerToken).toBe(5)
     }),
     { config: (url) => providerCfg(url) },
   ),
@@ -850,6 +864,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
           model: mdl,
           agent: agent(),
           system: ["fixture-instructions".repeat(40)],
+          history: [{ info: parent, parts: [] }],
           inputSections: [{ kind: "instructions", text: "fixture-instructions".repeat(40) }],
           messages: [{ role: "user", content: "compact" }],
           tools: {},
@@ -865,7 +880,7 @@ it.live("session.processor effect tests stop after token overflow requests compa
         expect(finish?.inputBreakdown?.instructions).toBe(800)
         const prepared = (yield* session.get(chat.id)).request?.inputEstimate
         expect(prepared?.confirmed).toBe(true)
-        expect(prepared?.charsPerToken).toBe(4)
+        expect(prepared?.charsPerToken).toBe(4.5)
         expect(prepared?.inputBreakdown).toEqual(finish?.inputBreakdown)
         // 800字符指令仍归属原桶，公开账本使用provider确认的30000输入而非prepared估算。
         expect((yield* session.get(chat.id)).request?.input).toBe(30_000)

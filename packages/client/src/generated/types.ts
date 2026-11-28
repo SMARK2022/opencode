@@ -274,6 +274,7 @@ export type SessionsListOutput = {
         readonly confirmed: boolean
         readonly charsPerToken?: number
         readonly inputBreakdown?: {
+          readonly encrypted?: number
           readonly system: number
           readonly instructions: number
           readonly skills: number
@@ -381,6 +382,7 @@ export type SessionsCreateOutput = {
         readonly confirmed: boolean
         readonly charsPerToken?: number
         readonly inputBreakdown?: {
+          readonly encrypted?: number
           readonly system: number
           readonly instructions: number
           readonly skills: number
@@ -464,6 +466,7 @@ export type SessionsGetOutput = {
         readonly confirmed: boolean
         readonly charsPerToken?: number
         readonly inputBreakdown?: {
+          readonly encrypted?: number
           readonly system: number
           readonly instructions: number
           readonly skills: number
@@ -840,6 +843,7 @@ export type SessionsContextOutput = {
           readonly confirmed: boolean
           readonly charsPerToken?: number
           readonly inputBreakdown?: {
+            readonly encrypted?: number
             readonly system: number
             readonly instructions: number
             readonly skills: number
@@ -1112,6 +1116,7 @@ export type SessionsHistoryOutput = {
             readonly confirmed: boolean
             readonly charsPerToken?: number
             readonly inputBreakdown?: {
+              readonly encrypted?: number
               readonly system: number
               readonly instructions: number
               readonly skills: number
@@ -1225,6 +1230,7 @@ export type SessionsHistoryOutput = {
             readonly confirmed: boolean
             readonly charsPerToken?: number
             readonly inputBreakdown?: {
+              readonly encrypted?: number
               readonly system: number
               readonly instructions: number
               readonly skills: number
@@ -1762,6 +1768,7 @@ export type SessionsEventsOutput =
           readonly confirmed: boolean
           readonly charsPerToken?: number
           readonly inputBreakdown?: {
+            readonly encrypted?: number
             readonly system: number
             readonly instructions: number
             readonly skills: number
@@ -1875,6 +1882,7 @@ export type SessionsEventsOutput =
           readonly confirmed: boolean
           readonly charsPerToken?: number
           readonly inputBreakdown?: {
+            readonly encrypted?: number
             readonly system: number
             readonly instructions: number
             readonly skills: number
@@ -2354,6 +2362,7 @@ export type SessionsMessageOutput = {
           readonly confirmed: boolean
           readonly charsPerToken?: number
           readonly inputBreakdown?: {
+            readonly encrypted?: number
             readonly system: number
             readonly instructions: number
             readonly skills: number
@@ -2585,6 +2594,7 @@ export type MessagesListOutput = {
           readonly confirmed: boolean
           readonly charsPerToken?: number
           readonly inputBreakdown?: {
+            readonly encrypted?: number
             readonly system: number
             readonly instructions: number
             readonly skills: number

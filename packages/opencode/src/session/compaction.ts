@@ -597,6 +597,7 @@ const layer = Layer.effect(
         model,
       })
       const result = yield* processor.process({
+        history: input.messages,
         user: userMessage,
         agent,
         sessionID: input.sessionID,

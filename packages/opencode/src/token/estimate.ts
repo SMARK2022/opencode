@@ -21,6 +21,8 @@ const DEFAULT_CHARS_PER_TOKEN = 4
 
 type HistoryMessage = {
   info: {
+    id: string
+    time: { created: number }
     role: string
     providerID?: string
     modelID?: string
@@ -43,7 +45,31 @@ type HistoryPart = {
 export function estimateText(input: string, charsPerToken = DEFAULT_CHARS_PER_TOKEN) { return Math.max(0, Math.round((input || "").length / charsPerToken)) }
 
 /** 将V1历史转换为同provider/model、按时间从新到旧排列的Core确认样本。 */
-export function inputHistory(messages: ReadonlyArray<HistoryMessage>, model: { providerID: string; id: string }) {
+export function inputHistory(
+  messages: ReadonlyArray<HistoryMessage>,
+  model: { providerID: string; id: string },
+) {
+  const history = modelHistory(messages, model)
+  if (Token.learnInputRatios(history)) return history
+  const peers = messages.filter(message =>
+    message.info.providerID === model.providerID &&
+    Token.family(String(message.info.modelID)) ===
+      Token.family(model.id),
+  ).filter(message => modelHistory([message], {
+    ...model, id: String(message.info.modelID),
+  }).some(sample => sample.inputBreakdown?.encrypted !== undefined))
+    .toSorted((a, b) => a.info.time.created - b.info.time.created ||
+      a.info.id.localeCompare(b.info.id))
+  const peer = peers.findLast(
+    message => message.info.modelID !== model.id)
+  if (peer) return modelHistory(peers, {
+    ...model, id: String(peer.info.modelID),
+  })
+  return messages.some(message => message.info.role === "assistant")
+    ? history : Object.assign(history, { first: true })
+}
+
+function modelHistory(messages: ReadonlyArray<HistoryMessage>, model: { providerID: string; id: string }) {
   const history: Token.InputSample[] = []
   // 每个助手优先读取热快照，缺少有效热快照时从最近finish恢复同一请求的测量值。
   for (let index = messages.length - 1; index >= 0 && history.length < Token.INPUT_RATIO_HISTORY_SAMPLES; index--) {

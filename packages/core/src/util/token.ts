@@ -4,7 +4,7 @@ import type { SessionMessage } from "@opencode-ai/schema/session-message"
 import { AttachmentToken } from "./attachment-token"
 
 export type SystemSection = { readonly kind: "system" | "instructions" | "skills"; readonly text: string }
-type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages" | "media"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
+type Bucket = Exclude<keyof SessionMessage.InputBreakdown, "messages" | "media" | "encrypted"> | Exclude<keyof SessionMessage.InputBreakdown["messages"], "total">
 type Node = {
   bucket: Bucket
   section: "body" | "system" | "messages" | "tools" | "options"
@@ -17,6 +17,7 @@ type Node = {
 const CHARS_PER_TOKEN = 4
 // 使用最近20个助手确认点描述当前模型，窗口大小同时限定每次估算的学习工作量。
 export const INPUT_RATIO_HISTORY_SAMPLES = 20
+export const family = (id: string) => id.split("-")[0]
 
 /** 一次已发送请求的测量值：序列化字符、provider确认输入和载荷分类来自同一个step。 */
 export type InputSample = {
@@ -24,6 +25,7 @@ export type InputSample = {
   // input已经包含普通输入与cache.read/cache.write，表示该请求完整上下文的使用量。
   readonly input: number
   readonly inputBreakdown?: {
+    readonly encrypted?: number
     // reasoning按序列化字符记录加密和可见推理；旧数据可以没有这些分类字段。
     readonly messages?: { readonly reasoning?: number; readonly attachments?: number }
     // media把二进制载荷的原始字符、模型可见占位字符和独立token预算联系起来。
@@ -34,7 +36,26 @@ export type InputSample = {
 export const estimate = (input: string) => Math.max(0, Math.round(input.length / CHARS_PER_TOKEN))
 
 /** 从native历史提取同API的已确认输入，返回按时间从新到旧排列的可重复消费数组。 */
-export function inputHistory(messages: ReadonlyArray<SessionMessage.Message>, model: { provider: string; id: string }) {
+export function inputHistory(
+  messages: ReadonlyArray<SessionMessage.Message>,
+  model: { provider: string; id: string },
+) {
+  const history = modelHistory(messages, model)
+  if (learnInputRatios(history)) return history
+  const peers = messages.filter(
+    (message): message is SessionMessage.Assistant =>
+      message.type === "assistant" && message.model.providerID === model.provider &&
+      family(message.model.id) === family(model.id),
+  ).filter(message => modelHistory([message], { ...model, id: message.model.id })
+    .some(sample => sample.inputBreakdown?.encrypted !== undefined))
+  const peer = peers.findLast(message => message.model.id !== model.id)
+  if (peer) return modelHistory(peers, { ...model, id: peer.model.id })
+  return messages.some(message => ["assistant", "compaction"].includes(message.type))
+    ? history : Object.assign(history, { first: true })
+}
+
+function modelHistory(messages: ReadonlyArray<SessionMessage.Message>,
+  model: { provider: string; id: string }) {
   const history: InputSample[] = []
   for (let index = messages.length - 1; index >= 0 && history.length < INPUT_RATIO_HISTORY_SAMPLES; index--) {
     const message = messages[index]
@@ -59,7 +80,7 @@ export function inputRatioSample(item: InputSample) {
   // 旧附件缺少media.tokens时无法完成这项分离，因此该点保留在历史中而不参与学习。
   if (input <= 0 || (!media && (item.inputBreakdown?.messages?.attachments ?? 0) > 0)) return undefined
   return { chars: Math.max(0, item.bodyChars - (media?.rawChars ?? 0) + (media?.textChars ?? 0)), input,
-    reasoning: item.inputBreakdown?.messages?.reasoning }
+    reasoning: item.inputBreakdown?.encrypted }
 }
 
 /**
@@ -71,7 +92,7 @@ export function inputRatioSample(item: InputSample) {
 export function learnInputRatios(history: Iterable<InputSample>) {
   const all = { count: 0, chars: 0 }
   // fit累加二元正规方程所需的平方项和交叉项，避免逐请求重复处理正文。
-  const fit = { chars: 0, input: 0, tt: 0, rr: 0, tr: 0, ti: 0, ri: 0 }
+  const fit = { chars: 0, tt: 0, rr: 0, tr: 0, ti: 0, ri: 0 }
   let latest: ReturnType<typeof inputRatioSample>
   for (const item of history) {
     const sample = inputRatioSample(item)
@@ -81,7 +102,6 @@ export function learnInputRatios(history: Iterable<InputSample>) {
     if (sample.reasoning !== undefined) {
       const text = sample.chars - sample.reasoning
       fit.chars += sample.chars
-      fit.input += sample.input
       fit.tt += text * text
       fit.rr += sample.reasoning * sample.reasoning
       fit.tr += text * sample.reasoning
@@ -94,10 +114,10 @@ export function learnInputRatios(history: Iterable<InputSample>) {
   if (!latest || all.chars <= 500) return undefined
   // 单点、单桶或共线样本能确定混合密度；两个区间分别约束正文和推理的极端值。
   const pooled = Math.max(2, latest.chars / latest.input)
-  const mixed = { text: Math.min(8, pooled), reasoning: Math.min(32, pooled) }
+  const mixed = { text: Math.min(8, pooled), reasoning: latest.reasoning ? Math.min(32, pooled) : 16 }
   const det = fit.tt * fit.rr - fit.tr * fit.tr
   // 行列式相对规模衡量两个组成轴是否可区分，过小则采用上面的混合密度。
-  if (latest.reasoning === undefined || fit.chars <= 500 || fit.input <= 0 || det <= 0 || det < 0.01 * fit.tt * fit.rr) return mixed
+  if (latest.reasoning === undefined || fit.chars <= 500 || !(det / (fit.tt * fit.rr) >= 0.01)) return mixed
   const text = (fit.ti * fit.rr - fit.ri * fit.tr) / det
   const reasoning = (fit.ri * fit.tt - fit.ti * fit.tr) / det
   if (text <= 0 || reasoning <= 0) return mixed
@@ -114,9 +134,10 @@ export function charsPerTokenFromHistory(history: Iterable<InputSample>) {
 }
 
 /** 在一次JSON遍历中测量实际请求，再按学习到的两类密度折算输入token。 */
-export function estimateRequest(body: unknown, history: Iterable<InputSample>, sections?: ReadonlyArray<SystemSection>) {
-  const ratio = learnInputRatios(history) ?? { text: CHARS_PER_TOKEN, reasoning: CHARS_PER_TOKEN }
+export function estimateRequest(body: unknown, history: Iterable<InputSample> & { first?: boolean }, sections?: ReadonlyArray<SystemSection>) {
+  const ratio = learnInputRatios(history) ?? { text: history.first ? 4.5 : CHARS_PER_TOKEN, reasoning: 16 }
   const counts = {
+    encrypted: 0,
     system: 0, instructions: 0, skills: 0, tools: 0,
     messages: { userText: 0, assistantText: 0, reasoning: 0, toolInput: 0, toolOutput: 0, attachments: 0, total: 0 },
   } satisfies SessionMessage.InputBreakdown
@@ -178,6 +199,8 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
     const chars = absent || scalar === null ? 4 : typeof scalar === "string" ? stringChars(scalar)
       : typeof scalar === "number" ? Number.isFinite(scalar) ? String(scalar).length : 4
       : typeof scalar === "boolean" ? scalar ? 4 : 5 : 2
+    // 只分离协议密文值，摘要、字段名及 JSON 包装继续使用正文密度。
+    if (encryptedValue(this, key, scalar, bucket, parent)) counts.encrypted += chars - 2
     // Buffer 在 JSON visitor 前已执行 toJSON，必须识别其原生字节形态而非再序列化。
     const bytes = value instanceof Uint8Array ? value
       : value !== null && typeof value === "object" && "type" in value && value.type === "Buffer" && "data" in value && Array.isArray(value.data)
@@ -242,10 +265,9 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
   }).length + removedChars
   // total 只求和六个消息桶，不能用 bodyChars 补残差来掩盖 system 或转义计数的遗漏。
   counts.messages.total = counts.messages.userText + counts.messages.assistantText + counts.messages.reasoning + counts.messages.toolInput + counts.messages.toolOutput + counts.messages.attachments
-  // 正文包含系统、普通消息、工具定义/结果和选项；reasoning从其中分出并使用自己的密度。
   // 媒体使用AttachmentToken的独立预算，包装与占位字符仍留在正文折算中。
-  const input = Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars - counts.messages.reasoning) / ratio.text
-    + counts.messages.reasoning / ratio.reasoning)) + media.tokens
+  const input = Math.max(0, Math.round((bodyChars - media.rawChars + media.textChars - counts.encrypted) / ratio.text
+    + counts.encrypted / ratio.reasoning)) + media.tokens
   // 不请求细分时保留原有返回形状；显式传入sections时一并交付文本密度和分类测量。
   return { input, bodyChars, confirmed: false,
     ...(sections === undefined ? {} : { charsPerToken: ratio.text, inputBreakdown: {
@@ -256,4 +278,10 @@ export function estimateRequest(body: unknown, history: Iterable<InputSample>, s
 function stringChars(value: string) {
   // 原生序列化直接给出 JSON 字符串长度，避免大请求里逐码点分配 matchAll 数组。
   return JSON.stringify(value).length
+}
+
+function encryptedValue(owner: object, key: string, value: unknown, bucket: Bucket, parent?: Node) {
+  if (bucket !== "reasoning" || typeof value !== "string") return false
+  if (key === "reasoningEncryptedContent") return true
+  return key === "encrypted_content" && "type" in owner && owner.type === "reasoning" && !parent?.literal
 }
