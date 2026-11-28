@@ -5,6 +5,7 @@ import http from "http"
 import os from "os"
 // 路径处理：构建临时注册文件路径
 import path from "path"
+import { fileURLToPath } from "url"
 import * as VscodeBridge from "../../src/ide/vscode-bridge"
 
 const originalRegistryDir = process.env.OPENCODE_IDE_REGISTRY_DIR
@@ -26,23 +27,34 @@ describe("vscode bridge discovery", () => {
     await fs.writeFile(entry, `
       import assert from "node:assert/strict";
       import { subscribe } from "node:diagnostics_channel";
-      import { activateBridge, closeBridge } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../../sdks/vscode/src/bridge.ts"))};
-      import { workspace, started, release, executions } from "vscode";
+      import { activate, deactivate } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../../sdks/vscode/src/extension.ts"))};
+      import { VscodeBridge } from ${JSON.stringify(path.resolve(import.meta.dir, "../../../core/src/ide/vscode-bridge.ts"))};
+      import { workspace, started, release, executions, registered, terminalEnv } from "vscode";
       // 客户端abort返回不代表服务端已收到断开，使用Node公开HTTP事件同步。
       const disconnected = Promise.withResolvers();
       subscribe('http.server.request.start',({request,response})=>{
         if(request.url==='/notebook/run')response.once('close',()=>disconnected.resolve());
       });
-      const server = await activateBridge({ appendLine() {} });
       const abortRun = new AbortController(), abortEdit = new AbortController();
-      const post = (route, body, signal) => fetch('http://127.0.0.1:'+server.port+'/notebook/'+route, {
-        method:'POST', headers:{Authorization:'Bearer '+server.token,'Content-Type':'application/json'},
-        body:JSON.stringify({filePath:'/test/demo.ipynb',...body}), signal
-      });
       try {
+        activate({subscriptions:[],asAbsolutePath:value=>value});
+        await registered.get('opencode.openNewTerminal')();
+        assert.equal(Object.hasOwn(terminalEnv,'OPENCODE_SERVER_USERNAME'),false);
+        assert.equal(Object.hasOwn(terminalEnv,'OPENCODE_SERVER_PASSWORD'),false);
+        const bridges = await VscodeBridge.discoverBridges({cwd:'/test'});
+        assert.equal(bridges.length,1);
+        const server = bridges[0];
+        const post = (route, body, signal) => fetch('http://127.0.0.1:'+server.port+'/notebook/'+route, {
+          method:'POST', headers:{Authorization:'Bearer '+server.token,'Content-Type':'application/json'},
+          body:JSON.stringify({filePath:'/test/demo.ipynb',...body}), signal
+        });
+        const plain = await (await post('summary',{})).json();
+        const alias = await (await post('summary',{filePath:'file:///test/demo.ipynb'})).json();
+        assert.deepEqual(alias.data,plain.data);
+        assert.equal(alias.data.cells.length,2);
         const run = post('run',{cellId:'TOP',endCellId:'BOTTOM',timeoutMs:5000},abortRun.signal).catch(()=>{});
         await started.promise;
-        const edit = post('edit',{cellId:'BOTTOM',editType:'insert',newCode:'cancelled'},abortEdit.signal).catch(()=>{});
+        const edit = post('edit',{filePath:'file:///test/demo.ipynb',cellId:'BOTTOM',editType:'insert',newCode:'cancelled'},abortEdit.signal).catch(()=>{});
         await post('summary',{});
         abortEdit.abort(); await edit;
         assert.equal((await post('env',{operation:'stop'},AbortSignal.timeout(1000))).status,200);
@@ -54,16 +66,17 @@ describe("vscode bridge discovery", () => {
         assert.equal(barrier.status,200);
         assert.deepEqual(workspace.notebookDocuments[0].getCells().map(c=>c.document.getText()),['first','second','barrier']);
         assert.equal(executions,1);
-      } finally { abortRun.abort(); abortEdit.abort(); release.resolve(); await closeBridge(); }
+      } finally { abortRun.abort(); abortEdit.abort(); release.resolve(); await deactivate(); }
     `)
     // 只替代VS Code文档API；服务器、HTTP连接、队列与handler均为实际实现。
     const build = await Bun.build({ entrypoints: [entry], target: "node", outdir: dir, plugins: [{ name: "vscode-fixture", setup(build) {
       build.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "fixture" }))
       build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ loader: "js", contents: `
-        const uri = value => ({ fsPath:value, scheme:'file',fragment:value.split('#')[1]||'',toString(){return value} });
-        export const env={appName:'test'}, extensions={getExtension(){}};
+        import { URI } from ${JSON.stringify(fileURLToPath(import.meta.resolve("vscode-uri")))};
+        const uri = value => URI.file(value.split('#')[0]).with({fragment:value.split('#')[1]||''});
+        export const env={appName:'test',sessionId:'11111111-1111-4111-8111-1111111111111234567890'}, extensions={getExtension(){}};
         export const NotebookCellKind={Code:2,Markup:1}, EndOfLine={LF:1,CRLF:2};
-        export const Uri={file:uri,parse:uri,joinPath:(base,...parts)=>uri([base.fsPath,...parts].join('/'))};
+        export const Uri=URI, ViewColumn={Beside:2};
         export class NotebookRange { constructor(start,end){this.start=start;this.end=end} }
         export class NotebookCellData { constructor(kind,value,languageId){Object.assign(this,{kind,value,languageId})} }
         export class WorkspaceEdit { set(uri,edits){this.edits=edits} }
@@ -74,18 +87,24 @@ describe("vscode bridge discovery", () => {
         const make = (value,index) => ({notebook,index,kind:2,outputs:[],metadata:{},document:{uri:uri('/test/demo.ipynb#'+index),
           languageId:'python',eol:1,lineCount:1,getText:()=>value,lineAt:()=>({text:value})}});
         cells.push(make('first',0),make('second',1));
-        export const workspace={notebookDocuments:[notebook],workspaceFolders:[],
+        export const workspace={notebookDocuments:[notebook],workspaceFolders:[{name:'test',uri:uri('/test')}],
+          async openNotebookDocument(target){if(target.toString()!==notebook.uri.toString())throw new Error('Unexpected notebook');return notebook},
           onDidChangeNotebookDocument(fn){listeners.add(fn);return{dispose:()=>listeners.delete(fn)}},
           async applyEdit(edit){for(const e of edit.edits)cells.splice(e.range.start,e.range.end-e.range.start,...e.cells.map(c=>make(c.value,cells.length)));
             notebook.version++;for(const fn of listeners)fn({notebook,cellChanges:[]});return true}};
-        export const window={async showNotebookDocument(){return{notebook,revealRange(){}}}};
+        export let terminalEnv;
+        export const window={createOutputChannel(){return{appendLine(){},dispose(){}}},
+          createTerminal(options){terminalEnv=options.env;return{show(){},sendText(){}}},
+          async showNotebookDocument(){return{notebook,revealRange(){}}}};
         export const started=Promise.withResolvers(),release=Promise.withResolvers(); export let executions=0;
-        export const commands={async getCommands(){return['notebook.cell.execute']},async executeCommand(command,args){
+        export const registered=new Map();
+        export const commands={registerCommand(name,fn){registered.set(name,fn);return{dispose(){}}},
+          async getCommands(){return['notebook.cell.execute']},async executeCommand(command,args){
           executions++;started.resolve();await release.promise;
           const cell=cells[args.ranges[0].start];cell.executionSummary={success:true};notebook.version++;
           for(const fn of listeners)fn({notebook,cellChanges:[{cell,executionSummary:cell.executionSummary}]});
         }};
-        export default {env,extensions,NotebookCellKind,EndOfLine,Uri,NotebookRange,NotebookCellData,WorkspaceEdit,NotebookEdit,workspace,window,commands};
+        export default {env,extensions,NotebookCellKind,EndOfLine,Uri,ViewColumn,NotebookRange,NotebookCellData,WorkspaceEdit,NotebookEdit,workspace,window,commands};
       ` }))
     } }] })
     expect(build.success).toBe(true)
@@ -102,6 +121,38 @@ describe("vscode bridge discovery", () => {
     // 同一不存在的路径，create与读取的契约不同；不能放松全部路由。
     await expect(VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/env", body: { filePath, operation: "create" } })).resolves.toMatchObject({ summary: "ok" })
     await expect(VscodeBridge.callBridge({ cwd: dir, filePath, path: "/notebook/summary", body: { filePath } })).rejects.toThrow("does not exist")
+  })
+
+  test("range requests keep per-cell deadlines while single requests and cancellation remain bounded", async () => {
+    for (const mode of ["deadline", "cancel"] as const) {
+      using server = await postBridgeServer()
+      const dir = await tempRegistry()
+      const filePath = path.join(dir, "a.ipynb")
+      await fs.writeFile(filePath, "{}")
+      await writeEntry(dir, "11111111-1111-1111-1111-111111111111", server.port, dir)
+      const abort = new AbortController()
+      const pending = VscodeBridge.callBridge({
+        cwd: dir, filePath, path: "/notebook/run", timeoutMs: 80, signal: abort.signal,
+        body: { filePath, cellId: "TOP", endCellId: "BOTTOM", timeoutMs: 80 },
+      }).then(value => ({ ok: true, value }), error => ({ ok: false, error }))
+      try {
+        await server.started
+        if (mode === "cancel") abort.abort()
+        if (mode === "deadline") {
+          const single = await VscodeBridge.callBridge({
+            cwd: dir, filePath, path: "/notebook/run", timeoutMs: 80,
+            body: { filePath, cellId: "TOP", timeoutMs: 80 },
+          }).then(() => true, () => false)
+          expect(single).toBe(false)
+        }
+        server.release()
+        expect(await pending).toMatchObject(mode === "deadline" ? { ok: true, value: { summary: "ok" } } : { ok: false })
+      } finally {
+        abort.abort()
+        server.release()
+        await pending
+      }
+    }
   })
 
   // 测试用例：验证桥接发现和路径匹配逻辑

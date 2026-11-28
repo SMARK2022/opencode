@@ -167,8 +167,14 @@ async function callRaw(
 
 // #224：从 bridge 原始返回值派生 output summary + vscodeNotebook metadata；
 // metadata 只包含 TUI 展示需要的 compact 字段，不复制完整源码/artifact 文本
-function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown) {
+function notebookResult(endpoint: string, args: Record<string, unknown>, value: unknown, context: ToolContext) {
   const view = NotebookView.build(endpoint, args, value)
+  const result = {
+    output: VscodeBridge.summaryOnly(value),
+    metadata: { endpoint, ...(view && { [NOTEBOOK_METADATA_KEY]: view }) },
+  }
+  // 程序合同仅由 Execute 子调用消费，普通结果不依赖扩展新增的结构字段。
+  if (context.executeParent === undefined) return result
   const data = z.object({ data: bridgeRecord }).parse(value).data
   // 投影只选择桥接捕获的事实，输入定位与结构化输出不从summary文案反推。
   const program = (() => {
@@ -210,12 +216,8 @@ function notebookResult(endpoint: string, args: Record<string, unknown>, value: 
     return { ...base, created: data.created, alreadyExists: data.alreadyExists === true }
   })()
   return {
-    output: VscodeBridge.summaryOnly(value),
+    ...result,
     program: { value: program },
-    metadata: {
-      endpoint,
-      ...(view && { [NOTEBOOK_METADATA_KEY]: view }),
-    },
   }
 }
 
@@ -241,13 +243,13 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
       description: VscodeNotebookDescriptions.summary,
       output: notebookOutputs.summary,
       args: requiredFilePath,
-      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000)),
+      execute: async (args, context) => notebookResult("/notebook/summary", args, await callRaw("/notebook/summary", args, context, 10_000), context),
     }),
     vscode_notebook_source: tool({
       description: VscodeNotebookDescriptions.source,
       output: notebookOutputs.source,
       args: sourceArgs,
-      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000)),
+      execute: async (args, context) => notebookResult("/notebook/source", args, await callRaw("/notebook/source", args, context, 10_000), context),
     }),
     vscode_notebook_run: tool({
       description: VscodeNotebookDescriptions.run,
@@ -257,14 +259,14 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         await ask(context, "vscode_notebook_run", args)
         const timeoutMs = args.timeoutMs ?? 300_000
         const body = { ...args, timeoutMs }
-        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000))
+        return notebookResult("/notebook/run", body, await callRaw("/notebook/run", body, context, timeoutMs + 5_000), context)
       },
     }),
     vscode_notebook_output: tool({
       description: VscodeNotebookDescriptions.output,
       output: notebookOutputs.output,
       args: outputArgs,
-      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000)),
+      execute: async (args, context) => notebookResult("/notebook/output", args, await callRaw("/notebook/output", args, context, 30_000), context),
     }),
     vscode_notebook_edit: tool({
       description: VscodeNotebookDescriptions.edit,
@@ -279,7 +281,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         // notebook cell 修改也不能绕过。顺序先专属后通用，确保更精确的
         // vscode_notebook_edit deny/ask 先表达，再由 edit 维持历史兼容边界。
         await ask(context, "edit", args)
-        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000))
+        return notebookResult("/notebook/edit", args, await callRaw("/notebook/edit", args, context, 30_000), context)
       },
     }),
     vscode_notebook_env: tool({
@@ -296,7 +298,7 @@ export async function VscodeBridgePlugin(input: PluginInput): Promise<Hooks> {
         await ask(context, "vscode_notebook_env", args)
         // save 和 create 都会写磁盘文件，必须服从通用 edit 门禁
         if (args.operation === "save" || args.operation === "create") await ask(context, "edit", args)
-        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000))
+        return notebookResult("/notebook/env", args, await callRaw("/notebook/env", args, context, 120_000), context)
       },
     }),
   },

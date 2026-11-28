@@ -51,8 +51,6 @@ async function openTerminal(context: vscode.ExtensionContext, bridge: Promise<un
   const env = {
     // #171：发现和写入共用 registry 根，不再为提示文本另开 HTTP 端口。
     OPENCODE_IDE_REGISTRY_DIR: registryDir(),
-    OPENCODE_SERVER_USERNAME: process.env.OPENCODE_SERVER_USERNAME ?? "opencode",
-    OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD ?? "",
     OPENCODE_CALLER: "vscode",
   }
   const terminal = vscode.window.createTerminal({

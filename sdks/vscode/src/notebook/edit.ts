@@ -64,12 +64,12 @@ export async function editNotebook(input: Record<string, unknown>, signal?: Abor
   // 结构编辑会改变 cellCount，差分基线必须在 applyEdit 前记录，不能在返回后反推原格数。
   const beforeCount = notebook.cellCount
 
-  if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount, input)
-  if (editType === "insert") return await handleInsert(notebook, input, cellId, beforeCount)
-  return await handleEdit(notebook, input, cellId, beforeCount)
+  if (editType === "delete") return await handleDelete(notebook, cellId, beforeCount, input, signal)
+  if (editType === "insert") return await handleInsert(notebook, input, cellId, beforeCount, signal)
+  return await handleEdit(notebook, input, cellId, beforeCount, signal)
 }
 
-async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, beforeCount: number, input: Record<string, unknown>) {
+async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, beforeCount: number, input: Record<string, unknown>, signal?: AbortSignal) {
   const targetCell = resolveNotebookCell(notebook, undefined, cellId)
   // 删除后 targetCell.index 可能为 -1，范围和删除摘要都使用这个提交前位置。
   const deletedIndex = targetCell.index
@@ -88,7 +88,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
   // NotebookRange 的终点排他，宽度一只删除已解析的格，不吞掉继任格。
   edit.set(notebook.uri, [vscode.NotebookEdit.deleteCells(new vscode.NotebookRange(deletedIndex, deletedIndex + 1))])
   // 删除后的槽位只在结构版本推进后读取，避免把旧格报告成继任格。
-  const applied = await applyNotebookEditAndWait(notebook, edit)
+  const applied = await applyNotebookEditAndWait(notebook, edit, signal)
 
   let shiftedOldIdx: number | undefined
   let shiftedCell: vscode.NotebookCell | undefined
@@ -124,7 +124,7 @@ async function handleDelete(notebook: vscode.NotebookDocument, cellId: string, b
   })
 }
 
-async function handleInsert(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
+async function handleInsert(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number, signal?: AbortSignal) {
   const sourceRaw = sourceProp(input, "newCode", "\n")
   // 空字符串可插入空格，只有 undefined 表示没有提交 newCode。
   if (sourceRaw === undefined) throw new Error("newCode is required for insert")
@@ -158,7 +158,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(insertIndex, insertIndex), [newCell])])
   // 新格和移位邻居取已同步的结构，不能先按旧 cellCount 读取 index+1。
-  const applied = await applyNotebookEditAndWait(notebook, edit)
+  const applied = await applyNotebookEditAndWait(notebook, edit, signal)
   // 同步应用后才存在新格，Inserted行与结构化身份共用它，不改显式保存顺序。
   const insertedCell = applied ? notebook.cellAt(insertIndex) : undefined
   // 未应用时不能读取 index+1，特别是尾部附近的失败插入可能使它越界。
@@ -168,7 +168,7 @@ async function handleInsert(notebook: vscode.NotebookDocument, input: Record<str
   return compactEditResult(notebook, { applied, editType: "insert", opIndex: String(insertIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, insertedCell, affectedCellIndex: applied ? insertIndex : undefined, shiftedCell, shiftedOldIdx, kind: cellTypeLabel(kind), language: lang, sourcePreview: source, beforeSource: "", afterSource: source })
 }
 
-async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number) {
+async function handleEdit(notebook: vscode.NotebookDocument, input: Record<string, unknown>, cellId: string, beforeCount: number, signal?: AbortSignal) {
   let targetCell: vscode.NotebookCell
   try {
     targetCell = resolveNotebookCell(notebook, undefined, cellId)
@@ -199,7 +199,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
     // 旧语言和类型在替换前捕获，不能从新格反推转换箭头的左侧。
     const oldKind = cellTypeLabel(targetCell.kind)
     const oldLang = targetCell.document.languageId
-    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount)
+    return await handleTypeChange(notebook, targetCell, input, newKind!, language!, oldKind, oldLang, oldCodeRaw, beforeCount, signal)
   }
 
   // 源码字段省略才是语言幂等操作；显式空字符串仍代表清空源码。
@@ -212,7 +212,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
     const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
     // 提供非空 oldCode 就必须配对 newCode，不能退回整格覆盖。
     if (sourceRaw === undefined) throw new Error("newCode is required with oldCode")
-    return await handleStringEdit(notebook, targetCell, oldCodeRaw, sourceRaw, beforeCount, input)
+    return await handleStringEdit(notebook, targetCell, oldCodeRaw, sourceRaw, beforeCount, input, signal)
   }
 
   const sourceRaw = sourceProp(input, "newCode", documentEol(targetCell.document))
@@ -226,7 +226,7 @@ async function handleEdit(notebook: vscode.NotebookDocument, input: Record<strin
   // TextEdit 作用于格文档 URI，NotebookEdit 作用于 notebook URI，不能交换二者。
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), source)
   // 内容不变的 TextEdit 不产生新版本，有效空操作不能等到同步超时。
-  const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText())
+  const applied = await applyTextEditAndWait(targetCell.document, edit, source !== targetCell.document.getText(), signal)
   if (input.save === true) await saveNotebook(notebook)
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: source, beforeSource, afterSource: source })
 }
@@ -241,6 +241,7 @@ async function handleTypeChange(
   oldLang: string,
   oldCode: string | undefined,
   beforeCount: number,
+  signal?: AbortSignal,
 ) {
   let newSource: string
   let contextSummary: string | undefined
@@ -271,14 +272,14 @@ async function handleTypeChange(
   const edit = new vscode.WorkspaceEdit()
   edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(new vscode.NotebookRange(anchorCellIndex, anchorCellIndex + 1), [newCell])])
   // 新身份锚点沿同步后的原槽位获取，不按失效 targetCell.index 重新定位。
-  const applied = await applyNotebookEditAndWait(notebook, edit)
+  const applied = await applyNotebookEditAndWait(notebook, edit, signal)
   // applyEdit=false 时原格仍是有效锚点，不能假造已经创建的新格。
   const anchorCell = applied ? notebook.cellAt(anchorCellIndex) : targetCell
   if (input.save === true) await saveNotebook(notebook)
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(anchorCellIndex + 1), beforeCount, afterCount: notebook.cellCount, anchorCell, anchorCellIndex, kind: cellTypeLabel(newKind), language: newLang, oldKind, oldLang, sourcePreview: newSource, contextSummary, beforeSource, afterSource: newSource })
 }
 
-async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>) {
+async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: vscode.NotebookCell, oldCode: string, newCode: string, beforeCount: number, input: Record<string, unknown>, signal?: AbortSignal) {
   // 片段替换的差分仍比较完整源码，Preview不代替合成结果。
   const beforeSource = targetCell.document.getText()
   const result = matchAndReplace(targetCell, oldCode, newCode)
@@ -289,7 +290,7 @@ async function handleStringEdit(notebook: vscode.NotebookDocument, targetCell: v
   // result.source 已保留范围外的前后缀，整文档替换不会误丢邻接代码。
   edit.replace(targetCell.document.uri, fullDocumentRange(targetCell.document), result.source)
   // 变化判断比较完整合成源码，Preview 片段不能作为文档版本应推进的证据。
-  const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText())
+  const applied = await applyTextEditAndWait(targetCell.document, edit, result.source !== targetCell.document.getText(), signal)
   if (input.save === true) await saveNotebook(notebook)
   // Preview 只展示替换片段，完整合成源码由 TextEdit 写入而不塞进差分摘要。
   return compactEditResult(notebook, { applied, editType: "edit", opIndex: String(c1(targetCell)), beforeCount, afterCount: notebook.cellCount, anchorCell: targetCell, anchorCellIndex: targetCell.index, kind: cellTypeLabel(targetCell.kind), language: targetCell.document.languageId, sourcePreview: newCode, contextSummary, beforeSource, afterSource: result.source })
@@ -489,26 +490,28 @@ function afterSourcePreview(source: string) {
 }
 
 
-async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit) {
+async function applyNotebookEditAndWait(notebook: vscode.NotebookDocument, edit: vscode.WorkspaceEdit, signal?: AbortSignal) {
   // 提交前版本是本次修改的基线，不能在 applyEdit 的 await 返回后才采样。
   const beforeVersion = notebook.version
   const applied = await vscode.workspace.applyEdit(edit)
   // 拒绝应用直接终止，不能返回已修改差分或继续执行显式保存。
   if (!applied) throw new Error("VS Code notebook edit was not applied")
-  await waitForNotebookVersionChange(notebook, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  await waitForNotebookVersionChange(notebook, beforeVersion, EDIT_SYNC_TIMEOUT_MS, signal)
   return applied
 }
 
-async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean) {
+async function applyTextEditAndWait(document: vscode.TextDocument, edit: vscode.WorkspaceEdit, expectContentChange: boolean, signal?: AbortSignal) {
   const beforeVersion = document.version
   const applied = await vscode.workspace.applyEdit(edit)
   if (!applied) throw new Error("VS Code text edit was not applied")
+  signal?.throwIfAborted()
   // 文本仅观察格文档版本，notebook 的其它输出更新不能满足源码同步。
-  if (expectContentChange) await waitForTextDocumentVersionChange(document, beforeVersion, EDIT_SYNC_TIMEOUT_MS)
+  if (expectContentChange) await waitForTextDocumentVersionChange(document, beforeVersion, EDIT_SYNC_TIMEOUT_MS, signal)
   return applied
 }
 
-async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number) {
+async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, beforeVersion: number, timeoutMs: number, signal?: AbortSignal) {
+  signal?.throwIfAborted()
   // applyEdit 等待期间可能已收到事件，版本快检覆盖已经落地的结构修改。
   if (notebook.version !== beforeVersion) return
   await new Promise<void>((resolve, reject) => {
@@ -520,18 +523,22 @@ async function waitForNotebookVersionChange(notebook: vscode.NotebookDocument, b
       if (event.notebook.version === beforeVersion) return
       finish()
     })
-    const finish = (error?: Error) => {
+    const abort = () => finish(signal?.reason)
+    const finish = (error?: unknown) => {
       // 成功和超时共用释放路径，返回后不能遗留监听器或迟到计时器。
       if (timer) clearTimeout(timer)
       subscription.dispose()
-      error ? reject(error) : resolve()
+      signal?.removeEventListener("abort", abort)
+      error === undefined ? resolve() : reject(error)
     }
+    signal?.addEventListener("abort", abort, { once: true })
     // applyEdit=true 只证明已接受修改，同步超时仍须拒绝而非发布旧结构摘要。
     timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code notebook edit events to finish")), timeoutMs)
   })
 }
 
-async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number) {
+async function waitForTextDocumentVersionChange(document: vscode.TextDocument, beforeVersion: number, timeoutMs: number, signal?: AbortSignal) {
+  signal?.throwIfAborted()
   if (document.version !== beforeVersion) return
   await new Promise<void>((resolve, reject) => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -541,11 +548,14 @@ async function waitForTextDocumentVersionChange(document: vscode.TextDocument, b
       if (event.document.version === beforeVersion) return
       finish()
     })
-    const finish = (error?: Error) => {
+    const finish = (error?: unknown) => {
       if (timer) clearTimeout(timer)
       subscription.dispose()
-      error ? reject(error) : resolve()
+      signal?.removeEventListener("abort", abort)
+      error === undefined ? resolve() : reject(error)
     }
+    const abort = () => finish(signal?.reason)
+    signal?.addEventListener("abort", abort, { once: true })
     timer = setTimeout(() => finish(new Error("Timed out waiting for VS Code cell text edit events to finish")), timeoutMs)
   })
 }
@@ -721,8 +731,7 @@ function migrateIndent(newCode: string, targetIndent: string) {
   return lines
     .map((line) => {
       if (!line.trim()) return line
-      if (srcBase && line.startsWith(srcBase)) return targetIndent + line.slice(srcBase.length)
-      return targetIndent + line.trimStart()
+      return targetIndent + line.slice(srcBase.length)
     })
     .join("\n")
 }

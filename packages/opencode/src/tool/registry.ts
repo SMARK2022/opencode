@@ -155,8 +155,9 @@ const layer = Layer.effect(
             description: def.description,
             // 插件沿原Zod声明校验；目录复用已有JSON Schema转换，不另建编解码器。
             output: def.output ? zodJsonSchema(def.output) : Schema.Unknown,
-            execute: (args, toolCtx) =>
-              Effect.gen(function* () {
+            execute: (args, toolCtx) => {
+              const outputSchema = toolCtx.executeParent === undefined ? undefined : def.output
+              return Effect.gen(function* () {
                 yield* decode(args).pipe(
                   Effect.mapError((error) => new Tool.InvalidArgumentsError({ tool: id, detail: String(error) })),
                   Effect.orDie,
@@ -182,7 +183,7 @@ const layer = Layer.effect(
                   attachments,
                   // 未提供program的外部插件不触发新输出校验，也不把metadata改装成业务值。
                   ...(typeof result !== "string" && result.program ? {
-                    program: { value: def.output ? def.output.parse(result.program.value) : result.program.value },
+                    program: { value: outputSchema ? outputSchema.parse(result.program.value) : result.program.value },
                   } : {}),
                   metadata: {
                     ...metadata,
@@ -199,7 +200,8 @@ const layer = Layer.effect(
                     ...(toolCtx.callID ? { "tool.call_id": toolCtx.callID } : {}),
                   },
                 }),
-              ),
+              )
+            },
           }
         }
 

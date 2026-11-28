@@ -50,7 +50,7 @@ describe("vscode bridge plugin", () => {
     for (const item of cases) {
       bridge.mockResolvedValue({ summary: "original summary", data: item.data })
       const tool = tools[`vscode_notebook_${item.name}`]
-      const result = await tool.execute({ filePath: path, ...item.args }, allowContext(path))
+      const result = await tool.execute({ filePath: path, ...item.args }, { ...allowContext(path), executeParent: "parent" })
       if (typeof result === "string" || !tool.output) throw new Error("Expected structured notebook result")
       expect(tool.output.parse(result.program?.value)).toEqual(item.expected)
       expect(result.output).toBe("original summary")
@@ -331,7 +331,6 @@ describe("vscode bridge plugin", () => {
         dirty: false,
         runtime: "Python 3.11",
         cell: { i: 3, id: "#VSC-12345678", kind: "code", lang: "python", lines: 7, exec: "succeeded", existing_outs: ["text"], first: "df.head()" },
-        outputCount: 1,
         artifacts: [
           {
             output: 0,
@@ -341,7 +340,6 @@ describe("vscode bridge plugin", () => {
             preview: "short preview",
             text: "full text should not be persisted into metadata",
             artifactPath: ".opencode/cache/notebook-outputs/analysis-cell-2-output-0-item-0.txt",
-            artifactURI: "file:///fixture/output.txt",
           },
         ],
       },
@@ -351,6 +349,10 @@ describe("vscode bridge plugin", () => {
       { filePath, cellId: "#VSC-12345678" },
       allowContext(filePath),
     )
+
+    if (typeof result === "string") throw new Error("Expected notebook result")
+    expect(result.output).toBe("Cell c3 id=#VSC-12345678 existing outputs: text.")
+    expect(result.program).toBeUndefined()
 
     // #224：artifact 只保留 mime/bytes/preview/artifactPath，不包含 text
     // #224：compactArtifacts 过滤掉了 text 字段，只保留 TUI 展示需要的元信息

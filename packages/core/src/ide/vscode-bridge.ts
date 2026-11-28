@@ -247,7 +247,11 @@ export async function callBridge(input: CallInput): Promise<unknown> {
   // 全局请求队列已移除：服务端 withFileLock 已按 filePath 序列化同一文档的请求，
   // 客户端不再需要全局 Promise 队列。之前的全局队列会把一个长时间 run（最长 50 分钟）
   // 阻塞所有后续 summary/source/edit/env 操作，包括不同 notebook 的请求。
-  return await callBridgeOnce(input)
+  // 范围执行由 SDK 按格计时，整个请求只继承调用方取消。
+  return await callBridgeOnce({
+    ...input,
+    timeoutMs: input.path === "/notebook/run" && typeof input.body.endCellId === "string" ? 0 : input.timeoutMs,
+  })
 }
 
 // 发现、鉴权、期限和错误传播仍由原调用路径承担。
@@ -394,7 +398,7 @@ async function fetchWithTimeout(
   // 请求可能在排队时已取消，先检查再安装监听，避免迟到发送执行或编辑请求。
   signal?.throwIfAborted()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timer = timeoutMs === 0 ? undefined : setTimeout(() => controller.abort(), timeoutMs)
   const abort = () => controller.abort()
   signal?.addEventListener("abort", abort, { once: true })
   try {

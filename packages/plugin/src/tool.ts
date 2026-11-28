@@ -4,6 +4,7 @@ export type ToolContext = {
   sessionID: string
   messageID: string
   agent: string
+  executeParent?: string
   /**
    * Current project directory for this session.
    * Prefer this over process.cwd() when resolving relative paths.

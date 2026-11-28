@@ -19,7 +19,7 @@ import http from "node:http"
 import { randomUUID } from "node:crypto"
 import vscode from "vscode"
 import { manifest, registerBridge, type RegistryHandle } from "./bridge-registry"
-import { isRecord, stringProp } from "./util"
+import { isRecord, stringProp, uriFromInput } from "./util"
 import { notebookSummary } from "./notebook/summary"
 import { notebookSource } from "./notebook/source"
 import { runNotebook } from "./notebook/run"
@@ -111,6 +111,7 @@ function safeLocalRequest(request: http.IncomingMessage) {
 async function startBridge(output: { appendLine(value: string): void }): Promise<BridgeInfo> {
   // 工厂不复位关闭意图；关闭后的重启必须经过实际激活入口。
   if (closing) throw new Error("VS Code bridge startup cancelled")
+  const id = randomUUID()
   const token = randomUUID()
   // crypto 已由输出模块静态加载；此处同步生成实例 token，不再引入额外的 import 等待。
 
@@ -142,7 +143,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       if (request.method === "GET" && url.pathname === "/manifest") {
         const address = httpServer.address()
         const port = address && typeof address === "object" ? address.port : 0
-        return writeJson(response, 200, manifest({ id: vscode.env.sessionId || `vscode-${port}`, port, token: "<redacted>" }))
+        return writeJson(response, 200, manifest({ id, port, token: "<redacted>" }))
       }
 
       // 保留源未知路由的 404；即使 body 是 null、数组或坏 JSON，也不启动解析器。
@@ -190,8 +191,7 @@ async function startBridge(output: { appendLine(value: string): void }): Promise
       // 写入本机 registry，供 CLI 发现此 VS Code 桥接实例
       // 注册成功才 resolve；registry 失败则 startBridge reject
       registerBridge({
-        // 用 sessionId 作 registry id，同窗多启可区分
-        id: vscode.env.sessionId || `vscode-${address.port}`,
+        id,
         port: address.port,
         token,
       })
@@ -265,7 +265,7 @@ async function routeRequest(
   // 只旁路source列出的四类读取；其余变更继续复用原文档锁。
   // stop/info必须能到达长run占用的文档；变更仍由同一文档锁串行。
   const control = pathname === "/notebook/env" && (body.operation === "stop" || body.operation === "info")
-  return await (READONLY_ROUTES.has(pathname) || control ? handler() : withFileLock(filePath, handler))
+  return await (READONLY_ROUTES.has(pathname) || control ? handler() : withFileLock(uriFromInput(filePath).toString(), handler))
 }
 
 function authorized(request: http.IncomingMessage, url: URL, token: string) {

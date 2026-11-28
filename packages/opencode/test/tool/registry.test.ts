@@ -561,8 +561,10 @@ describe("tool.registry", () => {
             "export default tool({",
             "  description: 'image tool',",
             "  args: {},",
+            "  output: tool.schema.object({ count: tool.schema.number() }),",
             "  execute: async () => ({",
             "    output: 'here is an image',",
+            "    program: { value: { count: 'legacy' } },",
             "    attachments: [{ type: 'file', mime: 'image/png', filename: 'picture.png', url: 'data:image/png;base64,AAAA' }],",
             "  }),",
             "})",
@@ -575,7 +577,7 @@ describe("tool.registry", () => {
       const loaded = (yield* registry.all()).find((tool) => tool.id === "image")
       if (!loaded) throw new Error("custom image tool was not loaded")
       const agents = yield* Agent.Service
-      const result = yield* loaded.execute({}, {
+      const context = {
         sessionID: SessionID.make("ses_test"),
         messageID: MessageID.make("msg_test"),
         agent: (yield* agents.defaultInfo()).name,
@@ -583,12 +585,16 @@ describe("tool.registry", () => {
         messages: [],
         metadata: () => Effect.void,
         ask: () => Effect.void,
-      } satisfies Tool.Context)
+      } satisfies Tool.Context
+      const result = yield* loaded.execute({}, context)
 
       expect(result.output).toBe("here is an image")
       expect(result.attachments).toEqual([
         { type: "file", mime: "image/png", filename: "picture.png", url: "data:image/png;base64,AAAA" },
       ])
+      expect(result.program?.value).toEqual({ count: "legacy" })
+      const nested = yield* loaded.execute({}, { ...context, executeParent: "parent" }).pipe(Effect.exit)
+      expect(nested._tag).toBe("Failure")
     }),
   )
 

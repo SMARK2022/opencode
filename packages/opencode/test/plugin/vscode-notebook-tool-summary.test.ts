@@ -145,7 +145,7 @@ const vscodeMock = (await import(vscodeModule)) as {
 }
 const { notebookSummary } = (await import(sdkNotebookUrl("summary"))) as { notebookSummary: (filePath: string) => Promise<ToolResult> }
 const { notebookSource } = (await import(sdkNotebookUrl("source"))) as { notebookSource: (input: Record<string, unknown>) => Promise<ToolResult> }
-const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as { editNotebook: (input: Record<string, unknown>) => Promise<ToolResult> }
+const { editNotebook } = (await import(sdkNotebookUrl("edit"))) as { editNotebook: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult> }
 const { runNotebook } = (await import(sdkNotebookUrl("run"))) as { runNotebook: (input: Record<string, unknown>, signal?: AbortSignal) => Promise<ToolResult> }
 const { readNotebookCellOutput } = (await import(sdkNotebookUrl("output"))) as {
   readNotebookCellOutput: (filePath: string, index?: number, cellId?: string) => Promise<ToolResult>
@@ -203,6 +203,42 @@ test("same-language edit preserves source identity and outputs", async () => {
   expect(result.summary).toContain("AfterSource (first")
   expect(activeNotebook.cellAt(1)).toBe(cell)
   expect({ source: cell.document.getText(), outputs: cell.outputs, version: activeNotebook.version }).toEqual(before)
+})
+
+test("cancelling an accepted edit releases text and structural synchronization without saving", async () => {
+  const apply = vscode.workspace.applyEdit
+  const text = vscode.workspace.onDidChangeTextDocument
+  const notebook = vscode.workspace.onDidChangeNotebookDocument
+  try {
+    for (const editType of ["edit", "delete"] as const) {
+      const ready = Promise.withResolvers<void>()
+      const abort = new AbortController()
+      const reason = new Error("cancelled edit synchronization")
+      vscode.workspace.applyEdit = async () => true
+      vscode.workspace.onDidChangeTextDocument = listener => {
+        const subscription = text(listener)
+        ready.resolve()
+        return subscription
+      }
+      vscode.workspace.onDidChangeNotebookDocument = listener => {
+        const subscription = notebook(listener)
+        ready.resolve()
+        return subscription
+      }
+      const pending = editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType, newCode: "new", save: true }, abort.signal)
+        .then(() => undefined, (error: unknown) => error)
+      await ready.promise
+      abort.abort(reason)
+      expect(await pending).toBe(reason)
+      expect(textListeners.size).toBe(0)
+      expect(notebookListeners.size).toBe(0)
+      expect(activeNotebook.isDirty).toBe(true)
+    }
+  } finally {
+    vscode.workspace.applyEdit = apply
+    vscode.workspace.onDidChangeTextDocument = text
+    vscode.workspace.onDidChangeNotebookDocument = notebook
+  }
 })
 
 test("output keeps earlier bytes across same-name notebooks and reruns", async () => {
@@ -441,6 +477,10 @@ test("string-match edit summary includes after-source preview for the next oldCo
   expect(result.summary).toContain("line_a")
   expect(result.summary).toContain("line_B")
   expect(result.summary).toContain("line_c")
+
+  activeNotebook.cellAt(1).document.setText("if ready:\n    old()\n")
+  await editNotebook({ filePath: notebookPath, cellId: cellFragment(2), editType: "edit", oldCode: "  old()  ", newCode: "if ok:\n    new()" })
+  expect(activeNotebook.cellAt(1).document.getText()).toBe("if ready:\n    if ok:\n        new()\n")
 })
 
 test("full-cell replace edit summary includes after-source preview of the new content", async () => {
@@ -675,11 +715,22 @@ test("run proceeds when kernel not started but kernelspec metadata exists", asyn
     async activate() { this.isActive = true; return this.exports },
   })
 
-  const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
-  const data = result.data as Record<string, unknown>
-
-  // 不应被预检阻断
-  expect(data.noActiveKernel).toBeUndefined()
+  const original = vscode.window.showNotebookDocument
+  const target = activeNotebook.cellAt(1)
+  vscode.window.showNotebookDocument = async (notebook, options) => {
+    notebook.cells.unshift(createCell(notebook, NotebookCellKind.Markup, "markdown", "unrelated"))
+    updateIndexes(notebook)
+    return original(notebook, options)
+  }
+  try {
+    const result = await runNotebook({ filePath: notebookPath, cellId: cellFragment(2), timeoutMs: 1_000 })
+    expect(result.data.noActiveKernel).toBeUndefined()
+    expect(result.data).toMatchObject({ completed: true, cells: [{ i: 3 }] })
+    expect(activeNotebook.cellAt(2)).toBe(target)
+    expect(target.executionSummary?.timing?.startTime).toBe(10)
+  } finally {
+    vscode.window.showNotebookDocument = original
+  }
 })
 
 // ---------------------------------------------------------------------------

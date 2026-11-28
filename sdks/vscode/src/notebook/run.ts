@@ -38,7 +38,6 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
   const cells = resolveRunTarget(notebook, cellId, stringProp(input, "endCellId"))
   // 使用解析后的身份允许同格别名，但不能把明确的单格请求扩成多格执行。
   if (type === "cell" && cells.length > 1) throw new Error("endCellId must not be set when type is cell unless it equals cellId")
-  const positions = cells.map((cell) => cell.index)
   // await 前保留目标格对象；其它格的源码或输出变化不应阻止本次执行。
   // showNotebookDocument 为官方 URI 解析提供已打开的编辑器，不把焦点当身份。
   const editor = await vscode.window.showNotebookDocument(notebook, {
@@ -56,9 +55,7 @@ export async function runNotebook(input: Record<string, unknown>, signal?: Abort
     )
   }
   // 冷启动由原生执行入口负责，metadata和已启动kernel都不是执行资格。
-  // 所有界面与能力查询结束后再校验目标，结构漂移时不调用命令或更新旧选区。
-  if (notebook.isClosed || cells.some((cell, index) => notebook.getCells()[positions[index]] !== cell)) {
-    // 按原范围核对对象，目标移位、删除或替换仍拒绝；不要求整份文档版本保持不变。
+  if (notebook.isClosed || cells.some((cell) => notebook.getCells()[cell.index] !== cell)) {
     throw new Error("Notebook changed before execution; select the target cells again")
   }
   // 超时按单格等待计算，不能把首格的耗时扣成下一格已经超时。
