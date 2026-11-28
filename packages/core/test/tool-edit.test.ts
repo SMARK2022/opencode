@@ -707,7 +707,7 @@ describe("EditTool", () => {
     ),
   )
 
-  it.live("rejects an in-place content change after matching but before conditional commit", () =>
+  it.live("commits the matched edit after an in-place content change", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
       (tmp) => {
@@ -723,12 +723,9 @@ describe("EditTool", () => {
           ),
           Effect.andThen((result) =>
             Effect.gen(function* () {
-              expect(result).toEqual({
-                type: "error",
-                value: "File changed after permission approval. Read it again before editing.",
-              })
-              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("newer\n")
-              expect(writes).toEqual([])
+              expect(result.type).toBe("text")
+              expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("after\n")
+              expect(writes).toHaveLength(1)
             }),
           ),
         )

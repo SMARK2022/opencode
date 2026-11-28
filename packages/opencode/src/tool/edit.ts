@@ -21,7 +21,6 @@ import { formatMismatchHistory, type FileTouchHistory } from "@opencode-ai/core/
 export { formatStalenessNote, type FileTouchHistory } from "@opencode-ai/core/tool/edit-feedback"
 import type { MessageV2 } from "../session/message-v2"
 import { EditApply } from "@opencode-ai/core/tool/edit-apply"
-// #518：共享 mutation coordinator（proposal 版本耦合 + Permission 后持锁 + 提交前 recheck）
 import * as Mutation from "./file-mutation-coordinator"
 // 0576：预算纪律消费 Truncate limits——与 wrapper 通用截断同源，确保末段 warning 不被外层截断丢弃。
 import { Truncate } from "./truncate"
@@ -225,8 +224,6 @@ export const EditTool = Tool.define(
           }> = []
           // 该数组只承载本次 Tool 调用的异常覆写事实，不进入参数 Schema，也不改变 edit 成功语义。
 
-          // #518：先取得与 edits[] proposal 同源的 raw bytes/version；Permission 期间不持有 mutation lock。
-          // #518：锁不覆盖 ask：同文件第二个 proposal 仍可完成审批，冲突在 commit recheck 显式化。
           const proposal = yield* Mutation.read(afs, filePath)
           // source.text 只供当前 edit-apply owner 使用；coordinator 不知道 edits[] 的匹配规则。
           const source = Bom.split(Mutation.decode(proposal))
@@ -236,8 +233,6 @@ export const EditTool = Tool.define(
           }
 
           if (isCreate(edits)) {
-            // 目标基线语义保留：已存在文件禁止空 oldString 覆盖（上游比源 overwrite 更强的防盲写边界，
-            // 0514 record 已裁定；#518 只在 create 分支叠加 coordinator recheck，不放宽该边界）。
             if (proposal.version.state === "file") {
               throw new Error(
                 "oldString cannot be empty when editing an existing file. Provide the exact text to replace, or use write for an intentional full-file replacement.",
@@ -258,8 +253,6 @@ export const EditTool = Tool.define(
                 diff,
               },
             })
-            // #518：Permission 后才进入 commit；absent→已存在等中途变化由 recheck 拒绝。
-            // #518：create 的 expected 是 absent 标签；外部在 ask 窗口内创建空文件也会触发 version 冲突。
             yield* Mutation.commit({
               fs: afs,
               expected: [proposal],
@@ -283,7 +276,6 @@ export const EditTool = Tool.define(
                 },
               ],
             }
-            // commit 成功后才发布 Edited/Updated；Permission reject 或 version conflict 不产生成功事件。
             yield* events.publish(FileSystem.Event.Edited, { file: filePath })
             yield* events.publish(Watcher.Event.Updated, {
               file: filePath,
@@ -347,8 +339,6 @@ export const EditTool = Tool.define(
                 },
               })
 
-              // #518：applyEdits 已完成全部匹配与 overlap 校验，coordinator 只负责 stale proposal 防护。
-              // #518：匹配基于 proposal bytes；另一 mutation 先提交时这里整体失败，绝不重新匹配新内容。
               yield* Mutation.commit({
                 fs: afs,
                 expected: [proposal],
@@ -367,7 +357,6 @@ export const EditTool = Tool.define(
                   }
                 }),
               }).pipe(Effect.orDie)
-              // commit 成功后才发布 Edited/Updated，Permission reject 或 version conflict 不产生成功事件。
               yield* events.publish(FileSystem.Event.Edited, { file: filePath })
               yield* events.publish(Watcher.Event.Updated, {
                 file: filePath,
@@ -528,8 +517,6 @@ export const EditTool = Tool.define(
             title: `${path.relative(instance.worktree, filePath)}`,
             output,
           }
-          // #518：MutationConflict 等错误通道统一 orDie——coordinator 冲突是诊断性 fail，
-          // 与既有 IO 错误同一处理面，不扩大 Tool.define 的 error 泛型。
         }).pipe(Effect.orDie),
     }
   }),

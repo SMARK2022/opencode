@@ -8,13 +8,11 @@ import TurndownService from "turndown"
 import { makeLocationNode } from "../effect/app-node"
 import { LayerNodePlatform } from "../effect/app-node-platform"
 import { PermissionV2 } from "../permission"
-import { collectBoundedResponseBody } from "./http-body"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 
 export const name = "webfetch"
-export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 export const DEFAULT_TIMEOUT_SECONDS = 30
 export const MAX_TIMEOUT_SECONDS = 120
 
@@ -89,13 +87,6 @@ const assertHttpUrl = (url: URL) => {
 const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = browserUserAgent) =>
   http.execute(request(url, format, userAgent)).pipe(Effect.flatMap(HttpClientResponse.filterStatusOk))
 
-const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
-  collectBoundedResponseBody(
-    response,
-    MAX_RESPONSE_BYTES,
-    () => new Error(`Response too large (exceeds ${MAX_RESPONSE_BYTES} byte limit)`),
-  )
-
 const mimeFrom = (contentType: string) => contentType.split(";", 1)[0]?.trim().toLowerCase() ?? ""
 const isImageAttachment = (mime: string) =>
   mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
@@ -145,7 +136,7 @@ const layer = Layer.effectDiscard(
                 source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
               })
 
-              const { body, contentType } = yield* Effect.gen(function* () {
+              const { content, contentType } = yield* Effect.gen(function* () {
                 const response = yield* execute(http, input.url, input.format).pipe(
                   Effect.catchIf(isCloudflareChallenge, () => execute(http, input.url, input.format, "opencode")),
                 )
@@ -155,14 +146,13 @@ const layer = Layer.effectDiscard(
                   return yield* Effect.fail(new Error(`Unsupported fetched image content type: ${mime}`))
                 if (!isTextualMime(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched file content type: ${mime}`))
-                return { body: yield* collectBody(response), contentType }
+                return { content: yield* response.text, contentType }
               }).pipe(
                 Effect.timeoutOrElse({
                   duration: Duration.seconds(input.timeout ?? DEFAULT_TIMEOUT_SECONDS),
                   orElse: () => Effect.fail(new Error("Request timed out")),
                 }),
               )
-              const content = new TextDecoder().decode(body)
               const output = yield* Effect.try({
                 try: () => convert(content, contentType, input.format),
                 catch: (error) => error,

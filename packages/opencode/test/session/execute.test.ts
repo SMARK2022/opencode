@@ -789,6 +789,9 @@ it.instance("execute composes native glob and read with no MCP server", () =>
     // 第二次 read 专门覆盖模型 stub 与 JS 数据接收者的差异。
     const instance = yield* TestInstance
     yield* Effect.promise(() => Bun.write(path.join(instance.directory, "note.txt"), "hello execute"))
+    const longFile = path.join(instance.directory, "long-result.log")
+    const prefix = `needle${"x".repeat(1_993)}`
+    yield* Effect.promise(() => Bun.write(longFile, `needle before\n${prefix}😀${"x".repeat(70 * 1024)}\nneedle after\n`))
     const { tools } = yield* resolveTools()
     expect(tools.execute).toBeDefined()
     expect(tools.read).toBeDefined()
@@ -804,8 +807,9 @@ it.instance("execute composes native glob and read with no MCP server", () =>
       const again = await tools.$opencode.read({filePath:found.files[0].path});
       const matched = await tools.$opencode.grep({pattern:"hello", path:found.files[0].path});
       const empty = await tools.$opencode.grep({pattern:"absent", path:found.files[0].path});
+      const long = await tools.$opencode.grep({pattern:"needle",path:${JSON.stringify(longFile)}});
       const catalog = await search({query:"glob", namespace:"$opencode"});
-      return {files:found, file, again:again.content, matched, empty, signature:catalog.items[0].signature};
+      return {files:found, file, again:again.content, matched, empty, long:long.matches.map(match=>[match.line,match.content]), signature:catalog.items[0].signature};
     `,
           },
           { toolCallId: "execute-files", abortSignal: new AbortController().signal, messages: [] },
@@ -852,6 +856,7 @@ it.instance("execute composes native glob and read with no MCP server", () =>
       timedOut: false,
     })
     expect(data.empty).toEqual({ matches: [], totalMatches: 0, truncated: false, partial: false, timedOut: false })
+    expect(data.long).toEqual([[1, "needle before\n"], [2, `${prefix}...`], [3, "needle after\n"]])
   }),
 )
 
@@ -1007,7 +1012,7 @@ it.instance("execute fetch uses the host permission path and never sends its pre
     requests.push(new URL(request.url).pathname)
     if (requests.length === 2) ready.resolve()
     await ready.promise
-    return Response.json({ path: new URL(request.url).pathname, method: request.method, body: await request.text(), repeated: request.headers.get("x-repeat") })
+    return Response.json({ path: new URL(request.url).pathname, method: request.method, body: await request.text(), repeated: request.headers.get("x-repeat"), padding: "x".repeat(5 * 1024 * 1024) })
   } })), (server) => Effect.sync(() => server.stop(true)))
   const fixture = yield* resolveTools()
   const execute = fixture.tools.execute?.execute
@@ -1015,7 +1020,8 @@ it.instance("execute fetch uses the host permission path and never sends its pre
   const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
     const values = await Promise.allSettled([fetch(${JSON.stringify(new URL("a", server.url).href)}), fetch(${JSON.stringify(new URL("b", server.url).href)}, {method:"POST",body:"payload",headers:[["x-repeat","first"],["x-repeat","second"]]})]);
     const first = values[0].value; const second = values[1].value;
-    return {first:await first.json(),second:await second.json(),status:second.status,header:second.headers.get("Content-Type"),hasHeader:second.headers.has("content-type"),bytes:(await first.bytes()).length};
+    const a = await first.json(); const b = await second.json();
+    return {first:{path:a.path,method:a.method,body:a.body},second:{path:b.path,method:b.method,body:b.body,repeated:b.repeated},status:second.status,header:second.headers.get("Content-Type"),hasHeader:second.headers.has("content-type"),bytes:(await first.bytes()).length};
   ` }, { toolCallId: "execute-fetch", abortSignal: new AbortController().signal, messages: [] })))
   if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected fetch receipt")
   // HTTP 正文、状态、重复头与字节读取保持原合同，环境行不参与响应解析。
@@ -1026,7 +1032,7 @@ it.instance("execute fetch uses the host permission path and never sends its pre
     header: expect.stringContaining("application/json"),
     hasHeader: true,
   })
-  expect(JSON.parse(scriptResult(result).output).bytes).toBeGreaterThan(0)
+  expect(JSON.parse(scriptResult(result).output).bytes).toBeGreaterThan(5 * 1024 * 1024)
   // 服务器收件清单独立于脚本返回值，预跑若真发过请求，即使最后值正确也会多出记录。
   expect(requests.toSorted()).toEqual(["/a", "/b"])
   // 成功POST之后再失败，下一轮模型必须知道该操作已经完成，不能把它当待重试工作。
@@ -1359,7 +1365,7 @@ it.instance("custom tools use their existing argument validator before body effe
       description: "Validated custom fixture", args: { value: z.number() },
       async execute(args) {
         await Bun.write(new URL("body.txt", import.meta.url), String(args.value));
-        return {output:String(args.value),metadata:{_syncInput:{internal:true},_formattedContent:"host-only"}};
+        return {output:String(args.value),...(args.value === 4 ? {program:{value:{value:args.value}}} : {}),metadata:{_syncInput:{internal:true},_formattedContent:"host-only"}};
       }
     };
     export const structured = {
@@ -1371,17 +1377,19 @@ it.instance("custom tools use their existing argument validator before body effe
   const execute = fixture.tools.execute?.execute
   if (!execute) throw new Error("execute is missing")
   const result = yield* Effect.promise(() => Promise.resolve(execute({ code: `
+    const untyped = await tools.$opencode.probe({value:4});
     const valid = await tools.$opencode.probe({value:3});
     const structured = await tools.$opencode.probe_structured({value:4});
     const catalog = await tools.$codemode.search({query:"probe", namespace:"$opencode"});
     try { await tools.$opencode.probe({value:"bad"}); }
-    catch (error) { return {valid, structured, invalid:error.message, signature:catalog.items.find(item => item.path === "tools.$opencode.probe").signature}; }
+    catch (error) { return {untyped, valid, structured, invalid:error.message, signature:catalog.items.find(item => item.path === "tools.$opencode.probe").signature}; }
   ` }, { toolCallId: "execute-custom", abortSignal: new AbortController().signal, messages: [] })))
   if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected custom receipt")
   // 校验错误已被 catch 处理，正文保留原 JSON；metadata 仍记录成功与失败的完整终态。
   expect(result).toMatchObject({
     metadata: {
       toolCalls: [
+        { tool: "$opencode.probe", status: "completed" },
         { tool: "$opencode.probe", status: "completed" },
         { tool: "$opencode.probe_structured", status: "completed" },
         { tool: "$codemode.search", status: "completed" },
@@ -1390,11 +1398,10 @@ it.instance("custom tools use their existing argument validator before body effe
     },
   })
   const data = JSON.parse(scriptResult(result).output)
-  expect(data).toMatchObject({ valid: "3", invalid: expect.stringContaining("invalid arguments") })
+  expect(data).toMatchObject({ untyped: { value: 4 }, valid: "3", invalid: expect.stringContaining("invalid arguments") })
   // 同一注册入口同时覆盖旧文本插件与显式结构化插件，不能把所有插件统一改成对象。
   expect(data.structured).toEqual({ value: 4 })
-  // 原文本准确描述为string；宿主临时字段没有变成程序对象的额外属性。
-  expect(data.signature).toContain("Promise<string>")
+  expect(data.signature).toContain("Promise<unknown>")
   // 合法调用先建立独立磁盘证据，随后以文件仍为 3 证明校验位于副作用之前。
   expect(yield* Effect.promise(() => Bun.file(path.join(directory, "body.txt")).text())).toBe("3")
 }))
@@ -1469,7 +1476,7 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
       process.platform === "win32"
         ? "New-Item -ItemType Directory -Path 'generated-cwd' | Out-Null"
         : "mkdir generated-cwd"
-    const where = process.platform === "win32" ? "(Get-Location).Path" : "pwd"
+    const where = process.platform === "win32" ? "(Get-Location).Path; exit 7" : "pwd; exit 7"
     // 目录名由 JS 表达式产生，真实 Shell 负责创建；第二次调用验证实际进程 cwd。
     const result = yield* Effect.promise(() =>
       Promise.resolve(
@@ -1477,8 +1484,9 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
           {
             code: `
     const directory = "generated" + "-cwd";
-    await tools.$opencode.bash({command:${JSON.stringify(create)}});
-    return (await tools.$opencode.bash({command:${JSON.stringify(where)}, workdir:directory})).content;
+    const created = await tools.$opencode.bash({command:${JSON.stringify(create)}});
+    const located = await tools.$opencode.bash({command:${JSON.stringify(where)}, workdir:directory});
+    return {created, located};
   `,
           },
           { toolCallId: "execute-directory", abortSignal: new AbortController().signal, messages: [] },
@@ -1487,7 +1495,10 @@ it.instance("computed workdir is created by an earlier shell and consumed by the
     )
     if (!isRecord(result) || typeof result.output !== "string") throw new Error("Expected directory receipt")
     // 第二个 shell 仍须消费前一步创建的真实工作目录，不能只匹配环境输出。
-    expect(scriptResult(result).output.replaceAll("\\", "/")).toContain(
+    const values = JSON.parse(scriptResult(result).output)
+    expect(values.created).toMatchObject({ content: "", exit: 0, truncated: false, timedOut: false })
+    expect(values.located).toMatchObject({ exit: 7, truncated: false, timedOut: false })
+    expect(values.located.content.replaceAll("\\", "/").replace(/\r?\n$/, "")).toBe(
       path.join(instance.directory, "generated-cwd").replaceAll("\\", "/"),
     )
   }),

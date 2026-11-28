@@ -1,4 +1,4 @@
-import { createContext, useContext, type ParentProps, Show } from "solid-js"
+import { createContext, onCleanup, useContext, type ParentProps, Show } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../context/theme"
 import { useTerminalDimensions } from "@opentui/solid"
@@ -56,9 +56,15 @@ function init() {
   })
 
   let timeoutHandle: NodeJS.Timeout | null = null
+  let closed = false
+  onCleanup(() => {
+    closed = true
+    if (timeoutHandle) clearTimeout(timeoutHandle)
+  })
 
   const toast = {
     show(options: ToastInput) {
+      if (closed) return
       const toastOptions = { ...options, duration: options.duration ?? 5000 }
       setStore("currentToast", toastOptions)
       if (timeoutHandle) clearTimeout(timeoutHandle)

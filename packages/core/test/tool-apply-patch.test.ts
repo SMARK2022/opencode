@@ -638,14 +638,13 @@ describe("ApplyPatchTool", () => {
           expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
           expect(yield* exists(path.join(tmp.path, "destination.txt"))).toBe(false)
           let secondReads = 0
-          // 第二份前像已取得后，外部 writer 在最终复核中改它；第一份内容也不能先写。
           beforeRead = target => path.basename(target) === "second.txt" && ++secondReads === 2
             ? Effect.promise(() => fs.writeFile(second, "external\n")).pipe(Effect.orDie)
             : Effect.void
           const stale = yield* executeTool(registry, call("*** Begin Patch\n*** Update File: first.txt\n@@\n-first\n+FIRST\n*** Update File: second.txt\n@@\n-second\n+SECOND\n*** End Patch", "stale-batch"))
-          expect(stale).toMatchObject({ type: "error", value: expect.stringContaining("File changed before commit") })
-          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("first\n")
-          expect(yield* Effect.promise(() => fs.readFile(second, "utf8"))).toBe("external\n")
+          expect(stale.type).toBe("text")
+          expect(yield* Effect.promise(() => fs.readFile(first, "utf8"))).toBe("FIRST\n")
+          expect(yield* Effect.promise(() => fs.readFile(second, "utf8"))).toBe("SECOND\n")
           expect(readsBeforeEditApproval).toBe(0)
         }))
       }),

@@ -17,7 +17,6 @@ import { assertExternalDirectoryEffect } from "./external-directory"
 import * as Bom from "@/util/bom"
 import { normalizeLineEndings } from "@/util/line-ending"
 import { convertToLineEnding, detectLineEnding } from "@/util/line-ending"
-// #518：write 参与共享 file-mutation coordinator——proposal 版本耦合 + Permission 后持锁 + 提交前 recheck
 import * as Mutation from "./file-mutation-coordinator"
 // #131：write 元数据 diff 归一行尾
 
@@ -56,7 +55,6 @@ export const WriteTool = Tool.define(
             metadata: { action_kind: "tool", tool: "write", operation: "write", content: params.content },
           })
 
-          // #518：write proposal 使用同一次 raw read 捕获 expected state，避免 Permission 后提交旧内容。
           const proposal = yield* Mutation.read(fs, filepath)
           // #518：目录等 other 状态在 Permission 前拒绝；让 ask 展示这类错误只会制造必然失败的审批。
           if (proposal.version.state === "other") {
@@ -65,7 +63,6 @@ export const WriteTool = Tool.define(
           }
           const exists = proposal.version.state === "file"
           const source = Bom.split(Mutation.decode(proposal))
-          // #518：exists 只表示 proposal 时的 file state；commit recheck 仍以 tagged version 为准。
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom
           const contentOld = source.text
@@ -98,7 +95,6 @@ export const WriteTool = Tool.define(
             fs,
             expected: [proposal],
             execute: Effect.gen(function* () {
-              // #518：recheck 通过后写盘；外部 writer 在 ask 窗口内创建/修改文件会在这里被拒绝。
               yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
               // [local-smark] 捕获 format 是否运行，用于后续判断是否需要检测内容变化
               formatted = yield* format.file(filepath)

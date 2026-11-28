@@ -42,6 +42,7 @@ type ReadTextPageOptions = {
   captureRaw?: boolean
   // page 使用固定 16 KiB；outline 传 Infinity 仅关闭返回窗口限制，仍受共享物理预算约束。
   contentBytesLimit?: number
+  firstLineAdmitsBytes?: (utf8Bytes: number) => boolean
   onLine?: (line: string, lineNumber: number) => boolean | void
 }
 
@@ -51,6 +52,7 @@ export function createAuxiliaryBudget(): AuxiliaryBudget {
 
 export function createTextPageParser(opts: ReadTextPageOptions) {
   const budget = opts.budget ?? createAuxiliaryBudget()
+  const { firstLineAdmitsBytes = () => false } = opts
   const captureRaw = opts.captureRaw ?? true
   const contentBytesLimit = opts.contentBytesLimit ?? MAX_CONTENT_BYTES
   const auxiliaryFromStart = opts.auxiliaryFromStart ?? false
@@ -83,6 +85,9 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
   let totalExact = false
   let physicalBytesRead = 0
   let postWindowBytes = 0
+  let firstLineBeyondWindow = false
+  const fitsContent = (bytes: number) => bytes <= contentBytesLimit ||
+    (returnedLines === 0 && firstLineAdmitsBytes(bytes))
 
   const markAuxiliaryLine = () => {
     // total 在早停时是下界；看到一条未返回行的首字符就足以将下界推进一行。
@@ -91,8 +96,9 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
     count += 1
   }
 
+  const inAuxiliary = () => mode === "auxiliary"
+
   const chargeChunk = (size: number) => {
-    if (mode !== "auxiliary") return
     // chunk 可能横跨窗口边界，整块扣费是保守上界，确保实际读取不会逃逸共享预算。
     postWindowBytes += size
     budget.remaining = Math.max(0, budget.remaining - size)
@@ -147,7 +153,7 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
     }
 
     // 16 KiB 按最终 join 语义累计：后续行还要计一个换行分隔字节。
-    if (contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
+    if (!fitsContent(contentBytes + separatorBytes + candidateBytes)) {
       cut = true
       enterAuxiliary(chunkSize, true)
       resetLine()
@@ -175,7 +181,11 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
       // 增量字节数避免每个字符重复编码整行，否则超长行会退化为平方复杂度。
       const candidateBytes = lineEncodedBytes + characterBytes
       const separatorBytes = returnedLines > 0 ? 1 : 0
-      if (contentBytes + separatorBytes + candidateBytes > contentBytesLimit) {
+      const bytes = contentBytes + separatorBytes + candidateBytes
+      if (bytes <= contentBytesLimit) return
+      if (fitsContent(bytes)) {
+        firstLineBeyondWindow = true
+      } else {
         cut = true
         enterAuxiliary(chunkSize)
       }
@@ -271,6 +281,17 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
     }
   }
 
+  const settleFirstLineChunk = (size: number) => {
+    if (!inAuxiliary() && firstLineBeyondWindow) {
+      chargeChunk(size)
+      if (stopAfterChunk) {
+        cut = returnedLines === 0
+        enterAuxiliary(0, !cut)
+      }
+      if (returnedLines > 0) firstLineBeyondWindow = false
+    }
+  }
+
   if (mode === "auxiliary" && budget.remaining === 0) stopped = true
   return {
     get done() { return stopped || stopAfterChunk },
@@ -288,6 +309,7 @@ export function createTextPageParser(opts: ReadTextPageOptions) {
       }
       if (mode === "auxiliary") chargeChunk(chunk.byteLength)
       processChunk(chunk)
+      settleFirstLineChunk(chunk.byteLength)
       if (stopAfterChunk && pendingCR) {
         resolveCRReadAhead = true
         stopAfterChunk = false

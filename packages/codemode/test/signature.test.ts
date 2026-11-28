@@ -548,16 +548,18 @@ for (const [actual, expected, input, value] of [
 test("one unavailable schema side preserves neighboring tools and the other side", async () => {
   // Symbol字段是合法Effect合同但不能发射为JSON Schema，避免用损坏输入冒充表示能力限制。
   const unavailable = Schema.Struct({ [Symbol("key")]: Schema.String })
+  const fieldNames = { type: "object", properties: { prototype: { type: "string" } } }
   const input = { type: "string", description: "Usable input" }
   const output = { type: "number", description: "Usable output" }
   const runtime = CodeMode.make({
     tools: Object.fromEntries(
-      // 四项覆盖两侧均可用、只缺输入、只缺输出、两侧均缺，独立锁定schema不可用标记的方向。
       [
         [input, output],
         [unavailable, output],
         [input, unavailable],
         [unavailable, unavailable],
+        [fieldNames, output],
+        [input, fieldNames],
       ].map((contract, index) => [
         `tool${index}`,
         Tool.make({
@@ -573,12 +575,14 @@ test("one unavailable schema side preserves neighboring tools and the other side
   const head = await search(runtime)
   const tail = await search(runtime, { offset: 3 })
   const full = { ...tail, items: [...head.items, ...tail.items] }
-  expect(full.items.map((item) => item.path)).toEqual(["tools.tool0", "tools.tool1", "tools.tool2", "tools.tool3"])
+  expect(full.items.map((item) => item.path)).toEqual(["tools.tool0", "tools.tool1", "tools.tool2", "tools.tool3", "tools.tool4", "tools.tool5"])
   expect(full.items.map((item) => item.schemaUnavailable)).toEqual([
     undefined,
     ["input"],
     ["output"],
     ["input", "output"],
+    ["input"],
+    ["output"],
   ])
   // 不可发射的一侧显式为null，可用一侧保留原schema；这与根本没有声明output的省略语义不同。
   expect(full.items.map((item) => [item.inputSchema, item.outputSchema])).toEqual([
@@ -586,12 +590,15 @@ test("one unavailable schema side preserves neighboring tools and the other side
     [null, output],
     [input, null],
     [null, null],
+    [null, output],
+    [input, null],
   ])
   expect(full).toMatchObject({ remaining: 0, next: null })
   const first = await search(runtime, { limit: 2 })
-  expect(first).toMatchObject({ remaining: 2, next: { offset: 2 } })
+  expect(first).toMatchObject({ remaining: 4, next: { offset: 2 } })
   const second = await search(runtime, { limit: 2, offset: 2 })
-  expect(second).toMatchObject({ remaining: 0, next: null })
-  // 把两页重新拼接到完整结果，检查不可发射合同也占正常条目位置且没有被过滤掉。
-  expect([...first.items, ...second.items]).toEqual(full.items)
+  expect(second).toMatchObject({ remaining: 2, next: { offset: 4 } })
+  const third = await search(runtime, { limit: 2, offset: 4 })
+  expect(third).toMatchObject({ remaining: 0, next: null })
+  expect([...first.items, ...second.items, ...third.items]).toEqual(full.items)
 })

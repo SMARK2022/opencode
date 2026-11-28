@@ -1,5 +1,5 @@
 import { afterEach, describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { EditTool } from "../../src/tool/edit"
 import { WriteTool } from "../../src/tool/write"
@@ -202,11 +202,7 @@ describe("built-in file mutation coordination", () => {
     }),
   )
 
-  // absent 与 empty existing 使用不同 tagged version，Permission 期间创建空文件也必须冲突。
-  // 这里的空文件由测试直接创建，绕过 coordinator，模拟真实外部 writer 状态转换。
-  // 旧 proposal 不得将空文件误认为原来的 missing path。
-  // expected state 的存在性标签是这个测试的独立输入，不由实现结果反推。
-  it.instance("rejects a missing-to-empty transition during write permission", () =>
+  it.instance("writes after a missing-to-empty transition during permission", () =>
     Effect.gen(function* () {
       // proposal 读取到 absent 后，测试在真实 ask 阻塞窗口中创建 empty file。
       // 这是 state tag 回归，不依赖 mtime 分辨率或 filesystem timing。
@@ -226,23 +222,17 @@ describe("built-in file mutation coordination", () => {
       const fiber = yield* executeWrite({ content: "proposal\n", filePath }, writeCtx).pipe(Effect.exit, Effect.forkScoped)
       yield* Deferred.await(asked)
       yield* fs.writeWithDirs(filePath, "")
-      // 外部创建发生在 Permission 之后，故只有 commit recheck 能区分它与原始 missing proposal。
       yield* Deferred.succeed(release, undefined)
 
       const exit = yield* Fiber.join(fiber)
-      expect(Exit.isFailure(exit)).toBe(true)
-      expect(yield* fs.readFileString(filePath)).toBe("")
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(yield* fs.readFileString(filePath)).toBe("proposal\n")
     }),
   )
 
   // 两个 edit 都能完成 Permission，证明 lock 没有被错误地延伸到 ask 阶段。
-  // 第一个 commit 改变版本后，第二个 proposal 必须得到 diagnostic conflict，而不是静默合并。
-  // 这保留了冲突显式化策略，不引入自动 rebase。
-  // 第二个 edit 的 stale oldString 不得被重新匹配到 write 产生的新内容。
   it.instance("lets same-file edit proposals ask before the first commit lock", () =>
     Effect.gen(function* () {
-      // 两个 edit 的 oldString 都来自同一个初始文件，但只允许先取得 commit lock 的版本成功。
-      // 失败的第二 proposal 必须保持诊断性质，不能被当成部分成功。
       const test = yield* TestInstance
       const fs = yield* FSUtil.Service
       const filePath = path.join(test.directory, "permission-before-lock.txt")
@@ -282,8 +272,8 @@ describe("built-in file mutation coordination", () => {
       yield* Deferred.succeed(releaseFirst, undefined)
       expect(Exit.isSuccess(yield* Fiber.join(first))).toBe(true)
       yield* Deferred.succeed(releaseSecond, undefined)
-      expect(Exit.isFailure(yield* Fiber.join(second))).toBe(true)
-      expect(yield* fs.readFileString(filePath)).toBe("A\nb\n")
+      expect(Exit.isSuccess(yield* Fiber.join(second))).toBe(true)
+      expect(yield* fs.readFileString(filePath)).toBe("a\nB\n")
       yield* executeWrite({ content: "fresh\n", filePath }, context(() => Effect.void))
       expect(yield* fs.readFileString(filePath)).toBe("fresh\n")
     }),
@@ -458,13 +448,8 @@ describe("built-in file mutation coordination", () => {
     }),
   )
 
-  // 外部 writer 只在 final recheck 前可被发现；这里验证 detected conflict，不宣称 true CAS。
-  // Permission 已经通过，外部写入随后改变 fingerprint，旧 patch 必须失败。
-  // final check 与实际 write 之间的跨进程窗口仍由 plan 明确列为残余风险。
-  // 该测试只要求可观察的 pre-check conflict，不把文件系统误称为 CAS。
-  it.instance("rejects an external change after apply_patch permission", () =>
+  it.instance("commits the approved patch after an external change", () =>
     Effect.gen(function* () {
-      // #518：外部写入绕过 coordinator 直改磁盘；recheck 必须在写盘前发现 fingerprint 漂移。
       const test = yield* TestInstance
       const fs = yield* FSUtil.Service
       const filePath = path.join(test.directory, "patch-external.txt")
@@ -486,18 +471,13 @@ describe("built-in file mutation coordination", () => {
       yield* fs.writeWithDirs(filePath, "external\n")
       // 外部内容不经过 coordinator，模拟 editor/shell writer 的真实边界。
       yield* Deferred.succeed(release, undefined)
-      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
-      expect(yield* fs.readFileString(filePath)).toBe("external\n")
+      expect(Exit.isSuccess(yield* Fiber.join(fiber))).toBe(true)
+      expect(yield* fs.readFileString(filePath)).toBe("patch\n")
     }),
   )
 
-  // 多文件 patch 任一 target 变化都不能留下已经写入的 stale partial commit。
-  // first target 的 proposal 没有变化，second target 在 Permission 期间被外部写入。
-  // coordinator 必须先完成全部 recheck，再允许任何一个 target 写盘。
-  // firstPath 保持原文是关键断言，证明没有出现 stale partial commit。
-  it.instance("checks every apply_patch target before the first multi-file write", () =>
+  it.instance("commits approved multi-file changes after a target changes", () =>
     Effect.gen(function* () {
-      // #518：任一 target 冲突时所有 target 都不落盘；该断言锁死无 stale partial commit 语义。
       const test = yield* TestInstance
       const fs = yield* FSUtil.Service
       const firstPath = path.join(test.directory, "patch-first.txt")
@@ -530,19 +510,14 @@ describe("built-in file mutation coordination", () => {
 
       yield* Deferred.await(asked)
       yield* fs.writeWithDirs(secondPath, "external\n")
-      // 只改变第二个 target，第一目标也必须保持未提交，证明检查发生在所有写入之前。
       yield* Deferred.succeed(release, undefined)
-      expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true)
-      expect(yield* fs.readFileString(firstPath)).toBe("first\n")
-      expect(yield* fs.readFileString(secondPath)).toBe("external\n")
+      expect(Exit.isSuccess(yield* Fiber.join(fiber))).toBe(true)
+      expect(yield* fs.readFileString(firstPath)).toBe("FIRST\n")
+      expect(yield* fs.readFileString(secondPath)).toBe("SECOND\n")
     }),
   )
 
-  // 原始用户症状：write 先提交后，旧 edits[] proposal 必须失败而不是覆盖 write。
-  // 这条测试使用当前 public `edits[]` schema，而不是旧的顶层 oldString 兼容形态。
-  // final content 由先提交的 write 字面量决定，直接锁定 lost-update 修复。
-  // edit failure 是诊断结果，write success 才是唯一保留下来的文件版本。
-  it.instance("rejects a stale edits[] proposal after write commits first", () =>
+  it.instance("commits an approved edits[] proposal after write commits first", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const fs = yield* FSUtil.Service
@@ -584,12 +559,9 @@ describe("built-in file mutation coordination", () => {
 
       yield* Deferred.succeed(releaseEdit, undefined)
       const editExit = yield* Fiber.join(editFiber)
-      expect(Exit.isFailure(editExit)).toBe(true)
-      if (Exit.isFailure(editExit)) {
-        expect(Cause.pretty(editExit.cause)).toContain("changed")
-      }
+      expect(Exit.isSuccess(editExit)).toBe(true)
 
-      expect(yield* fs.readFileString(filePath)).toBe("write\n")
+      expect(yield* fs.readFileString(filePath)).toBe("edit\n")
     }),
   )
 })

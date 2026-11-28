@@ -87,14 +87,15 @@ describe("tool.webfetch", () => {
   it.instance("keeps text responses as text output", () =>
     withFetch(
       () =>
-        new Response("hello from webfetch", {
+        new Response("hello from webfetch" + "x".repeat(5 * 1024 * 1024), {
           status: 200,
           headers: { "content-type": "text/plain; charset=utf-8" },
         }),
       (url) =>
         Effect.gen(function* () {
           const result = yield* exec({ url: new URL("/file.txt", url).toString(), format: "text" })
-          expect(result.output).toBe("hello from webfetch")
+          expect(result.program?.value).toMatchObject({ content: "hello from webfetch" + "x".repeat(5 * 1024 * 1024) })
+          expect(result.metadata).toMatchObject({ truncated: true })
           expect(result.attachments).toBeUndefined()
         }),
     ),

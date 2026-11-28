@@ -684,9 +684,11 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
             {/* #544：可选右侧槽——Session list progressive 搜索把 Spinner 挂在这里；
                 flexGrow 包输入框保证窄终端下输入区优先占宽，附属只取固有宽度。*/}
             <Show when={props.filterAccessory}>
-              <box flexShrink={0} justifyContent="center">
-                {props.filterAccessory}
-              </box>
+              {(accessory) => (
+                <box flexShrink={0} justifyContent="center">
+                  {accessory()}
+                </box>
+              )}
             </Show>
           </box>
         </Show>

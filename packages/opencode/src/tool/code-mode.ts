@@ -5,7 +5,6 @@ import { Cause, Config, Clock, Deferred, Effect, Schema } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { isRecord } from "@/util/record"
 import type { PermissionPrecheck } from "@/permission/precheck"
-import { MAX_RESPONSE_SIZE } from "./webfetch"
 import { ExecuteEnvironments } from "./execute-environments"
 
 // JSON 决定缺省值；显式环境变量仍通过宿主的 ConfigProvider 解码和覆盖。
@@ -109,6 +108,7 @@ export type CatalogEntry = {
   // 这是实际宿主 validator 的来源，不替换只负责展示的 JSON input。
   runtimeParameters?: Schema.Decoder<unknown>
   outputSchema?: JSONSchema7 | Schema.Decoder<unknown>
+  mcpStructured?: true
 }
 
 export interface CodeModeHost {
@@ -140,10 +140,7 @@ export const fetchHTTP = Effect.fn("CodeMode.fetch")(function* (input: unknown, 
       // 本次HTTP取消、整段执行终止和请求期限分别约束同一传输。
       signal: AbortSignal.any([signal, ctx.abort, AbortSignal.timeout(30_000)]),
     })
-    // 超限按失败传播，不能把截断JSON当成完整业务响应交给脚本。
-    if (Number(response.headers.get("content-length")) > MAX_RESPONSE_SIZE) throw new Error("Response too large (exceeds 5MB limit)")
     const bytes = new Uint8Array(await response.arrayBuffer())
-    if (bytes.byteLength > MAX_RESPONSE_SIZE) throw new Error("Response too large (exceeds 5MB limit)")
     // 三种读取方法共享同一响应快照，不会重新下载或读取第二次响应体。
     return { url: response.url, status: response.status, statusText: response.statusText, ok: response.ok, redirected: response.redirected,
       headers: Object.fromEntries(response.headers), text: new TextDecoder().decode(bytes), bytes: Array.from(bytes) }
@@ -159,7 +156,7 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
   const tree: Record<string, Record<string, import("@opencode-ai/codemode").Tool.Definition>> = {}
   for (const entry of catalog) {
     const namespace = (tree[entry.path[0]] ??= {})
-    namespace[entry.path[1]] = sandbox.Tool.make({
+    const definition = sandbox.Tool.make({
       description: entry.description,
       // 沿用 V1 原 JSON Schema 签名适配：对象原样透传，真实输入校验仍由工具拥有。
       input: entry.inputSchema as import("@opencode-ai/codemode").Tool.JsonSchema,
@@ -176,6 +173,7 @@ const toolTree = Effect.fn("CodeMode.toolTree")(function* (
           }),
         ),
     })
+    namespace[entry.path[1]] = { ...definition, inputContract: definition.input }
   }
   return tree
 })
@@ -197,7 +195,8 @@ export const describeCatalog = Effect.fn("CodeMode.describeCatalog")(function* (
         ).includes(entry.id),
     )
     .map((entry) => entry.path.join("."))
-  return CodeMode.make({ tools, discovery: { priority } }).instructions()
+  return CodeMode.make({ tools, discovery: { priority } }).instructions() +
+    "\nSignatures describe the declared tool data. Successful external results that cannot be represented in the sandbox are delivered as tool text (complete JSON for over-depth MCP objects)."
 })
 
 export const CodeModeTool = Tool.define(
@@ -246,6 +245,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
         // 规范化只做一次，预跑、整段权限检查和真实执行必须看到完全相同的源码。
         const code = fenced && !fenced[1].includes("```") ? fenced[1] : params.code
         const outputLimits = yield* truncate.limits()
+        const limits = { maxToolCalls: 1_024, maxLoopIterations: 100_000, maxLogBytes: outputLimits.maxBytes }
         const calls: CallEntry[] = []
         const attachments: Attachment[] = []
         // 相同规则在多个子调用出现时只返回最新内容，去重不依赖脚本最终选择的字段。
@@ -277,11 +277,13 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             for (const item of result.context ?? []) context.set(`${item.kind}:${item.key}`, item)
             // 附件与强制上下文由宿主收集，context 按 kind:key 去重，独立于脚本 return。
             // 只有协议标记的 rawText 进入 JSON 投影；其他程序值原样交付，包括 null、false 和 0。
-            return result.program?.rawText !== undefined
-              ? CodeMode.fromJsonText(result.program.rawText)
-              : result.program
-                ? result.program.value
-                : result.output
+            const program = result.program
+            if (!program) return result.output
+            if (program.rawText !== undefined) return CodeMode.fromJsonText(program.rawText)
+            return CodeMode.hostRepresentationText(program.value, (reason) =>
+              reason === "depth" && entry.mcpStructured && isRecord(program.value)
+                ? JSON.stringify(program.value)
+                : result.output)
           }),
         )
         const execute = CodeMode.execute({
@@ -289,7 +291,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
           tools,
           environment: lease.environment,
           // 十分钟约束真实执行；人类输入与权限审批暂停预算，预跑和整段审查在计时前。
-          limits: { timeoutMs: params.timeout ?? 600000, maxLogBytes: outputLimits.maxBytes },
+          limits: { ...limits, timeoutMs: params.timeout ?? 600000 },
           fetch: host.fetch,
           waitForTimeout: host.waitForTimeout,
           onToolCallStart: ({ index, name, input }) =>
@@ -349,7 +351,7 @@ State: reuse the returned environmentID to inspect or continue saved variables, 
             snapshotEnvironment: true,
             // 探针只发现调用，不重复真实脚本的轮询等待；Promise 仍由同一根作用域收尾。
             sleep: () => Effect.void,
-            limits: { timeoutMs: 500, maxToolCalls: 1024, maxLogBytes: outputLimits.maxBytes },
+            limits: { ...limits, timeoutMs: 500 },
             // 预跑只记录HTTP意图，空响应不产生网络或权限副作用。
             fetch: host.fetch
               ? (url, init) =>

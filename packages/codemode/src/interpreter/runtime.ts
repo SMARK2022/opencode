@@ -608,14 +608,6 @@ const invokeArrayStatic = (name: string, args: Array<unknown>, node: AstNode): u
     case "of":
       return [...args]
     case "from": {
-      if (args.length > 1) {
-        throw new InterpreterRuntimeError(
-          "Array.from(...) does not support a map function in CodeMode; call .map() on the result instead.",
-          node,
-          "UnsupportedSyntax",
-          [supportedSyntaxMessage],
-        )
-      }
       // Map/Set materialize directly (the data checkpoint would serialize them to {}).
       if (args[0] instanceof SandboxMap)
         return Array.from((args[0] as SandboxMap).map.entries(), ([key, item]) => [key, item])
@@ -694,6 +686,7 @@ const collectPatternNames = (pattern: AstNode, out: Array<string> = []): Array<s
 
 // 能力与执行寿命共享，词法栈属于调用帧；并发函数不能互相替换作用域。
 type Execution<R> = {
+  enterLoop: (node: AstNode) => void
   invokeTool: (path: ReadonlyArray<string>, args: Array<unknown>) => Effect.Effect<unknown, unknown, R>
   toolKeys: (path: ReadonlyArray<string>) => ReadonlyArray<string>
   log: (message: string) => void
@@ -1036,6 +1029,7 @@ class Interpreter<R> {
     const self = this
     return Effect.gen(function* () {
       while (yield* self.evaluateExpression(testNode)) {
+        self.execution.enterLoop(node)
         const result = yield* self.evaluateStatement(bodyNode)
 
         if (result.kind === "continue") {
@@ -1066,6 +1060,7 @@ class Interpreter<R> {
     const self = this
     return Effect.gen(function* () {
       do {
+        self.execution.enterLoop(node)
         const result = yield* self.evaluateStatement(bodyNode)
 
         if (result.kind === "continue") {
@@ -1112,6 +1107,7 @@ class Interpreter<R> {
           : []
 
       while (testNode ? yield* self.evaluateExpression(testNode) : true) {
+        self.execution.enterLoop(node)
         let iterationScope: Map<string, Binding> | undefined
         if (perIterationBindings.length > 0) {
           iterationScope = new Map(
@@ -1200,6 +1196,7 @@ class Interpreter<R> {
         // 异步迭代的每次 next（包括空集合与终止）都沿既有 await 调度让出。
         if (getBoolean(node, "await")) yield* Effect.yieldNow
         if (next.done) break
+        self.execution.enterLoop(node)
         // 只等待产出值本身；Map 键值对不会递归等待。
         const value =
           getBoolean(node, "await") && next.value instanceof SandboxPromise
@@ -1302,6 +1299,7 @@ class Interpreter<R> {
       }
 
       for (const key of keys) {
+        self.execution.enterLoop(node)
         if (declaration) {
           self.pushScope()
           yield* self.declarePattern(declaration.pattern, key, declaration.mutable, left)
@@ -1594,6 +1592,9 @@ class Interpreter<R> {
         return createErrorValue(name, arg === undefined ? "" : coerceToString(arg))
       })
     }
+    if (name === "Array") {
+      return Effect.map(self.evaluateCallArguments(argNodes), (args) => self.constructArray(args))
+    }
     if (valueConstructors.has(name)) {
       return Effect.gen(function* () {
         const args = yield* self.evaluateCallArguments(argNodes)
@@ -1614,6 +1615,14 @@ class Interpreter<R> {
       })
     }
     throw unsupportedSyntax("NewExpression", node)
+  }
+
+  private constructArray(args: unknown[]): unknown[] {
+    if (args.length !== 1 || typeof args[0] !== "number") return [...args]
+    const length = args[0]
+    if (!Number.isInteger(length) || length < 0 || length > 0xffffffff)
+      throw new ProgramThrow(createErrorValue("RangeError", "Invalid array length"))
+    return new Array<unknown>(length)
   }
 
   private constructDate(args: Array<unknown>): SandboxDate {
@@ -2029,13 +2038,50 @@ class Interpreter<R> {
       if (callable instanceof PromiseMethodReference) {
         return yield* self.invokePromiseMethod(callable, args, node)
       }
+      return yield* self.invokeCallable(callable, args, node, callee, reference)
+    })
+  }
+
+  private invokeCallable(
+    callable: unknown,
+    args: unknown[],
+    node: AstNode,
+    callee?: AstNode,
+    reference?: unknown,
+  ): Effect.Effect<unknown, unknown, R> {
+    const self = this
+    return Effect.gen(function* () {
       if (callable instanceof CodeModeFunction) {
         return yield* self.invokeFunction(callable, args)
       }
       if (callable instanceof IntrinsicReference) {
         return yield* self.invokeIntrinsic(callable, args, node)
       }
+      if (callable instanceof GlobalNamespace && callable.name === "Array") return self.constructArray(args)
       if (callable instanceof GlobalMethodReference) {
+        if (callable.namespace === "Array" && callable.name === "from" && args[1] !== undefined) {
+          const apply = self.applyCollectionCallback(args[1], "Array.from", node)
+          const source = args[0]
+          const iterable = typeof source === "string" || Array.isArray(source) ? source
+            : source instanceof SandboxMap ? source.map.entries()
+            : source instanceof SandboxSet ? source.set.values()
+            : source instanceof SandboxURLSearchParams ? source.params.entries() : undefined
+          const result: unknown[] = []
+          if (iterable !== undefined) {
+            for (const item of iterable) result.push(yield* apply([item, result.length]))
+            return result
+          }
+          if (!isRecord(source) || typeof source.length !== "number") {
+            throw new InterpreterRuntimeError(
+              "Array.from expects an array, string, Map, Set, or array-like value.",
+              node,
+            )
+          }
+          const length = Math.max(0, Math.trunc(source.length) || 0)
+          if (length > 0xffffffff) throw new ProgramThrow(createErrorValue("RangeError", "Invalid array length"))
+          for (let index = 0; index < length; index++) result.push(yield* apply([source[index], index]))
+          return result
+        }
         // 令牌不捕获旧执行器；跨单元别名始终在当前根作用域登记计时器。
         if (callable.namespace === "$builtin") return yield* self.invokeSleep(args, node)
         if (callable.namespace === "console") return self.invokeConsole(callable.name, args, node)
@@ -2054,12 +2100,11 @@ class Interpreter<R> {
       if (callable instanceof ErrorConstructorReference) {
         return createErrorValue(callable.name, args[0] === undefined ? "" : coerceToString(args[0]))
       }
-      // 保留首次求值的 receiver；诊断只显示有限键名，不读取值或重复执行表达式。
       const [value, label] =
         isRecord(reference) && "target" in reference ? [reference.target, "receiver"] : [callable, "value"]
       throw new InterpreterRuntimeError(
         `Value is not callable in CodeMode. Actual ${label}: ${describeValueShape(value)}.`,
-        callee,
+        callee ?? node,
       )
     })
   }
@@ -2480,23 +2525,23 @@ class Interpreter<R> {
     name: string,
     node: AstNode,
   ): (args: Array<unknown>) => Effect.Effect<unknown, unknown, R> {
-    if (
-      !(callback instanceof CodeModeFunction) &&
-      !(callback instanceof CoercionFunction) &&
-      !(callback instanceof UriFunction) &&
-      // 仅放行 sleep 令牌；其他全局方法继续遵守原来的回调白名单。
-      !(callback instanceof GlobalMethodReference && callback.namespace === "$builtin" && callback.name === "sleep")
+    const math = callback instanceof GlobalMethodReference && callback.namespace === "Math" ? callback.name : undefined
+    const json = callback instanceof GlobalMethodReference && callback.namespace === "JSON" && callback.name === "parse"
+    if (!(callback instanceof CodeModeFunction) && !(callback instanceof CoercionFunction) &&
+        !(callback instanceof UriFunction) && !math && !json &&
+        !(callback instanceof GlobalMethodReference && callback.namespace === "$builtin" && callback.name === "sleep")
     ) {
       throw new InterpreterRuntimeError(`${name} expects a function callback.`, node)
     }
-    return (callbackArgs) =>
-      callback instanceof GlobalMethodReference
-        ? this.invokeSleep(callbackArgs, node)
-        : callback instanceof CoercionFunction
-          ? Effect.succeed(invokeCoercion(callback, callbackArgs, node))
-          : callback instanceof UriFunction
-            ? Effect.succeed(invokeUriFunction(callback, callbackArgs, node))
-            : this.invokeFunction(callback, callbackArgs)
+    return (callbackArgs) => this.invokeCallable(
+      callback,
+      math
+        ? ["min", "max", "hypot"].includes(math)
+          ? callbackArgs.map(coerceToNumber)
+          : callbackArgs.slice(0, math === "pow" ? 2 : 1)
+        : json ? callbackArgs.slice(0, 1) : callbackArgs,
+      node,
+    )
   }
 
   private invokeMapMethod(
@@ -2867,10 +2912,8 @@ class Interpreter<R> {
     comparator: unknown,
     node: AstNode,
   ): Effect.Effect<Array<unknown>, unknown, R> {
-    if (comparator !== undefined && !(comparator instanceof CodeModeFunction)) {
-      throw new InterpreterRuntimeError("Array.sort expects an arrow function comparator.", node)
-    }
-    if (!(comparator instanceof CodeModeFunction)) {
+    const apply = comparator === undefined ? undefined : this.applyCollectionCallback(comparator, "Array.sort", node)
+    if (!apply) {
       return Effect.sync(() =>
         [...target].sort((a, b) => {
           const left = coerceToString(a)
@@ -2879,7 +2922,6 @@ class Interpreter<R> {
         }),
       )
     }
-    const self = this
     const mergeSort = (items: Array<unknown>): Effect.Effect<Array<unknown>, unknown, R> => {
       if (items.length <= 1) return Effect.succeed(items)
       const midpoint = Math.floor(items.length / 2)
@@ -2892,7 +2934,7 @@ class Interpreter<R> {
         while (leftIndex < left.length && rightIndex < right.length) {
           // Coerce the comparator's result like JS ToNumber (data objects -> NaN, never a host
           // crash) and treat NaN as 0 - the spec's "no consistent order" -> keep the left element.
-          const order = coerceToNumber(yield* self.invokeFunction(comparator, [left[leftIndex], right[rightIndex]]))
+          const order = coerceToNumber(yield* apply([left[leftIndex], right[rightIndex]]))
           if (Number.isNaN(order) || order <= 0) merged.push(left[leftIndex++])
           else merged.push(right[rightIndex++])
         }
@@ -3495,6 +3537,7 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
     const program = parseProgram(options.code, typescript)
     const promises: Array<SandboxPromise> = []
     let unobservedFailure = false
+    let loopIterations = 0
     // 正常 return 也关闭仍在运行的生产者；已完成的宿主副作用保持原样。
     const value = yield* Effect.scopedWith((scope) =>
       Interpreter.make(
@@ -3505,6 +3548,17 @@ export const executeWithLimits = <const Tools extends Record<string, unknown>>(
           log,
           scope,
           promises,
+          enterLoop: (node) => {
+            const maximum = limits.maxLoopIterations
+            if (maximum === undefined) return
+            if (loopIterations >= maximum) {
+              throw new InterpreterRuntimeError(
+                `Execution exceeded its total loop-iteration limit of ${maximum}. Split the work across Execute calls.`,
+                node, "LoopIterationLimitExceeded",
+              )
+            }
+            loopIterations++
+          },
           sleep: options.sleep ?? Effect.sleep,
         },
         options.fetch !== undefined,

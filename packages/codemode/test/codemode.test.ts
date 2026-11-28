@@ -1632,15 +1632,31 @@ describe("CodeMode public contract", () => {
   test("returns JSON-safe data and normalizes undefined to null", async () => {
     const result = await Effect.runPromise(
       CodeMode.execute({
-        code: `return { top: undefined, nested: [1, undefined] }`,
+        code: `const holes = []; holes[1] = 1; return { top: undefined, nested: [1, undefined], holes: [holes] }`,
       }),
     )
     expect(result).toStrictEqual({
       ok: true,
-      value: { top: null, nested: [1, null] },
+      value: { top: null, nested: [1, null], holes: [[null, 1]] },
       toolCalls: [],
     })
     expect(Schema.decodeUnknownSync(CodeMode.Result)(JSON.parse(JSON.stringify(result)))).toStrictEqual(result)
+
+    const arrays = await Effect.runPromise(CodeMode.execute({ code: `
+      const list = new Array(4); list[1] = 2; list[3] = 4;
+      const made = Array(2); made[1] = 3;
+      const mapped = list.map(x => x * 2);
+      const dynamic = { length: 2, 0: "a", 1: "b" };
+      const from = Array.from(dynamic, (x, i) => { dynamic[1] = "c"; return x + i; });
+      return [Object.keys(list), Object.keys(mapped), mapped, made,
+        from, [1.4, 2.9].map(Math.floor), ["1", "[2]"].map(JSON.parse),
+        [7].map(Math.max), [3].map(Math.hypot)];
+    ` }))
+    expect(arrays).toMatchObject({ ok: true, value: [
+      ["1", "3"], ["0", "1", "2", "3"], [null, 4, null, 8], [null, 3],
+      ["a0", "c1"], [1, 2], [1, [2]], [7], [Math.hypot(3, 0, 3)],
+    ] })
+
   })
 
   test("rejects invalid configuration and discovery limits", async () => {

@@ -198,28 +198,29 @@ describe("WebFetchTool registration", () => {
     }),
   )
 
-  it.effect("rejects declared and streamed oversized bodies", () =>
+  it.effect("returns declared and streamed large bodies through output bounding", () =>
     Effect.gen(function* () {
       reset()
       const registry = yield* ToolRegistry.Service
+      const body = "x".repeat(5 * 1024 * 1024 + 1)
       respond = () =>
         Effect.succeed(
-          new Response("small", {
-            headers: { "content-type": "text/plain", "content-length": String(WebFetchTool.MAX_RESPONSE_BYTES + 1) },
+          new Response(body, {
+            headers: { "content-type": "text/plain", "content-length": String(body.length) },
           }),
         )
-      expect(yield* executeTool(registry, call({ url: "https://1.1.1.1/declared", format: "text" }))).toEqual({
-        type: "error",
-        value: "Unable to fetch https://1.1.1.1/declared",
+      expect(yield* settleTool(registry, call({ url: "https://1.1.1.1/declared", format: "text" }))).toMatchObject({
+        result: { type: "text" },
+        output: { structured: { output: body } },
       })
 
       respond = () =>
         Effect.succeed(
-          new Response("x".repeat(WebFetchTool.MAX_RESPONSE_BYTES + 1), { headers: { "content-type": "text/plain" } }),
+          new Response(body, { headers: { "content-type": "text/plain" } }),
         )
-      expect(yield* executeTool(registry, call({ url: "https://1.1.1.1/streamed", format: "text" }))).toEqual({
-        type: "error",
-        value: "Unable to fetch https://1.1.1.1/streamed",
+      expect(yield* settleTool(registry, call({ url: "https://1.1.1.1/streamed", format: "text" }))).toMatchObject({
+        result: { type: "text" },
+        output: { structured: { output: body } },
       })
     }),
   )

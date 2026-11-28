@@ -37,10 +37,6 @@ export interface RemoveInput {
   readonly target: Target
 }
 
-export class StaleContentError extends Schema.TaggedErrorClass<StaleContentError>()("FileMutation.StaleContentError", {
-  path: Schema.String,
-}) {}
-
 export class TargetExistsError extends Schema.TaggedErrorClass<TargetExistsError>()("FileMutation.TargetExistsError", {
   path: Schema.String,
 }) {}
@@ -75,31 +71,24 @@ export interface RemoveResult {
 }
 
 export interface Interface {
-  // 批次先锁定并校验全部前像，再使用同一 owner 的原语提交；不承诺 I/O 回滚。
   readonly commit: <A, E, R>(input: {
     readonly expected: readonly { readonly target: Target; readonly content: Uint8Array | undefined }[]
     readonly execute: (files: Omit<Interface, "commit">) => Effect.Effect<A, E, R>
-  }) => Effect.Effect<A, E | StaleContentError | FSUtil.Error, R>
+  }) => Effect.Effect<A, E | FSUtil.Error, R>
   /** Create without replacing an existing target. */
   readonly create: (input: WriteInput) => Effect.Effect<WriteResult, TargetExistsError | FSUtil.Error>
   readonly write: (input: WriteInput) => Effect.Effect<WriteResult, FSUtil.Error>
   /** Write text while retaining an existing UTF-8 BOM and emitting at most one BOM. */
   readonly writeTextPreservingBom: (input: TextWriteInput) => Effect.Effect<WriteResult, FSUtil.Error>
-  /** Commit only if an existing target still has the expected bytes. */
   readonly writeIfUnchanged: (
     input: ConditionalWriteInput,
-  ) => Effect.Effect<WriteResult, StaleContentError | FSUtil.Error>
-  readonly moveIfUnchanged: (input: ConditionalMoveInput) => Effect.Effect<WriteResult, StaleContentError | MoveIncompleteError | FSUtil.Error>
+  ) => Effect.Effect<WriteResult, FSUtil.Error>
+  readonly moveIfUnchanged: (input: ConditionalMoveInput) => Effect.Effect<WriteResult, MoveIncompleteError | FSUtil.Error>
   readonly remove: (input: RemoveInput) => Effect.Effect<RemoveResult, FSUtil.Error>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/FileMutation") {}
 
-/**
- * Serialize file changes by canonical target. Conditional writes compare and
- * write under the same process-local lock so cooperating OpenCode mutations do
- * not overwrite changes made from the same stale content.
- */
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -217,9 +206,6 @@ const layer = Layer.effect(
     const writeIfUnchanged = Effect.fn("FileMutation.writeIfUnchanged")((input: ConditionalWriteInput) =>
         Effect.gen(function* () {
           const current = yield* fs.readFile(input.target.canonical)
-          if (!sameBytes(current, input.expected)) {
-            return yield* new StaleContentError({ path: input.target.canonical })
-          }
           yield* typeof input.content === "string"
             ? fs.writeFileString(input.target.canonical, input.content)
             : fs.writeFile(input.target.canonical, input.content)
@@ -232,7 +218,6 @@ const layer = Layer.effect(
     const moveIfUnchanged = Effect.fn("FileMutation.moveIfUnchanged")((input: ConditionalMoveInput) => {
       const commit = Effect.gen(function* () {
         const source = yield* fs.readFile(input.target.canonical)
-        if (!sameBytes(source, input.expected)) return yield* new StaleContentError({ path: input.target.canonical })
         const previous = yield* fs.readFile(input.destination.canonical)
           .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
         // 目的地继承源BOM，格式化与最终回读沿用唯一文本收尾路径。
@@ -267,17 +252,7 @@ const layer = Layer.effect(
       )
     const commit: Interface["commit"] = input => withTargets(
       input.expected.map(item => item.target),
-      Effect.gen(function* () {
-        for (const expected of input.expected) {
-          const current = yield* fs.readFile(expected.target.canonical)
-            .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(undefined)))
-          // undefined 是缺失，空字节是已有空文件；任一漂移都须在首写前拒绝。
-          if (expected.content === undefined ? current !== undefined : current === undefined || !sameBytes(expected.content, current)) {
-            return yield* new StaleContentError({ path: expected.target.canonical })
-          }
-        }
-        return yield* input.execute(operations)
-      }),
+      Effect.suspend(() => input.execute(operations)),
     )
     // 无锁原语仅交给已持有完整键集的 commit；单文件公开入口仍使用同一组锁。
     return Service.of({
@@ -304,11 +279,6 @@ function joinBom(text: string, bom: boolean) {
 
 function hasUtf8Bom(content: Uint8Array) {
   return content[0] === 0xef && content[1] === 0xbb && content[2] === 0xbf
-}
-
-function sameBytes(left: Uint8Array, right: Uint8Array) {
-  if (left.length !== right.length) return false
-  return left.every((byte, index) => byte === right[index])
 }
 
 export const locationLayer = layer

@@ -93,7 +93,7 @@ describe("code mode host fixtures", () => {
     return Object.entries(Permission.visibleTools(mcpTools, permission)).map(([id, entry]) => {
       const server = names.find((name) => id.startsWith(name + "_")) ?? id.split("_")[0]
       return { id, path: [server, id.startsWith(server + "_") ? id.slice(server.length + 1) : id],
-        description: entry.def.description ?? "", inputSchema: McpCatalog.schemas(entry.def).input, outputSchema: McpCatalog.schemas(entry.def).output }
+        description: entry.def.description ?? "", inputSchema: McpCatalog.schemas(entry.def).input, outputSchema: McpCatalog.schemas(entry.def).output, mcpStructured: true }
     })
   }
 
@@ -126,7 +126,7 @@ describe("code mode host fixtures", () => {
                 // 测试与 SessionTools 一样传递声明，避免夹具误把已声明文本当成候选。
                 return {
                   title: id,
-                  output: "",
+                  output: result.content.flatMap(block => block.type === "text" ? [block.text] : []).join("\n\n"),
                   metadata: {},
                   program: McpCatalog.programResult(result, mcpTools[id].def.outputSchema),
                 }
@@ -271,7 +271,29 @@ describe("code mode host fixtures", () => {
         // 初始化器声明的默认值为false，真实decoder为true；返回值能识别provenance是否被伪造。
         yield* describeCatalog(catalog)
         // 尚未调用工具时默认值计数必须为零，目录生成若执行 decoder 会在此直接暴露。
-        expect(defaults).toBe(0)
+        for (const enabled of [false, true]) {
+          const inputSchema: CatalogEntry["inputSchema"] = enabled
+            ? {
+                type: "object",
+                properties: { displayOnly: { type: "number" }, background: { type: "boolean" } },
+                required: ["displayOnly"],
+              }
+            : catalog[0].inputSchema
+          const result = yield* tool.execute(
+            { code: 'return await search({query:"host.count"})' },
+            {
+              ...ctx,
+              codeMode: {
+                catalog: [{ ...catalog[0], inputSchema }],
+                signal: ctx.abort,
+                begin: () => Effect.void,
+                invoke: () => Effect.die(new Error("schema search must not execute the tool")),
+              },
+            },
+          )
+          expect(JSON.parse(scriptOutput(result)).items[0].inputSchema).toEqual(inputSchema)
+          expect(defaults).toBe(0)
+        }
         for (const args of ['"42"', '{count:"42"}']) {
           const result = yield* tool.execute(
             { code: `return await tools.host.count(${args})` },
@@ -474,10 +496,10 @@ describe("code mode host fixtures", () => {
         const tool = yield* CodeModeTool.pipe(Effect.flatMap(Tool.init))
         const reviewed: unknown[] = []
         let invoked = 0
-        // 第 1024 次的新参数仍被记录，第 1025 次只在真实执行出现；重复调用同样耗费预算。
-        const result = yield* tool.execute(
+        const invoke = (suffix: string) => tool.execute(
           {
-            code: "for (let i = 0; i < 1023; i++) await tools.host.check({a:1}); await tools.host.check({a:2}); await tools.host.check({a:3}); return 7",
+            code: `for (let i = 0; i < 1023; i++) await tools.host.check({a:1});
+              await tools.host.check({a:2}); ${suffix} return 7`,
           },
           {
             ...ctx,
@@ -496,13 +518,31 @@ describe("code mode host fixtures", () => {
             },
           },
         )
+        const allowed = yield* invoke("")
+        expect(invoked).toBe(1024)
+        expect(scriptOutput(allowed)).toBe("7")
+        reviewed.length = 0
+        invoked = 0
+        const denied = yield* invoke("await tools.host.check({a:3});").pipe(Effect.exit)
         expect(reviewed).toEqual([
           { tool: "check", input: { a: 1 } },
           { tool: "check", input: { a: 2 } },
         ])
-        // 预跑只限制收集成本，真实执行仍须到达最后一次调用，不能沿用探针计数。
-        expect(invoked).toBe(1025)
-        expect(scriptOutput(result)).toBe("7")
+        expect(invoked).toBe(1024)
+        expect(Exit.isFailure(denied) && String(Cause.squash(denied.cause))).toContain("tool-call limit of 1024")
+
+        const runLoop = (count: number) => tool.execute({
+          code: `function work(n) { var sum = 0; for (var i = 0; i < n; i++) { sum++; } return sum; }
+            return work(50000) + work(${count});`,
+        }, { ...ctx, codeMode: { catalog: [], signal: ctx.abort, begin: () => Effect.void,
+          invoke: () => Effect.die(new Error("loop-only fixture must not invoke tools")),
+        } })
+        const exact = yield* runLoop(50000)
+        expect(scriptOutput(exact)).toBe("100000")
+        const over = yield* runLoop(50001).pipe(Effect.exit)
+        expect(Exit.isFailure(over) && String(Cause.squash(over.cause))).toContain("loop-iteration limit of 100000")
+        const fresh = yield* runLoop(1)
+        expect(scriptOutput(fresh)).toBe("50001")
       }),
     )
 
@@ -930,7 +970,12 @@ describe("code mode host fixtures", () => {
     })
 
     test("exposes structured content as native data and composes multiple calls", async () => {
+      let deep: Record<string, unknown> = { count: 13 }
+      for (let i = 0; i < 33; i++) deep = { child: deep }
       const tool = await build({
+        math_deep: mcpTool("deep", () => ({ content: [], structuredContent: deep })),
+        math_fields: mcpTool("fields", () => ({ content: [{ type: "text", text: "Part A" }], structuredContent: { prototype: "Part A" } }),
+          { type: "object", properties: {} }, { type: "object", properties: { prototype: { type: "string" } } }),
         math_add: mcpTool("add", (args) => ({
           content: [],
           structuredContent: { sum: (args.a as number) + (args.b as number) },
@@ -956,6 +1001,10 @@ describe("code mode host fixtures", () => {
         { tool: "math.add", status: "completed", input: { a: 1, b: 2 } },
         { tool: "math.add", status: "completed", input: { a: 3, b: 10 } },
       ])
+      const deepOutput = await Effect.runPromise(tool.execute({ code: "return await tools.math.deep()" }, ctx))
+      expect(scriptOutput(deepOutput)).toBe(JSON.stringify(deep))
+      const fields = await Effect.runPromise(tool.execute({ code: `const found = search({ query: "math.fields" }); return [found.items[0].outputSchema, await tools.math.fields()]` }, ctx))
+      expect(JSON.parse(scriptOutput(fields))).toEqual([null, "Part A"])
     })
 
     test("runs tool calls in parallel with Promise.all", async () => {

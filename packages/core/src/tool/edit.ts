@@ -149,11 +149,7 @@ const layer = Layer.effectDiscard(
               const unableToEdit = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
                 effect.pipe(
                   Effect.mapError((error) =>
-                    error instanceof FileMutation.StaleContentError
-                      ? new ToolFailure({
-                          message: "File changed after permission approval. Read it again before editing.",
-                        })
-                      : new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}` }),
+                    new ToolFailure({ message: PermissionV2.autoDeniedMessage(error) ?? `Unable to edit ${input.path}` }),
                   ),
                 )
 

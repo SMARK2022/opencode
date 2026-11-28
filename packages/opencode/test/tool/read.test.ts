@@ -433,10 +433,18 @@ describe("tool.read truncation", () => {
       expect(changed.output).not.toContain("<stub")
       expect(changed.output).toContain("line truncated to 2000 chars")
       expect((yield* exec(dir, request, { ...ctx, messages: history(changed) })).output).toContain('status="stub_same_range_visible"')
-      // 字节预算省略的正文仍不构成完整版本证明。
       yield* put(target, "x".repeat(24 * 1024 + 1))
-      const partial = yield* exec(dir, request)
-      expect((yield* exec(dir, request, { ...ctx, messages: history(partial) })).output)
+      const currentLong = yield* exec(dir, request)
+      const legacy = history(currentLong)
+      const previous = legacy[0].parts[0]
+      if (previous.type !== "tool" || previous.state.status !== "completed") throw new Error("invalid fixture")
+      const legacyRead = previous.state.metadata.read as NonNullable<typeof currentLong.metadata.read>
+      legacyRead.end = 0
+      legacyRead.returned = 0
+      previous.state.metadata.truncated = true
+      previous.state.output = currentLong.output.split("<range")[0] +
+        '<range start="1" end="0" total="1" returned="0" />\n<content>\n\n</content>\n<more offset="1" reason="byte_limit" />'
+      expect((yield* exec(dir, request, { ...ctx, messages: legacy })).output)
         .not.toContain('<stub status=')
     }),
   )
@@ -561,6 +569,19 @@ describe("tool.read truncation", () => {
       expect(emptyLines.raw).toEqual(["a"])
       expect(emptyLines.totalExact).toBe(false)
       expect(emptyLines.physicalBytesRead).toBeLessThanOrEqual(2 + 256 * 1024 + 16 * 1024)
+
+      const first = "河".repeat(7000)
+      yield* put(filePath, first + "\r\n" + content)
+      const bounded = yield* Effect.promise(async () => {
+        const opts = { offset: 1, limit: 2 }
+        const original = await readTextPage(filePath, opts)
+        const admitted = await readTextPage(filePath, { ...opts, firstLineAdmitsBytes: (bytes) => bytes <= 24_000 })
+        return { original, admitted }
+      })
+      expect(bounded.admitted.raw).toEqual([first])
+      expect(bounded.admitted.more).toBe(true)
+      expect(bounded.admitted.postWindowBytes).toBe(bounded.original.postWindowBytes)
+      expect(bounded.admitted.physicalBytesRead).toBe(bounded.original.physicalBytesRead)
     }),
   )
 
@@ -778,6 +799,27 @@ describe("tool.read truncation", () => {
       expect(result.output).toContain(`1: ${long.slice(0, 2000)}`)
       expect(result.output).toContain("line truncated to 2000")
       expect(result.metadata.truncated).toBe(false)
+
+      const first = "河".repeat(7000)
+      const filePath = path.join(dir, "long-first-line.txt")
+      yield* put(filePath, first + "\ntail\n")
+      const page = yield* exec(dir, { filePath, offset: 1, limit: 1 })
+      expect(page.program?.value).toMatchObject({ content: first, offset: 1, next: 2, truncated: true })
+      expect(page.output).toContain(`1: ${first.slice(0, 2000)}`)
+      expect(page.output).toContain("line truncated to 2000")
+      expect(page.output).not.toContain(first)
+      const tail = yield* exec(dir, { filePath, offset: 2, limit: 1 })
+      expect(tail.program?.value).toMatchObject({ content: "tail", offset: 2, truncated: false })
+      expect(tail.program?.value).not.toHaveProperty("next")
+
+      const over = path.join(dir, "cannot-page.txt")
+      yield* put(over, "x".repeat(1024 * 1024))
+      const empty = yield* exec(dir, { filePath: over, limit: 1, offset: 1 })
+      expect(empty.program?.value).toMatchObject({ type: "text-page", content: "", offset: 1, truncated: true })
+      expect(empty.program?.value).not.toHaveProperty("next")
+      expect(empty.metadata).not.toHaveProperty("read")
+      expect(empty.output).toContain('<more reason="byte_limit" />')
+      expect(empty.output).not.toContain("<more offset=")
     }),
   )
 

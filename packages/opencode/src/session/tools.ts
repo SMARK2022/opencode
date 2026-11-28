@@ -639,6 +639,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         runtimeParameters: item.runtimeParameters,
         inputSchema: ToolJsonSchema.fromTool(item),
         outputSchema: entry ? McpCatalog.schemas(entry.def).output : (item.output ?? Schema.String),
+        ...(entry && { mcpStructured: true }),
       }
     }))
   for (const item of Object.values(eligible)) {

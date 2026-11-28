@@ -1,7 +1,7 @@
 export * as TaskTool from "./task"
 
 import { ToolFailure } from "@opencode-ai/llm"
-import { ConfigProvider, DateTime, Effect, Layer, Schema, Scope } from "effect"
+import { ConfigProvider, DateTime, Effect, Layer, Schema, Scope, Struct } from "effect"
 import { AgentV2 } from "../agent"
 import { BackgroundJob } from "../background-job"
 import { Config } from "../config"
@@ -68,9 +68,16 @@ export const layer = Layer.effectDiscard(Effect.gen(function* () {
       removed: () => "Task agent guidance removed",
     })),
   })
+  const backgroundEnabled = yield* enabled.pipe(Effect.orDie)
   yield* tools.register({ [name]: Tool.make({
-    description: `${description}\n\nBackground mode returns immediately and delivers completion automatically. Do not sleep or poll; continue non-overlapping work.`,
+    description: backgroundEnabled
+      ? `${description}\n\nBackground mode returns immediately and delivers completion automatically. ` +
+        "Do not sleep or poll; continue non-overlapping work."
+      : description,
     input: Input, output: Output,
+    inputSchema: Schema.toJsonSchemaDocument(
+      backgroundEnabled ? Input : Input.mapFields(Struct.omit(["background"])),
+    ).schema,
     toModelOutput: ({ output }) => [{ type: "text", text: `task_id: ${output.task_id}\n${output.notice ? `${output.notice}\n` : ""}<task_${output.state === "running" ? "status" : "result"}>\n${output.output}\n</task_${output.state === "running" ? "status" : "result"}>` }],
     execute: (input, context) => Effect.gen(function* () {
       const agent = (yield* available).find(item => item.id === input.subagent_type)

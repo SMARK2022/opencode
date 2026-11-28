@@ -19,7 +19,6 @@ import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
 import { convertToLineEnding, detectLineEnding, normalizeLineEndings, type LineEnding } from "@/util/line-ending"
-// #518：apply_patch 加入共享 file-mutation coordinator（多文件一次性 commit + 提交前全量 recheck）
 import * as Mutation from "./file-mutation-coordinator"
 // #131：diff 展示归一行尾，隐藏纯换行变更
 
@@ -95,7 +94,6 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
     case "update": {
       // #533：canonical source 只读取一个 snapshot，定位与最终 Mutation expected 因而观察同一版本。
       const snapshot = yield* Mutation.read(afs, group.filePath)
-      // #518：proposal 阶段就拒绝 missing/目录；不能等 commit recheck 才报错，否则错误会混入 Permission 后失败路径。
       if (snapshot.version.state !== "file") return yield* Effect.fail(new Error(`Failed to read file to update: ${group.filePath}`))
       // #518：update 只接受 proposal read 观察到的 file state，目录和 missing 不进入 matcher 成功域。
       const source = Bom.split(Mutation.decode(snapshot))
@@ -130,7 +128,6 @@ const processHunkGroup = Effect.fn("ApplyPatchTool.processHunkGroup")(function* 
       const expected = [snapshot]
       if (movePath) {
         // #518：move destination 也是 proposal 的 expected state，不能只锁 source。
-        // destination 既要参与 version recheck，也要参与 canonical key 排序。
         const destination = yield* Mutation.read(afs, movePath)
         if (destination.version.state === "other") throw new Error(`Path is not a file: ${movePath}`)
         expected.push(destination)
@@ -350,17 +347,14 @@ export const ApplyPatchTool = Tool.define(
       })
 
       // Apply the changes
-      // #518：updates/editedFiles 在 execute 内填充、commit 成功后才发布；冲突路径不会留下半套事件。
       const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
       const editedFiles: string[] = []
       // INV-07：commit 锁内逐文件记录最终落盘内容，供 commit 后重算 post-formatter diff。
       // delete 无最终内容不记录；未 formatter 的文件沿用 proposal newContent（两者本就一致）。
       const finalContents = new Map<string, string>()
       const expected = fileChanges.flatMap((change) => change.expected)
-      // #518：所有 source/destination 在这里一次性交给 coordinator，避免逐 change recheck 产生 partial commit。
       // expected 保持 proposal 顺序；coordinator 内部按 canonical 字典序加锁，顺序不影响正确性。
 
-      // #518：commit 失败只能是 MutationConflict（orDie 转为 defect）；错误工具语义仍由 run 外层统一呈现。
       yield* Mutation.commit({
         fs: afs,
         expected,
@@ -371,7 +365,6 @@ export const ApplyPatchTool = Tool.define(
               case "add":
                 // Create parent directories (recursive: true is safe on existing/root dirs)
 
-                // #518：写盘在全部 target recheck 之后才发生；任一 target 冲突时这里一步都不会执行。
                 yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
                 updates.push({ file: change.filePath, event: "add" })
                 break
@@ -385,7 +378,6 @@ export const ApplyPatchTool = Tool.define(
                 if (change.movePath) {
                   // Create parent directories (recursive: true is safe on existing/root dirs)
 
-                  // #518：move 的 source/destination 都在 expected 内；两键全部 recheck 通过后才先写后删。
                   yield* afs.writeWithDirs(change.movePath, Bom.join(change.newContent, change.bom))
                   yield* afs.remove(change.filePath)
                   updates.push({ file: change.filePath, event: "unlink" })
@@ -423,7 +415,6 @@ export const ApplyPatchTool = Tool.define(
       }).pipe(Effect.orDie)
 
       // Publish file change events
-      // #518：事件在 commit 成功后发布，version conflict 不产生成功事件。
       for (const file of editedFiles) {
         yield* events.publish(FileSystem.Event.Edited, { file })
       }

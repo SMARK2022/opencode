@@ -182,7 +182,7 @@ describe("Ripgrep", () => {
       (tmp) =>
         Effect.gen(function* () {
           yield* Effect.promise(() =>
-            fs.writeFile(path.join(tmp.path, "unicode.txt"), `needle${"x".repeat(1_993)}😀\n`),
+            fs.writeFile(path.join(tmp.path, "unicode.txt"), `needle${"x".repeat(1_993)}😀${"x".repeat(70 * 1024)}\n`),
           )
 
           const matches = yield* (yield* Ripgrep.Service).grep({

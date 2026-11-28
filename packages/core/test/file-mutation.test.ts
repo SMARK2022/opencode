@@ -304,7 +304,7 @@ describe("FileMutation", () => {
     ),
   )
 
-  it.live("allows only one concurrent conditional write based on the same bytes", () =>
+  it.live("serializes submitted writes based on the same bytes", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
         const targetPath = path.join(directory, "shared.txt")
@@ -332,19 +332,19 @@ describe("FileMutation", () => {
           yield* Deferred.await(firstStarted)
           const second = yield* files
             .writeIfUnchanged({ target, expected, content: "second" })
-            .pipe(Effect.flip, Effect.forkChild)
+            .pipe(Effect.forkChild)
 
           yield* Deferred.succeed(releaseFirst, undefined)
           yield* Fiber.join(first)
-          expect(yield* Fiber.join(second)).toMatchObject({ _tag: "FileMutation.StaleContentError" })
-          expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("first")
-          expect(writes).toBe(1)
+          expect(yield* Fiber.join(second)).toMatchObject({ operation: "write" })
+          expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("second")
+          expect(writes).toBe(2)
         }).pipe(provide(directory, filesystem))
       }),
     ),
   )
 
-  it.live("rejects a conditional write when target content is already stale", () =>
+  it.live("writes and moves submitted content when the original bytes changed", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
         const targetPath = path.join(directory, "stale.txt")
@@ -354,17 +354,12 @@ describe("FileMutation", () => {
         expect(
           yield* (yield* FileMutation.Service)
             .writeIfUnchanged({ target, expected: new TextEncoder().encode("older"), content: "replacement" })
-            .pipe(Effect.flip),
-        ).toMatchObject({ _tag: "FileMutation.StaleContentError", path: target.canonical })
-        expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
+        ).toMatchObject({ operation: "write", target: target.canonical })
+        expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("replacement")
         const mutation = yield* LocationMutation.Service
         const files = yield* FileMutation.Service
         const destination = yield* mutation.resolve({ path: "destination.txt" })
         yield* Effect.promise(() => fs.writeFile(destination.canonical, "sentinel"))
-        // stale源必须在目的写入前拒绝；两端原文均不能因此改变。
-        expect(yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("older"), content: "replacement" }).pipe(Effect.flip)).toMatchObject({ _tag: "FileMutation.StaleContentError" })
-        expect(yield* Effect.promise(() => fs.readFile(targetPath, "utf8"))).toBe("current")
-        expect(yield* Effect.promise(() => fs.readFile(destination.canonical, "utf8"))).toBe("sentinel")
         // 真正Move仍调用同一个formatter并回报最终磁盘正文，而非请求片段。
         const moved = yield* files.moveIfUnchanged({ target, destination, expected: new TextEncoder().encode("current"), content: "submitted",
           format: file => Effect.promise(() => fs.writeFile(file, "formatted")).pipe(Effect.as(true)),

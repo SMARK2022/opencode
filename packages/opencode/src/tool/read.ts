@@ -9,7 +9,7 @@ import { LSP } from "@/lsp/lsp"
 import DESCRIPTION from "./read.txt"
 import { readOutlineCached, type Outline } from "./read-outline"
 // page 和 outline 共用预算与解析器，不重复扫描完整尾部。
-import { createAuxiliaryBudget, readTextPage } from "@opencode-ai/core/tool/read-lines"
+import { createAuxiliaryBudget, readTextPage, type ReadPage } from "@opencode-ai/core/tool/read-lines"
 import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
@@ -98,9 +98,21 @@ function isBlockedDevicePath(filePath: string): boolean {
 // }
 
 // 估算内容 token 数量，按文件类型使用不同的 byte/token 比率
-function estimateTokensForContent(content: string, ext: string): number {
+function estimateTokensForContent(utf8Bytes: number, ext: string): number {
   const ratio = TOKEN_BYTE_RATIOS[ext] ?? TOKEN_BYTE_RATIOS.default
-  return Math.ceil(Buffer.byteLength(content, "utf-8") * ratio)
+  return Math.ceil(utf8Bytes * ratio)
+}
+
+function readPageContent(file: ReadPage, limit: number) {
+  if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
+    return new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`)
+  }
+  const blockedFirstLine = limit > 0 && file.raw.length === 0 && file.cut && file.more
+  return {
+    content: file.raw.join("\n"),
+    blockedFirstLine,
+    continuation: !blockedFirstLine && file.more ? { next: file.offset + file.raw.length } : {},
+  }
 }
 
 function findUnexpandedFileInContext(
@@ -557,35 +569,20 @@ export const ReadTool = Tool.define<
 
       // 每次 execute 仅创建一个预算；Effect 中断同时关闭底层 Node 流。
       const auxiliaryBudget = createAuxiliaryBudget()
+      const ext = path.extname(filepath).toLowerCase().slice(1)
+      const limit = params.limit ?? DEFAULT_READ_LIMIT
       const file = yield* Effect.promise((signal) =>
         readTextPage(filepath, {
-          limit: params.limit ?? DEFAULT_READ_LIMIT,
+          limit,
+          firstLineAdmitsBytes: (bytes) => estimateTokensForContent(bytes, ext) <= MAX_CONTENT_TOKENS,
           offset: params.offset || 1,
           budget: auxiliaryBudget,
           signal,
         }),
       )
-      if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
-        return yield* Effect.fail(
-          new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
-        )
-      }
-
-      // Token 预算验证 - 根据文件类型估算 token 数
-      const content = file.raw.join("\n")
-      const ext = path.extname(filepath).toLowerCase().slice(1)
-      const estimatedTokens = estimateTokensForContent(content, ext)
-      if (estimatedTokens > MAX_CONTENT_TOKENS) {
-        const lineCount = file.count
-        // 按比例计算建议 limit，帮助用户分批读取大文件
-        const suggestedLimit = Math.floor(lineCount * (MAX_CONTENT_TOKENS / estimatedTokens))
-        return yield* Effect.fail(
-          new Error(
-            `File content (~${estimatedTokens} tokens) exceeds maximum (${MAX_CONTENT_TOKENS} tokens). ` +
-              `Use offset and limit parameters. Suggested: limit=${suggestedLimit}`,
-          ),
-        )
-      }
+      const page = readPageContent(file, limit)
+      if (page instanceof Error) return yield* Effect.fail(page)
+      const { content, blockedFirstLine } = page
 
       // #142：构造当前读区间元数据供 stub/overlap
       // #142：当前文件 size
@@ -621,10 +618,12 @@ const current: ReadRangeMeta = {
       }
       // #142：可见上下文驱动 stub，优先于 mtime 缓存
       // #142：加载可见 reads
-const visibleReads = collectVisibleReads(ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath)
+const visibleReads = blockedFirstLine ? [] : collectVisibleReads(
+        ctx.messages.filter(message => message.info.sessionID === ctx.sessionID), current.canonicalPath,
+      )
       // #142：stub 判定
 // JS 的每次调用都需要真实页面；模型可见历史的 stub 仅服务直接读取。
-const stub = ctx.executeParent ? undefined : findReadStub(visibleReads, current, file.raw.join("\n").length)
+const stub = ctx.executeParent ? undefined : findReadStub(visibleReads, current, content.length)
       if (stub) {
         // #142：可见范围 stub，避免重复灌入相同内容
         // covering 的总行数与 EOF 证明必须一起发布，沿用目标已有 totalExact。
@@ -690,6 +689,7 @@ let output = renderReadOutput({
         raw: file.raw,
         cut: file.cut,
         more: file.more,
+        continuationOffset: blockedFirstLine ? false : undefined,
         outline,
         overlap,
       })
@@ -714,13 +714,13 @@ let output = renderReadOutput({
         // 单行裁剪也会truncated，但不一定存在下一页，不能据此伪造续读偏移。
         program: { value: { type: "text-page", path: filepath, content, mime, offset: file.offset,
           totalLines: file.count, totalLinesExact: file.totalExact, truncated,
-          ...(file.more ? { next: file.offset + file.raw.length } : {}),
+          ...page.continuation,
         } },
         metadata: readToolMetadata({
           preview: file.raw.slice(0, 20).join("\n"),
           truncated,
           loaded: loaded.map((item) => item.filepath),
-          read: current,
+          ...(blockedFirstLine ? {} : { read: current }),
           display: {
             type: "file" as const,
             path: filepath,

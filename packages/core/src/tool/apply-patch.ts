@@ -313,9 +313,7 @@ const layer = Layer.effectDiscard(
                   { discard: true },
                 ) })
                 return { applied, files: patchFiles, ...(errors.length ? { errors } : {}) }
-              }).pipe(Effect.mapError(error => error instanceof FileMutation.StaleContentError
-                ? new ToolFailure({ message: `File changed before commit: ${error.path}. Read the file again and retry.` })
-                : error instanceof ToolFailure ? error : fail("patch", error)))
+              }).pipe(Effect.mapError(error => error instanceof ToolFailure ? error : fail("patch", error)))
             },
           }),
           "edit",

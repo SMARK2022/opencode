@@ -1822,11 +1822,23 @@ describe("SessionRunnerLLM", () => {
       agent.permissions.push({ action: "*", resource: "*", effect: "allow" })
     }))
     // 在真实Session/registry/runner图中注册leaf；fake模型只替代provider边界，不替代子会话执行。
-    yield* Layer.build(TaskTool.layer.pipe(Layer.provide(Layer.mock(PermissionV2.Service, {
+    const taskLayer = TaskTool.layer.pipe(Layer.provide(Layer.mock(PermissionV2.Service, {
       assert: input => Effect.sync(() => { taskAssertions.push(input) }),
     })), Layer.provide(Layer.succeed(Location.Service, {
       directory: AbsolutePath.make("/project"), project: { id: Project.ID.global, directory: AbsolutePath.make("/project") },
-    }))))
+    })))
+    for (const enabled of [false, true]) {
+      yield* Effect.scoped(Effect.gen(function* () {
+        yield* Layer.build(taskLayer.pipe(Layer.provide(Layer.succeed(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromUnknown({ OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS: String(enabled) }),
+        ))))
+        const task = (yield* registry.materialize()).definitions.find(tool => tool.name === "task")
+        expect(Object.hasOwn(task?.inputSchema.properties ?? {}, "background")).toBe(enabled)
+        expect(task?.description.includes("Background mode")).toBe(enabled)
+      }))
+    }
+    yield* Layer.build(taskLayer)
     const definitions = (yield* registry.materialize()).definitions
     expect(definitions.map(tool => tool.name)).toContain("task")
     expect(definitions.find(tool => tool.name === "task")?.description).toContain("Prompting rules")
